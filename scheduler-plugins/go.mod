@@ -5,7 +5,6 @@ go 1.23.1
 require (
 	k8s.io/component-base v0.31.1
 	k8s.io/kubernetes v1.31.1
-	sigs.k8s.io/controller-runtime v0.17.5
 )
 
 require (
