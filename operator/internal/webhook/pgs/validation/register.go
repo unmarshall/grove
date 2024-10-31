@@ -8,6 +8,7 @@ import (
 
 const webhookPath = "/webhooks/validate-podgangset"
 
+// RegisterWithManager registers the webhook with the manager.
 func (h *Handler) RegisterWithManager(mgr manager.Manager) error {
 	webhook := &admission.Webhook{
 		Handler:      h,

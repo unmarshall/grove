@@ -6,7 +6,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-const GroupName = "grove.k8s.io"
+// GroupName is the name of the group for all resources defined in this package.
+const GroupName = "core.grove.k8s.io"
 
 var (
 	// SchemeGroupVersion is group version used to register these objects
@@ -18,9 +19,9 @@ var (
 	AddToScheme = localSchemeBuilder.AddToScheme
 )
 
-// Kind takes an unqualified kind and returns back a Group qualified GroupKind
-func Kind(kind string) schema.GroupKind {
-	return SchemeGroupVersion.WithKind(kind).GroupKind()
+// Resource takes an unqualified resource and returns a Group qualified GroupResource
+func Resource(resource string) schema.GroupResource {
+	return SchemeGroupVersion.WithResource(resource).GroupResource()
 }
 
 func addKnownTypes(scheme *runtime.Scheme) error {

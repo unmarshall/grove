@@ -10,7 +10,7 @@ BINARY_DIR="${OPERATOR_GO_MODULE_ROOT}/bin"
 
 function build_ld_flags() {
   local package_path="github.com/NVIDIA/grove/operator/internal"
-  local version="$(cat "$(dirname $0)/../VERSION")"
+  local version="$(cat "${OPERATOR_GO_MODULE_ROOT}/VERSION")"
   local program_name="grove-operator"
   local build_date="$(date '+%Y-%m-%dT%H:%M:%S%z' | sed 's/\([0-9][0-9]\)$/:\1/g')"
 
