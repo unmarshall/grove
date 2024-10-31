@@ -5,7 +5,10 @@ set -o nounset
 set -o pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+OPERATOR_GO_MODULE_ROOT="$(dirname "$SCRIPT_DIR")"
+TOOLS_BIN_DIR="${SCRIPT_DIR}/tools/bin"
+
+source "${TOOLS_BIN_DIR}/kube_codegen.sh"
 
 function check_controller_gen_prereq() {
   if ! command -v controller-gen &>/dev/null; then
@@ -14,14 +17,24 @@ function check_controller_gen_prereq() {
   fi
 }
 
-function generate_deepcopy() {
-  cd "${PROJECT_DIR}/api" &&
-    controller-gen "object:headerFile=${SCRIPT_DIR}/boilerplate.go.txt,year=2024" paths="./..."
+function generate_deepcopy_defaulter() {
+  kube::codegen::gen_helpers \
+    --boilerplate "${SCRIPT_DIR}/boilerplate.go.txt" \
+    "${OPERATOR_GO_MODULE_ROOT}/api"
+}
+
+function generate_clientset() {
+  kube::codegen::gen_client \
+    --with-watch \
+    --output-dir "${OPERATOR_GO_MODULE_ROOT}/client" \
+    --output-pkg "github.com/NVIDIA/grove/operator/client" \
+    --boilerplate "${SCRIPT_DIR}/boilerplate.go.txt" \
+    "${OPERATOR_GO_MODULE_ROOT}/api"
 }
 
 function generate_crds() {
-  local output_dir="${PROJECT_DIR}/config/crd/bases"
-  local package="github.com/NVIDIA/grove/operator/api/v1alpha1"
+  local output_dir="${OPERATOR_GO_MODULE_ROOT}/config/crd/bases"
+  local package="github.com/NVIDIA/grove/operator/api/podgangset/v1alpha1"
   local package_path="$(go list -f '{{.Dir}}' "${package}")"
 
   if [ -z "${package_path}" ]; then
@@ -43,13 +56,15 @@ function generate_crds() {
 
 function main() {
   echo "> Generate..."
-  go generate "${PROJECT_DIR}/..."
+  go generate "${OPERATOR_GO_MODULE_ROOT}/..."
+
+  echo "> Generating DeepCopy and Defaulting functions..."
+  generate_deepcopy_defaulter
+
+  echo "> Generating ClientSet for PodGangSet API..."
+  generate_clientset
 
   check_controller_gen_prereq
-
-  echo "> Generate deepcopy/runtime.Object for API types..."
-  generate_deepcopy
-
   echo "> Generate CRDs..."
   generate_crds
 }
