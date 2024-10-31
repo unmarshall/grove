@@ -20,6 +20,10 @@ format: $(GOIMPORTS_REVISER)
 generate: $(CODE_GENERATOR) $(CONTROLLER_GEN)
 	@$(HACK_DIR)/generate.sh
 
+.PHONY: add-license-headers
+add-license-headers: $(GO_ADD_LICENSE)
+	@$(HACK_DIR)/add-license-headers.sh
+
 # Make targets for local development and testing
 # -------------------------------------------------------------
 .PHONY: kind-up

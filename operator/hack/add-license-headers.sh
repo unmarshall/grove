@@ -20,15 +20,22 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+echo "> Adding Apache License header to all go files where it is not present"
 
-function check_prerequisites() {
-  if ! command -v helm &> /dev/null; then
-    echo "helm is not installed. Please install helm from https://helm.sh/docs/intro/install"
-    exit 1
-  fi
-}
+YEAR="$(date +%Y)"
 
-function verify_and_install_charts() {
+# addlicense with a license file (parameter -f) expects no comments in the file.
+# boilerplate.go.txt is however also used also when generating go code.
+# Therefore we remove '//' from boilerplate.go.txt here before passing it to addlicense.
 
-}
+temp_file=$(mktemp)
+trap "rm -f $temp_file" EXIT
+sed -e "s/YEAR/${YEAR}/g" -e 's|^// *||' hack/boilerplate.go.txt > $temp_file
 
+addlicense \
+  -f $temp_file \
+  -ignore "**/*.md" \
+  -ignore "**/*.yaml" \
+  -ignore "**/*.yml" \
+  -ignore "**/Dockerfile" \
+  .

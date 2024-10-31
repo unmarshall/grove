@@ -8,6 +8,7 @@ GOLANGCI_LINT       := $(TOOLS_BIN_DIR)/golangci-lint
 GOIMPORTS_REVISER   := $(TOOLS_BIN_DIR)/goimports-reviser
 CODE_GENERATOR	    := $(TOOLS_BIN_DIR)/code-generator
 YQ					:= $(TOOLS_BIN_DIR)/yq
+GO_ADD_LICENSE      := $(TOOLS_BIN_DIR)/addlicense
 
 # default tool versions
 # -------------------------------------------------------------------------
@@ -17,6 +18,7 @@ GOLANGCI_LINT_VERSION ?= v1.60.3
 GOIMPORTS_REVISER_VERSION ?= v3.6.5
 CODE_GENERATOR_VERSION ?= $(call version_gomod,k8s.io/api)
 YQ_VERSION ?= v4.44.3
+GO_ADD_LICENSE_VERSION ?= v1.1.1
 
 export PATH := $(abspath $(TOOLS_BIN_DIR)):$(PATH)
 
@@ -58,3 +60,6 @@ $(KIND):
 $(YQ):
 	curl -Lo $(YQ) https://github.com/mikefarah/yq/releases/download/$(YQ_VERSION)/yq_$(SYSTEM_NAME)_$(SYSTEM_ARCH)
 	chmod +x $(YQ)
+
+$(GO_ADD_LICENSE):
+	GOBIN=$(abspath $(TOOLS_BIN_DIR)) go install github.com/google/addlicense@$(GO_ADD_LICENSE_VERSION)
