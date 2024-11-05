@@ -4,14 +4,32 @@ HACK_DIR            := $(REPO_ROOT)/hack
 # Include tools targets
 include $(HACK_DIR)/tools.mk
 
+.PHONY: build
+build:
+	@$(HACK_DIR)/build.sh
+
 .PHONY: lint
 lint: $(GOLANGCI_LINT)
 	@$(GOLANGCI_LINT) run -c ../.golangci.yaml ./...
 
 .PHONY: format
 format: $(GOIMPORTS_REVISER)
-	@$(HACK_DIR)/format.sh ./api/
+	@$(HACK_DIR)/format.sh ./api/ ./internal/ ./cmd/
 
 .PHONY: generate
-generate: $(CONTROLLER_GEN)
+generate: $(CODE_GENERATOR) $(CONTROLLER_GEN)
 	@$(HACK_DIR)/generate.sh
+
+.PHONY: add-license-headers
+add-license-headers: $(GO_ADD_LICENSE)
+	@$(HACK_DIR)/add-license-headers.sh
+
+# Make targets for local development and testing
+# -------------------------------------------------------------
+.PHONY: kind-up
+kind-up: $(KIND) $(YQ)
+	@$(HACK_DIR)/kind-up.sh
+
+.PHONY: kind-down
+kind-down: $(KIND)
+	@$(HACK_DIR)/kind-down.sh

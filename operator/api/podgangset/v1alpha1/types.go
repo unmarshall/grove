@@ -1,3 +1,19 @@
+// /*
+// Copyright 2024.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// */
+
 package v1alpha1
 
 import (
@@ -131,6 +147,8 @@ type PodGangStatus struct {
 	CliqueStatutes []CliqueStatus `json:"cliqueStatuses,omitempty"`
 }
 
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName={pg}
@@ -147,6 +165,7 @@ type PodGang struct {
 }
 
 // +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodGangList is a list of PodGangs.
 type PodGangList struct {
@@ -228,9 +247,13 @@ const (
 	StrictSpread NetworkPackStrategy = "Strict"
 )
 
+// GangSpreadStrategy defines the strategy for spreading the PodGangs across nodes grouped by the topologyKey.
 type GangSpreadStrategy struct {
+	// NetworkSpreadStrategy defines the strategy for spreading pods across nodes while minimizing network switch hops.
 	SpreadStrategy NetworkSpreadStrategy `json:"spreadStrategy"`
-	TopologyKey    *string               `json:"topologyKey,omitempty"`
+	// TopologyKey is the key of node labels. Nodes that have a label with this key
+	// and identical values are considered to be in the same topology.
+	TopologyKey *string `json:"topologyKey,omitempty"`
 }
 
 // PodGangSetStatus defines the status of a PodGangSet.
@@ -249,10 +272,11 @@ type PodGangSetStatus struct {
 }
 
 // +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
-// +kubebuilder:resource:shortName={pgs}
+// +kubebuilder:resource:shortName={podgangset}
 
 // PodGangSet is a set of PodGangs defining specification on how to spread and manage PodGangs and monitoring their status.
 type PodGangSet struct {
@@ -265,6 +289,7 @@ type PodGangSet struct {
 }
 
 // +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodGangSetList is a list of PodGangSets.
 type PodGangSetList struct {
