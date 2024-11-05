@@ -34,4 +34,5 @@ operator/hack/tools/*
 scheduler-plugins/hack/tools/*
 
 # binary directory for locally produced dev scheduler binaries
+operator/bin/*
 scheduler-plugins/bin/*
