@@ -23,6 +23,8 @@ set -o pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 OPERATOR_GO_MODULE_ROOT="$(dirname "$SCRIPT_DIR")"
 BINARY_DIR="${OPERATOR_GO_MODULE_ROOT}/bin"
+GOOS=${GOOS:-$(go env GOOS)}
+GOARCH=${GOARCH:-$(go env GOARCH)}
 
 function build_ld_flags() {
   local package_path="github.com/NVIDIA/grove/operator/internal"
@@ -38,8 +40,12 @@ function build_ld_flags() {
 
 function build_grove_operator() {
   local ld_flags=$(build_ld_flags)
-  echo "> Building grove-operator with ldflags: $ld_flags ..."
-  CGO_ENABLED=0 GOOS=$(go env GOOS) GOARCH=$(go env GOARCH) GO111MODULE=on \
+  printf '%s\n' "Building grove-operator with:
+   GOOS: $GOOS
+   GOARCH: $GOARCH
+   ldflags: $ld_flags ..."
+
+  CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} GO111MODULE=on \
     go build \
     -o "${BINARY_DIR}/grove-operator" \
     -ldflags "${ld_flags}" \

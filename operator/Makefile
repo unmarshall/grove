@@ -20,9 +20,17 @@ HACK_DIR            := $(REPO_ROOT)/hack
 # Include tools targets
 include $(HACK_DIR)/tools.mk
 
+# Builds grove-operator for the current platform.
 .PHONY: build
 build:
 	@$(HACK_DIR)/build.sh
+
+# Builds grove-operator for the specified platform.
+# Usage: make build-<os>-<arch>
+# Example: make build-linux-amd64, make build-darwin-amd64, make build-darwin-arm64, make build-linux-arm64
+.PHONY: build-%
+build-%:
+	@GOOS=$$(echo $* | cut -d- -f 1) GOARCH=$$(echo $* | cut -d- -f 2) $(HACK_DIR)/build.sh
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT)
@@ -49,3 +57,11 @@ kind-up: $(KIND) $(YQ)
 .PHONY: kind-down
 kind-down: $(KIND)
 	@$(HACK_DIR)/kind-down.sh
+
+# Make targets for docker images
+# -------------------------------------------------------------
+# Usage: make docker-build-<arch>
+# Example: make docker-build-amd64, make docker-build-arm64 (OS is assumed to be linux)
+.PHONY: docker-build-%
+docker-build-%:
+	@GOARCH=$$(echo $*) $(HACK_DIR)/docker-build.sh
