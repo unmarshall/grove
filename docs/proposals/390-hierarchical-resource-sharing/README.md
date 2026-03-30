@@ -217,6 +217,30 @@ type PCSGResourceSharingRule struct {
 }
 ```
 
+**Scope Naming — Open Discussion**
+
+The `Scope` enum determines how many ResourceClaim instances are created per resource:
+- **Scope A**: 1 RC per **instance** of the resource, shared across all replicas within that instance
+- **Scope B**: 1 RC per **replica** of the resource
+
+Note that a resource (PCLQ, PCSG) can have multiple instances (e.g., PCLQ `worker` is instantiated once
+per PCSG replica). Scope A creates one RC per instance — not one RC globally. The naming must convey
+this "per instance, shared across replicas" semantic clearly.
+
+Candidate naming options (to be finalized):
+
+| Option | Scope A (1 RC per instance) | Scope B (1 RC per replica) | Notes |
+|---|---|---|---|
+| A | `Shared` | `PerReplica` | Intuitive but may suggest "1 RC globally" rather than "1 per instance" |
+| B | `PerInstance` | `PerReplica` | Technically precise; reviewer concern: `PerInstance` sounds similar to `PerReplica` without context |
+| C | `AllReplicas` | `PerReplica` | "Covers all replicas" vs "per replica"; short and clear |
+| D | `SharedAcrossReplicas` or `SharedByReplicas` | `ExclusivePerReplica` | Most explicit; verbose but unambiguous |
+
+The Go code below uses `Shared` / `PerReplica` as a placeholder. The final names will be decided
+after team discussion.
+
+---
+
 Each `ResourceSharingRule` entry maps to exactly one ResourceClaim pattern: a single `ResourceClaimTemplate`
 and a `Scope` that controls how many RC instances are created. Grove creates and fully manages `ResourceClaim`
 objects directly from these specs — no intermediate `ResourceClaimTemplate` objects are created. This is because
