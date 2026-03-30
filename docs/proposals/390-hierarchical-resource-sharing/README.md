@@ -4,84 +4,171 @@
 
 - [Summary](#summary)
 - [Motivation](#motivation)
+    - [The Need for Multiple Sharing Scopes](#the-need-for-multiple-sharing-scopes)
     - [Goals](#goals)
     - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
-    - [User Stories (<em>Optional</em>)](#user-stories-optional)
-        - [Story 1: Fault-Tolerant Inference with Shadow Pods](#story-1-fault-tolerant-inference-with-shadow-pods)
+    - [User Stories](#user-stories)
+        - [Story 1: Disaggregated Inference with Multi-Level GPU Sharing](#story-1-disaggregated-inference-with-multi-level-gpu-sharing)
         - [Story 2: Multi-Stage Training Pipeline with GPU Sharing](#story-2-multi-stage-training-pipeline-with-gpu-sharing)
     - [Limitations/Risks &amp; Mitigations](#limitationsrisks--mitigations)
 - [Design Details](#design-details)
+    - [Common Types](#common-types)
+    - [PodCliqueSet-Level Resource Sharing](#podcliqueset-level-resource-sharing)
+    - [PodClique-Level Resource Sharing](#podclique-level-resource-sharing)
+    - [PodCliqueScalingGroup-Level Resource Sharing](#podcliquescalinggroup-level-resource-sharing)
+    - [ResourceClaim Naming Convention](#resourceclaim-naming-convention)
+    - [Owner References and Garbage Collection](#owner-references-and-garbage-collection)
     - [Monitoring](#monitoring)
-    - [Dependencies (<em>Optional</em>)](#dependencies-optional)
+    - [Dependencies](#dependencies)
     - [Test Plan](#test-plan)
     - [Graduation Criteria](#graduation-criteria)
-- [Implementation History (<em>Optional</em>)](#implementation-history-optional)
-- [Alternatives (<em>Optional</em>)](#alternatives-optional)
-- [Appendix (<em>Optional</em>)](#appendix-optional)
+- [Implementation History](#implementation-history)
+- [Alternatives](#alternatives)
+- [Appendix](#appendix)
 
 <!-- /toc -->
 
 ## Summary
 
-Grove provides a hierarchical and flexible Kubernetes API to describe inference and training workloads. It encodes in 
-scheduling and scaling constraints at every level of a `PodCliqueSet` (PCS). A PCS can directly contain one 
-or more `PodClique` (PCLQ) instances and/or one or more `PodCliqueScalingGroup` (PCSG) instances, where each PCSG in 
+Grove provides a hierarchical and flexible Kubernetes API to describe inference and training workloads. It encodes
+scheduling and scaling constraints at every level of a `PodCliqueSet` (PCS). A PCS can directly contain one
+or more `PodClique` (PCLQ) instances and/or one or more `PodCliqueScalingGroup` (PCSG) instances, where each PCSG in
 turn contains one or more PCLQ instances.
 
-This GREP enhances the `PodCliqueSet` API to allow sharing of cluster resources (such as GPU accelerators) amongst a 
-group of pods either at the PCLQ level or PCSG level by leveraging [ResourceClaim](https://github.com/kubernetes/api/blob/ffebe2b51dedadf6a36343b495ca26060cb7a93d/resource/v1/types.go#L741) and [ResourceClaimTemplate](https://github.com/kubernetes/api/blob/ffebe2b51dedadf6a36343b495ca26060cb7a93d/resource/v1/types.go#L1850) 
-offered via Dynamic Resource Allocation (DRA) in Kubernetes. The design enables: 
+This GREP enhances the `PodCliqueSet` API to allow sharing of cluster resources (such as GPU accelerators) amongst a
+group of pods at multiple levels of the Grove hierarchy by leveraging
+[ResourceClaim](https://github.com/kubernetes/api/blob/ffebe2b51dedadf6a36343b495ca26060cb7a93d/resource/v1/types.go#L741)
+offered via Dynamic Resource Allocation (DRA) in Kubernetes. Users declare `ResourceClaimTemplateSpec` definitions
+either as named templates at the PCS level (`ResourceClaimTemplateConfig`) or reference pre-existing Kubernetes
+`ResourceClaimTemplate` objects. Each `resourceSharing` entry references a template by name via a
+`ResourceClaimTemplateRef` with a `Scope` enum (`Shared` or `PerReplica`). External references are
+indicated by setting `isExternalRef: true`. Grove creates and manages `ResourceClaim` objects directly
+from the resolved specs. A
+`resourceSharing` field is available at three levels of the hierarchy:
 
-* Pods within a single PCLQ instance to share resources, or 
-* Pods across a subset of PCLQs within a PCSG instance to share resources, while ensuring proper isolation between replicas during scaling operations.
+* **PodCliqueSet level** — resources shared across an entire PCS or per PCS replica.
+* **PodClique level** — resources shared across an entire PCLQ or per PCLQ replica.
+* **PodCliqueScalingGroup level** — resources shared across an entire PCSG or per PCSG replica,
+  with an optional `cliqueNames` filter to target specific PodCliques.
+
+This design ensures proper isolation between replicas during scaling operations and enables composable,
+multi-level resource sharing.
 
 ## Motivation
 
-Modern ML inference and training workloads often require multiple pods to share expensive cluster resources such as GPU 
-accelerators to optimize resource utilization and reduce costs. Grove's hierarchical API (PCS → PCSG → PCLQ) provides 
-natural boundaries for defining resource sharing scopes, but currently lacks the ability to specify how resources should 
+Modern ML inference and training workloads often require multiple pods to share expensive cluster resources such as GPU
+accelerators to optimize resource utilization and reduce costs. Grove's hierarchical API (PCS → PCSG → PCLQ) provides
+natural boundaries for defining resource sharing scopes, but currently lacks the ability to specify how resources should
 be shared within these boundaries.
 
-Kubernetes DRA provides `ResourceClaim` and `ResourceClaimTemplate` APIs that enable resource sharing, but using them 
+Kubernetes DRA provides `ResourceClaim` and `ResourceClaimTemplate` APIs that enable resource sharing, but using them
 directly in Grove's pod templates presents challenges:
 
-- **ResourceClaim in pod templates**: All pods created from the template reference the same claim, which breaks isolation 
+- **ResourceClaim in pod templates**: All pods created from the template reference the same claim, which breaks isolation
   when PodCliques are instantiated multiple times across PCSG or PCS replicas.
-- **ResourceClaimTemplate in pod templates**: Each pod gets a unique ResourceClaim, preventing any sharing within the 
+- **ResourceClaimTemplate in pod templates**: Each pod gets a unique ResourceClaim, preventing any sharing within the
   desired scope (PCLQ or PCSG).
 
-Grove needs a mechanism to orchestrate resource sharing that respects its hierarchical structure—allowing resources to 
-be shared within a PCLQ instance or across a subset of PCLQs within a PCSG instance, while maintaining proper isolation 
-across different instances during scaling operations.
+Grove needs a mechanism to orchestrate resource sharing that respects its hierarchical structure — allowing resources to
+be shared at the PCS, PCLQ, or PCSG level while maintaining proper isolation across different instances during scaling
+operations.
+
+### The Need for Multiple Sharing Scopes
+
+Real-world workloads require resource sharing at different granularities within the Grove hierarchy:
+
+- **PCS `Shared`**: A resource shared across ALL pods in ALL replicas of an entire PodCliqueSet
+  (e.g. a shared storage pool).
+- **PCS `PerReplica`**: A resource shared across ALL pods within a single PCS replica.
+- **PCSG `Shared`**: A shared resource across ALL replicas of a scaling group
+  (e.g. a shared storage or interconnect resource).
+- **PCSG `PerReplica`**: An NVSwitch or interconnect resource shared across all PodCliques in a scaling group
+  replica (e.g. a leader and its workers sharing a fabric).
+- **PCLQ `Shared`**: A set of GPUs shared across all replicas of a PodClique
+  (e.g. all worker replicas in a scaling group replica share one pool of GPUs).
+- **PCLQ `PerReplica`**: A resource dedicated to a single PCLQ replica, shared by all pods within that replica.
+
+These scopes are orthogonal and composable. A single PodClique may participate in multiple scopes simultaneously.
 
 ### Goals
 
-- Enable users to define resource sharing primitives at multiple levels of Grove hierarchy, i.e. PodClique and
-  PodCliqueScalingGroup.
-- Users should be able to limit and scope resource sharing within subset of a group or within a specific level,
-  e.g. share resource between pods of a PodClique instance vs between pods of a PCSG instance, or between a subset of
-  PCLQs within a PCSG instance.
-- Enable users to reference externally created ResourceClaimTemplates to be used for a resource sharing group.
+- Enable users to define resource sharing primitives at all three levels of the Grove hierarchy
+  (PodCliqueSet, PodClique, and PodCliqueScalingGroup) via `ResourceClaimTemplateRef` entries with
+  a `Scope` enum.
+- Users should be able to scope resource sharing at the desired granularity, e.g. share resources
+  between all pods of a PodClique (`Shared`), per PCLQ replica (`PerReplica`), between
+  a subset of PCLQs within a PCSG replica (`PerReplica` with `cliqueNames`), across all PCSG replicas
+  (`Shared`), or across an entire PCS or per PCS replica.
+- Enable users to declare `ResourceClaimTemplateSpec` definitions as named templates at the PCS level
+  (internal references) or reference pre-existing Kubernetes `ResourceClaimTemplate` objects (external
+  references), avoiding spec duplication across the hierarchy.
 
 ### Non Goals
 
-* Extending `PodCliqueSet` API for users to define `ResourceClaimTemplateSpec`s.
+- Multiple pods per PCLQ replica (`replicaConfig`) — will be addressed in a separate GREP.
 
 ## Proposal
 
+### User Stories
 
+#### Story 1: Disaggregated Inference with Multi-Level GPU Sharing
 
+A platform team deploys a disaggregated inference workload with a prefill leader (PCA, 3 replicas) and prefill workers
+(PCB, 2 replicas) grouped in a scaling group. The workload requires two levels of resource sharing:
 
-### User Stories (*Optional*)
+1. **PCSG `PerReplica`**: An NVSwitch fabric claim shared across all pods in the scaling group replica
+   (leader + workers).
+2. **PCLQ `Shared`**: A GPU pool claim shared across all replicas of a PodClique — e.g. all 3
+   PCA replicas share one set of GPUs, all 2 PCB replicas share another.
 
-#### Story 1: Fault-Tolerant Inference with Shadow Pods
+_Challenge_: Without hierarchical sharing, users must either reference a single `ResourceClaim` (breaking isolation
+across PCSG replicas) or use `ResourceClaimTemplate` in the PodSpec (creating per-pod claims, preventing sharing).
 
-Dynamo wants to create shadow pods alongside every active pod that share the same set of GPU(s) to enable quick recovery from faults. When an active pod fails, the shadow pod (which has already warmed up the model on the shared GPU) can immediately take over, minimizing downtime.
+_Solution_: Grove orchestrates resource sharing via `ResourceClaimTemplateRef` entries with a scope enum:
 
-_Challenge_: Using a ResourceClaim directly in the PodClique's pod template causes all pods across all PCSG replicas to reference the same claim, breaking isolation. Using a ResourceClaimTemplate creates unique claims per pod, preventing the desired sharing between active and shadow pods within the same PCLQ instance.
+- `resourceSharing` at the PCSG level with `scope: PerReplica` creates one ResourceClaim per PCSG replica,
+  injected into all PodCliques in that replica.
+- `resourceSharing` at the PCLQ level with `scope: Shared` creates one ResourceClaim per PCLQ,
+  shared across all replicas.
 
-_Solution_: By specifying ResourceClaimTemplates at the PCLQ level via `ResourceClaimTemplateNames`, Grove creates a single ResourceClaim per PCLQ instance, allowing both active and shadow pods within that instance to share the GPU while maintaining isolation across different PCLQ instances.
+**Concrete example** of the ResourceClaim distribution:
+
+```
+PCS:
+  resourceClaimTemplates:
+    - name: RCT-GPU-POOL-PCA, spec: ...
+    - name: RCT-GPU-POOL-PCB, spec: ...
+    - name: RCT-NVSWITCH, spec: ...
+  cliques:
+    - PCA: replicas=3,
+           resourceSharing=[{name: RCT-GPU-POOL-PCA, scope: Shared}]
+    - PCB: replicas=2,
+           resourceSharing=[{name: RCT-GPU-POOL-PCB, scope: Shared}]
+  scalingGroups:
+    - SGX: {PCA, PCB}, replicas=2,
+           resourceSharing=[{name: RCT-NVSWITCH, scope: PerReplica, cliqueNames: [PCA, PCB]}]
+```
+
+The resulting ResourceClaim assignment per pod:
+
+| Pod | RC-NVSWITCH (PCSG PerReplica) | RC-GPU-POOL-PCA (PCLQ Shared) | RC-GPU-POOL-PCB (PCLQ Shared) |
+|---|---|---|---|
+| SGX-0-PCA-0 | RC-NVSWITCH-0 | RC-GPU-POOL-PCA-0 | — |
+| SGX-0-PCA-1 | RC-NVSWITCH-0 | RC-GPU-POOL-PCA-0 | — |
+| SGX-0-PCA-2 | RC-NVSWITCH-0 | RC-GPU-POOL-PCA-0 | — |
+| SGX-0-PCB-0 | RC-NVSWITCH-0 | — | RC-GPU-POOL-PCB-0 |
+| SGX-0-PCB-1 | RC-NVSWITCH-0 | — | RC-GPU-POOL-PCB-0 |
+| SGX-1-PCA-0 | RC-NVSWITCH-1 | RC-GPU-POOL-PCA-1 | — |
+| SGX-1-PCA-1 | RC-NVSWITCH-1 | RC-GPU-POOL-PCA-1 | — |
+| SGX-1-PCA-2 | RC-NVSWITCH-1 | RC-GPU-POOL-PCA-1 | — |
+| SGX-1-PCB-0 | RC-NVSWITCH-1 | — | RC-GPU-POOL-PCB-1 |
+| SGX-1-PCB-1 | RC-NVSWITCH-1 | — | RC-GPU-POOL-PCB-1 |
+
+In this example:
+- RC-NVSWITCH-0/1 are PCSG `PerReplica` claims: one per PCSG replica, shared by every pod in that replica
+- RC-GPU-POOL-PCA-0/1 are PCLQ `Shared` claims: one per PCA instance, shared by all PCA replicas within a PCSG replica
+- RC-GPU-POOL-PCB-0/1 are PCLQ `Shared` claims: one per PCB instance, shared by all PCB replicas within a PCSG replica
 
 #### Story 2: Multi-Stage Training Pipeline with GPU Sharing
 
@@ -91,7 +178,7 @@ In such a distributed training pipeline, data preprocessing pods load and transf
 
 _Challenge_: Each experiment (PCSG instance) needs its own isolated set of GPUs, but within an experiment, both preprocessing and training pods should share the same GPU devices for efficient data transfer and memory utilization. Standard GPU allocation creates exclusive claims per pod, preventing this sharing pattern. When these stages need to share GPUs for zero-copy data transfer and to avoid CPU-GPU memory copying overhead, DRA's [shareable ResourceClaims](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#shareable-resources) become essential.
 
-_Solution_: By leveraging GPU sharing technologies like [NVIDIA Multi-Process Service (MPS)](https://docs.nvidia.com/deploy/mps/index.html) for efficient GPU sharing or [CUDA IPC (Inter-Process Communication)](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#interprocess-communication) for sharing GPU memory between processes, along with techniques like [GPU Direct Storage](https://developer.nvidia.com/gpudirect-storage) for direct data paths, Grove enables this pattern through `ResourceClaimTemplateConfigs` at the PCSG level. By specifying `resourceClaimTemplateConfigs` with `cliqueNames` referencing both the preprocessing and training PCLQs, Grove creates a ResourceClaim per PCSG instance that is shared across the specified PCLQs. This enables both pod types to access the same GPU devices within each experiment while maintaining isolation across different experiments.
+_Solution_: By leveraging GPU sharing technologies like [NVIDIA Multi-Process Service (MPS)](https://docs.nvidia.com/deploy/mps/index.html) for efficient GPU sharing or [CUDA IPC (Inter-Process Communication)](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#interprocess-communication) for sharing GPU memory between processes, along with techniques like [GPU Direct Storage](https://developer.nvidia.com/gpudirect-storage) for direct data paths, Grove enables this pattern through `resourceSharing` at the PCSG level. By specifying a `PCSGResourceClaimTemplateRef` with `scope: PerReplica` and `cliqueNames` referencing both the preprocessing and training PCLQs, Grove creates a ResourceClaim per PCSG replica that is shared across the specified PCLQs. This enables both pod types to access the same GPU devices within each experiment while maintaining isolation across different experiments.
 
 ### Limitations/Risks & Mitigations
 
@@ -101,84 +188,355 @@ What are the current set of limitations or risks of this proposal? Think broadly
 
 ## Design Details
 
-### PodClique-Level Resource Sharing
-
-**API** 
+### Common Types
 
 ```go
-type PodCliqueTemplateSpec struct {
-// Name must be unique within a PodCliqueSet and is used to denote a role.
-// Once set it cannot be updated.
-// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
-Name string `json:"name"`
-...
-// ResourceClaimTemplateNames is a list of resource.ResourceClaimTemplate names which will be used to create
-// ResourceClaims that are added to the PodSpec of each core.Pod in the PodClique instance, thus allowing sharing of
-// resources such as accelerators across all pods in the PodClique. All ResourceClaims created will be completely
-// managed by Grove.
-// NOTE: This is not the same as adding ResourceClaimTemplate inside the
-// Spec.PodSpec.ResourceClaims[x].ResourceClaimTemplateName in the PodClique since that will create a unique
-// ResourceClaim for each pod in the PodClique.
-ResourceClaimTemplateNames []string `json:"resourceClaimTemplateNames,omitempty"`
-// Specification of the desired behavior of a PodClique.
-// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-Spec PodCliqueSpec `json:"spec"`
+// ResourceSharingScope defines the sharing scope.
+// +kubebuilder:validation:Enum=Shared;PerReplica
+type ResourceSharingScope string
+
+const (
+	// ResourceSharingScopeShared creates one ResourceClaim for the owning resource
+	// (PCS, PCLQ, or PCSG), shared across all replicas and pods.
+	ResourceSharingScopeShared ResourceSharingScope = "Shared"
+	// ResourceSharingScopePerReplica creates one ResourceClaim per replica, shared
+	// across all pods within that replica.
+	ResourceSharingScopePerReplica ResourceSharingScope = "PerReplica"
+)
+
+// ResourceClaimTemplateConfig defines a named ResourceClaimTemplateSpec that can be
+// referenced by ResourceClaimTemplateRef entries in resourceSharing fields.
+type ResourceClaimTemplateConfig struct {
+	// Name is a unique identifier for this template within the PodCliqueSet.
+	Name string `json:"name"`
+	// Spec is the ResourceClaimTemplate spec.
+	Spec resourcev1.ResourceClaimTemplateSpec `json:"spec"`
+}
+
+// ResourceClaimTemplateRef references a ResourceClaimTemplateSpec and defines the
+// sharing scope for the resulting ResourceClaim(s).
+type ResourceClaimTemplateRef struct {
+	// Name of the referenced template. When IsExternalRef is false (default), this must
+	// match a name in PodCliqueSetTemplateSpec.ResourceClaimTemplates. When IsExternalRef
+	// is true, this is the name of a Kubernetes ResourceClaimTemplate object.
+	Name string `json:"name"`
+	// IsExternalRef indicates that Name refers to an externally created Kubernetes
+	// ResourceClaimTemplate object rather than a PCS-level ResourceClaimTemplateConfig.
+	// +optional
+	IsExternalRef bool `json:"isExternalRef,omitempty"`
+	// Namespace of the referenced ResourceClaimTemplate. Only used when IsExternalRef
+	// is true. If empty, defaults to the namespace of the PodCliqueSet.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Scope determines the sharing granularity for the ResourceClaims created from
+	// this template.
+	Scope ResourceSharingScope `json:"scope"`
+}
+
+// PCSGResourceClaimTemplateRef extends ResourceClaimTemplateRef with a CliqueNames field
+// that scopes which PodCliques in the scaling group receive the shared ResourceClaims.
+type PCSGResourceClaimTemplateRef struct {
+	ResourceClaimTemplateRef `json:",inline"`
+	// CliqueNames limits which PodCliques in the scaling group receive the ResourceClaims.
+	// If empty, all PodCliques in the group receive them.
+	// +optional
+	CliqueNames []string `json:"cliqueNames,omitempty"`
 }
 ```
 
-To enbable resource sharing among `Pod`s within a `PodClique`, a new field `ResourceClaimTemplateNames` will be added to `PodCliqueTemplateSpec`. It is expected that users will create all relevant `ResourceClaimTemplate` prior to referencing it inside `PodCliqueTemplateSpec` and all `ResourceClaimTemplate`s will be created in the same namespace as the `PodCliqueSet` where these are referenced.
+**Scope Naming — Open Discussion**
 
-PodClique reconciler will fetch the referred `ResourceClaimTemplateNames` and for each `ResourceClaimTemplate` name it will create a `ResourceClaim`. All of the resource claims will then be configured in the `PodSpec`.
+The `Scope` enum determines how many ResourceClaim instances are created per resource:
+- **Scope A**: 1 RC per **instance** of the resource, shared across all replicas within that instance
+- **Scope B**: 1 RC per **replica** of the resource
 
-**Example:**
+Note that a resource (PCLQ, PCSG) can have multiple instances (e.g., PCLQ `worker` is instantiated once
+per PCSG replica). Scope A creates one RC per instance — not one RC globally. The naming must convey
+this "per instance, shared across replicas" semantic clearly.
 
-The following example shows how to use `ResourceClaimTemplateNames` to enable resource sharing among pods within a single PodClique instance.
+Candidate naming options (to be finalized):
 
-First, create a `ResourceClaimTemplate` that defines the GPU resources to be shared:
+| Option | Scope A (1 RC per instance) | Scope B (1 RC per replica) | Notes |
+|---|---|---|---|
+| A | `Shared` | `PerReplica` | Intuitive but may suggest "1 RC globally" rather than "1 per instance" |
+| B | `PerInstance` | `PerReplica` | Technically precise; reviewer concern: `PerInstance` sounds similar to `PerReplica` without context |
+| C | `AllReplicas` | `PerReplica` | "Covers all replicas" vs "per replica"; short and clear |
+| D | `SharedAcrossReplicas` or `SharedByReplicas` | `ExclusivePerReplica` | Most explicit; verbose but unambiguous |
+
+The Go code below uses `Shared` / `PerReplica` as a placeholder. The final names will be decided
+after team discussion.
+
+---
+
+#### ResourceClaimTemplate Referencing
+
+Real-world `ResourceClaimTemplateSpec` definitions can be verbose (GPU device requests, sharing config,
+driver parameters, etc.). Without a referencing mechanism, the same spec would be duplicated in every
+`resourceSharing` entry that needs it. To address this, the API supports two sources for claim templates:
+
+1. **Internal (PCS-level named templates)**: Declare specs once in
+   `PodCliqueSetTemplateSpec.ResourceClaimTemplates` and reference them by name. This deduplicates specs
+   within a single PCS.
+2. **External (Kubernetes ResourceClaimTemplate objects)**: Reference a pre-existing `ResourceClaimTemplate`
+   object by namespace/name. This enables cross-PCS and cross-namespace reuse, and allows platform teams
+   to manage templates centrally.
+
+There is no inline spec at the usage site — all specs are either declared at the PCS level or exist as
+external Kubernetes objects. This forces a single source of truth and prevents inconsistent copies.
+
+**Validation rules:**
+- `isExternalRef: false` (default, can be omitted) — `name` must match a `resourceClaimTemplates[].name`
+  in the PCS; `namespace` must be empty.
+- `isExternalRef: true` — `name` must reference an existing `ResourceClaimTemplate` K8s object; if
+  `namespace` is empty, defaults to the PCS namespace.
+
+**Why no intermediate ResourceClaimTemplate objects are created:** Kubernetes' built-in RCT-to-RC
+auto-creation (`resourceClaimTemplateName` in the pod spec) creates a unique ResourceClaim per pod, which
+is the opposite of sharing. For shared claims, Grove pre-creates `ResourceClaim` objects and references them
+via `resourceClaimName` in the pod spec.
+
+**Full example mixing internal and external references:**
 
 ```yaml
-apiVersion: resource.k8s.io/v1alpha3
+# --- External ResourceClaimTemplate (created by platform team) ---
+apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
-  name: gpu-claim-template
-  namespace: default
+  name: gb200-gpu-pool
+  namespace: gpu-templates
 spec:
   spec:
     devices:
       requests:
         - name: gpu
           deviceClassName: gpu.nvidia.com
-          count: 2
-      config:
-        - opaque:
-            driver: gpu.nvidia.com
-            parameters:
-              apiVersion: gpu.nvidia.com/v1alpha1
-              kind: GpuClaimParameters
-              sharing:
-                strategy: TimeSlicing
-                replicas: 4
+          count: 8
+---
+# --- PodCliqueSet using both internal and external references ---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: disagg
+  namespace: default
+spec:
+  replicas: 1
+  template:
+    resourceClaimTemplates:
+      - name: nvswitch-fabric
+        spec:
+          spec:
+            devices:
+              requests:
+                - name: nvswitch
+                  deviceClassName: nvswitch.nvidia.com
+                  count: 1
+    cliques:
+      - name: prefill-wkr
+        resourceSharing:
+          - name: gb200-gpu-pool
+            isExternalRef: true
+            namespace: gpu-templates
+            scope: Shared
+        spec:
+          roleName: prefill
+          replicas: 3
+          podSpec:
+            containers:
+              - name: prefill
+                image: nvidia/cuda:12.0-runtime
+            restartPolicy: Always
+      - name: decode-wkr
+        resourceSharing:
+          - name: gb200-gpu-pool
+            isExternalRef: true
+            namespace: gpu-templates
+            scope: Shared
+        spec:
+          roleName: decode
+          replicas: 2
+          podSpec:
+            containers:
+              - name: decode
+                image: nvidia/cuda:12.0-runtime
+            restartPolicy: Always
+    podCliqueScalingGroups:
+      - name: model-instance
+        replicas: 2
+        cliqueNames: [prefill-wkr, decode-wkr]
+        resourceSharing:
+          - name: nvswitch-fabric
+            scope: PerReplica
+            cliqueNames: [prefill-wkr, decode-wkr]
 ```
 
-Then, reference this template in your `PodCliqueSet` to enable sharing within a PodClique:
+In this example:
+- The `gb200-gpu-pool` template is managed externally by a platform team in the `gpu-templates` namespace
+- The `nvswitch-fabric` template is declared internally at PCS level
+- Both `prefill-wkr` and `decode-wkr` reference the same external GPU template (no spec duplication)
+- The PCSG references the internal NVSwitch template with `PerReplica` scope
+
+See [ResourceClaim Naming Convention](#resourceclaim-naming-convention) for the deterministic naming scheme and
+[Owner References and Garbage Collection](#owner-references-and-garbage-collection) for lifecycle semantics.
+
+### PodCliqueSet-Level Resource Sharing
+
+**API**
+
+```go
+type PodCliqueSetTemplateSpec struct {
+	// Cliques is a slice of cliques that make up the PodCliqueSet.
+	Cliques []*PodCliqueTemplateSpec `json:"cliques"`
+	...
+	// ResourceClaimTemplates declares named ResourceClaimTemplateSpecs that can be
+	// referenced by name from resourceSharing fields at any level.
+	// +optional
+	ResourceClaimTemplates []ResourceClaimTemplateConfig `json:"resourceClaimTemplates,omitempty"`
+	// ResourceSharing defines shared ResourceClaims at the PCS level. Each entry
+	// references a template (internal or external) and specifies a Scope:
+	//   - Shared: one RC for the entire PCS, shared across ALL pods in ALL replicas
+	//   - PerReplica: one RC per PCS replica, shared across ALL pods in that replica
+	// +optional
+	ResourceSharing []ResourceClaimTemplateRef `json:"resourceSharing,omitempty"`
+	...
+}
+```
+
+Two new fields are added to `PodCliqueSetTemplateSpec`:
+
+- `ResourceClaimTemplates`: Declares named `ResourceClaimTemplateSpec` definitions that can be referenced
+  by name from any `resourceSharing` field in the hierarchy. This is the single place to define internal
+  templates, avoiding spec duplication.
+- `ResourceSharing`: References templates (internal or external) with a scope. The PCS controller creates
+  the ResourceClaim objects and all child controllers (PCSG and standalone PCLQ) inject the PCS-level
+  claim references into pod specs.
+
+Scope semantics:
+- `Shared`: One RC for the entire PCS — shared by every pod across all PCS replicas, all PCSGs, and all PCLQs.
+- `PerReplica`: One RC per PCS replica — shared by every pod within that PCS replica.
+
+**Example:**
 
 ```yaml
 apiVersion: grove.io/v1alpha1
 kind: PodCliqueSet
 metadata:
-  name: shadow-pods-example
+  name: disagg
   namespace: default
 spec:
-  replicas: 2  # Creates 2 instances of the PodClique (each gets its own ResourceClaim)
+  replicas: 2
   template:
+    resourceClaimTemplates:
+      - name: shared-storage
+        spec:
+          spec:
+            devices:
+              requests:
+                - name: shared-storage
+                  deviceClassName: storage.example.com
+                  count: 1
+      - name: interconnect
+        spec:
+          spec:
+            devices:
+              requests:
+                - name: interconnect
+                  deviceClassName: nvswitch.nvidia.com
+                  count: 1
+    resourceSharing:
+      - name: shared-storage
+        scope: Shared
+      - name: interconnect
+        scope: PerReplica
     cliques:
-      - name: inference-with-shadows
-        # Reference the ResourceClaimTemplate - Grove will create one ResourceClaim per PCLQ instance
-        resourceClaimTemplateNames:
-          - gpu-claim-template
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 4
+          podSpec:
+            containers:
+              - name: worker
+                image: nvidia/cuda:12.0-runtime
+            restartPolicy: Always
+```
+
+In this example:
+- Two templates are declared once at PCS level (`shared-storage`, `interconnect`)
+- `Shared` creates 1 RC (`disagg-rct-0`) shared by ALL 8 pods across both PCS replicas
+- `PerReplica` creates 2 RCs (`disagg-rep-0-rct-1`, `disagg-rep-1-rct-1`), one per PCS replica,
+  each shared by the 4 worker pods in that replica
+
+### PodClique-Level Resource Sharing
+
+**API**
+
+```go
+type PodCliqueTemplateSpec struct {
+	// Name must be unique within a PodCliqueSet and is used to denote a role.
+	Name string `json:"name"`
+	...
+	// ResourceSharing defines shared ResourceClaims for this PodClique. Each entry
+	// references a template (internal or external) and specifies a Scope:
+	//   - Shared: one RC per PCLQ, shared by all replica pods
+	//   - PerReplica: one RC per PCLQ replica, shared by all pods within that replica
+	// NOTE: This is not the same as adding ResourceClaimTemplate inside the
+	// Spec.PodSpec.ResourceClaims[x].ResourceClaimTemplateName in the PodClique since that will
+	// create a unique ResourceClaim for each pod in the PodClique.
+	// +optional
+	ResourceSharing []ResourceClaimTemplateRef `json:"resourceSharing,omitempty"`
+	// Specification of the desired behavior of a PodClique.
+	Spec PodCliqueSpec `json:"spec"`
+}
+```
+
+To enable resource sharing among `Pod`s within a `PodClique`, a new field `ResourceSharing` is added
+to `PodCliqueTemplateSpec`. Each entry references a template by name and specifies a scope.
+
+- `Shared`: One RC per PCLQ — shared by all replica pods in that PCLQ.
+- `PerReplica`: One RC per PCLQ replica — shared by all pods within that replica.
+
+The parent controller (PCS or PCSG) processes the entries, creates the ResourceClaims, and injects the claim
+references into the PCLQ's `PodSpec`.
+
+**Example:**
+
+The following example shows how to use `resourceSharing` with `Shared` scope to share GPUs among all
+pods within a single PodClique:
+
+```yaml
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: shared-gpu-example
+  namespace: default
+spec:
+  replicas: 2
+  template:
+    resourceClaimTemplates:
+      - name: gpu-pool
+        spec:
+          spec:
+            devices:
+              requests:
+                - name: gpu
+                  deviceClassName: gpu.nvidia.com
+                  count: 2
+              config:
+                - opaque:
+                    driver: gpu.nvidia.com
+                    parameters:
+                      apiVersion: gpu.nvidia.com/v1alpha1
+                      kind: GpuClaimParameters
+                      sharing:
+                        strategy: TimeSlicing
+                        replicas: 4
+    cliques:
+      - name: inference
+        resourceSharing:
+          - name: gpu-pool
+            scope: Shared
         spec:
           roleName: inference
-          replicas: 4  # 1 primary + 3 shadow pods, all sharing the same GPUs
+          replicas: 4
           podSpec:
             containers:
               - name: inference
@@ -187,7 +545,6 @@ spec:
                 args:
                   - |
                     echo "Pod: $POD_NAME - Using shared GPU"
-                    # Model inference code here
                     sleep infinity
                 resources:
                   requests:
@@ -197,79 +554,36 @@ spec:
 ```
 
 In this example:
-- The `gpu-claim-template` defines 2 GPUs with time-slicing enabled
-- Each PodClique instance (replica) gets its own `ResourceClaim` created from the template
-- All 4 pods within each PodClique instance share the same 2 GPUs
+- The `gpu-pool` template is declared once at PCS level and referenced by name
+- The `Shared` scope creates one ResourceClaim per PodClique
+- All 4 pods within each PodClique share the same 2 GPUs (with time-slicing)
 - The 2 PCS replicas maintain isolation (different ResourceClaims, different GPUs)
-
-
 
 ### PodCliqueScalingGroup-Level Resource Sharing
 
 **API**
 
 ```go
-// ResourceClaimTemplateConfig defines a common set of resourcev1.ResourceClaimTemplate names for a set of PodCliques.
-// A ResourceClaim is created per ResourceClaimTemplate name and added to the PodSpec of each PodClique specified
-// in the CliqueNames field. This allows sharing of resources such as accelerators across all pods in the specified
-// PodCliques that are part of one PodCliqueScalingGroup instance.
-type ResourceClaimTemplateConfig struct {
-// Names is a list of resourcev1.ResourceClaimTemplate names which will be used to create ResourceClaims.
-Names []string `json:"names"`
-// CliqueNames is a list of names of PodCliques that will use the ResourceClaimTemplates specified in the Names field.
-CliqueNames []string `json:"cliqueNames,omitempty"`
-}
-```
-
-```go
-// PodCliqueScalingGroupConfig is a group of PodClique's that are scaled together.
-// Each member PodClique.Replicas will be computed as a product of PodCliqueScalingGroupConfig.Replicas and PodCliqueTemplateSpec.Spec.Replicas.
-// NOTE: If a PodCliqueScalingGroupConfig is defined, then for the member PodClique's, individual AutoScalingConfig cannot be defined.
 type PodCliqueScalingGroupConfig struct {
-// Name is the name of the PodCliqueScalingGroupConfig. This should be unique within the PodCliqueSet.
-// It allows consumers to give a semantic name to a group of PodCliques that needs to be scaled together.
-Name string `json:"name"`
-...
-// ResourceClaimTemplateConfigs is a list of ResourceClaimTemplateConfig which defines a common set of
-// resourcev1.ResourceClaimTemplate names for a set of PodCliques in the scaling group. A ResourceClaim is created per
-// ResourceClaimTemplate name and added to the PodSpec of each PodClique specified in the CliqueNames field of the
-// scaling group. This allows sharing of resources such as accelerators across all pods in the specified PodCliques
-// that are part of one PodCliqueScalingGroup instance.
-ResourceClaimTemplateConfigs []ResourceClaimTemplateConfig `json:"resourceClaimTemplateConfigs,omitempty"`
+	// Name is the name of the PodCliqueScalingGroupConfig. This should be unique within the PodCliqueSet.
+	Name string `json:"name"`
+	...
+	// ResourceSharing defines shared ResourceClaims at the PCSG level. Each entry
+	// references a template (internal or external) and specifies a Scope:
+	//   - Shared: one RC for the entire PCSG, shared across all replicas
+	//   - PerReplica: one RC per PCSG replica, shared across all PCLQs in that replica
+	// CliqueNames limits which PodCliques receive the claims (empty = all).
+	// +optional
+	ResourceSharing []PCSGResourceClaimTemplateRef `json:"resourceSharing,omitempty"`
 }
 ```
 
 **Example:**
 
-The following example demonstrates sharing resources across multiple PodCliques within a PodCliqueScalingGroup.
-
-First, create a `ResourceClaimTemplate` for shared GPUs:
-
-```yaml
-apiVersion: resource.k8s.io/v1alpha3
-kind: ResourceClaimTemplate
-metadata:
-  name: shared-gpu-template
-  namespace: default
-spec:
-  spec:
-    devices:
-      requests:
-        - name: gpu
-          deviceClassName: gpu.nvidia.com
-          count: 4
-      config:
-        - opaque:
-            driver: gpu.nvidia.com
-            parameters:
-              apiVersion: gpu.nvidia.com/v1alpha1
-              kind: GpuClaimParameters
-              sharing:
-                strategy: MPS  # NVIDIA Multi-Process Service
-                maxClients: 8
-```
-
-Then, reference it in a `PodCliqueSet` with a scaling group that shares GPUs across preprocessing and training pods:
+The following example demonstrates sharing resources across multiple PodCliques within a PodCliqueScalingGroup,
+using `PerReplica` scope so each PCSG replica gets its own isolated ResourceClaim. Note that the `coordinator`
+PCLQ is part of the scaling group but is excluded from the `cliqueNames` filter — it does not receive the
+shared GPU ResourceClaim:
 
 ```yaml
 apiVersion: grove.io/v1alpha1
@@ -280,8 +594,25 @@ metadata:
 spec:
   replicas: 1
   template:
+    resourceClaimTemplates:
+      - name: gpu-mps-pool
+        spec:
+          spec:
+            devices:
+              requests:
+                - name: gpu
+                  deviceClassName: gpu.nvidia.com
+                  count: 4
+              config:
+                - opaque:
+                    driver: gpu.nvidia.com
+                    parameters:
+                      apiVersion: gpu.nvidia.com/v1alpha1
+                      kind: GpuClaimParameters
+                      sharing:
+                        strategy: MPS
+                        maxClients: 8
     cliques:
-      # Preprocessing PodClique
       - name: data-preprocessor
         spec:
           roleName: preprocessor
@@ -295,15 +626,12 @@ spec:
                   - |
                     echo "Preprocessor pod: $POD_NAME"
                     echo "Loading data into GPU memory..."
-                    # Data preprocessing code here
                     sleep infinity
                 resources:
                   requests:
                     cpu: "2"
                     memory: "4Gi"
             restartPolicy: Always
-      
-      # Training PodClique
       - name: model-trainer
         spec:
           roleName: trainer
@@ -317,39 +645,125 @@ spec:
                   - |
                     echo "Training pod: $POD_NAME"
                     echo "Training model using preprocessed data from GPU memory..."
-                    # Training code here
                     sleep infinity
                 resources:
                   requests:
                     cpu: "4"
                     memory: "8Gi"
             restartPolicy: Always
-    
-    # Define scaling group with shared resources
-    scalingGroups:
+      - name: coordinator
+        spec:
+          roleName: coordinator
+          replicas: 1
+          podSpec:
+            containers:
+              - name: coordinator
+                image: python:3.11
+                command: ["/bin/sh", "-c"]
+                args:
+                  - |
+                    echo "Coordinator pod: $POD_NAME"
+                    echo "Orchestrating training experiment..."
+                    sleep infinity
+                resources:
+                  requests:
+                    cpu: "1"
+                    memory: "1Gi"
+            restartPolicy: Always
+    podCliqueScalingGroups:
       - name: training-experiment
-        replicas: 3  # Creates 3 training experiments
+        replicas: 3
         cliqueNames:
           - data-preprocessor
           - model-trainer
-        # Share GPUs across both preprocessing and training pods within each experiment
-        resourceClaimTemplateConfigs:
-          - names:
-              - shared-gpu-template
+          - coordinator
+        resourceSharing:
+          - name: gpu-mps-pool
+            scope: PerReplica
             cliqueNames:
               - data-preprocessor
               - model-trainer
 ```
 
 In this example:
-- The `shared-gpu-template` defines 4 GPUs with NVIDIA MPS for sharing
+- The `gpu-mps-pool` template is declared once at PCS level (4 GPUs with NVIDIA MPS)
+- The `PerReplica` scope creates one ResourceClaim per PCSG replica
 - 3 PCSG replicas create 3 independent training experiments
-- Within each experiment (PCSG instance):
+- Within each experiment (PCSG replica):
   - 2 preprocessing pods + 3 training pods = 5 total pods share the same 4 GPUs
   - All pods can access the same GPU memory space
+  - The coordinator pod does NOT receive the GPU ResourceClaim (it is not in `cliqueNames`)
 - Each of the 3 experiments maintains isolation (different ResourceClaims, different GPU sets)
 
+### ResourceClaim Naming Convention
 
+Each RC name is derived from the owning resource's Kubernetes name plus a suffix that encodes the
+allocation index (position in the `resourceSharing` list). `PerReplica` names include a `-rep-` infix
+before the replica index to prevent naming collisions (e.g., a PCS named `a-0` with `Shared` scope
+vs a PCS named `a` with `PerReplica` scope at replica 0).
+
+| Level + Scope | RC Name Format |
+|---|---|
+| PCS `Shared` | `<pcsName>-rct-<allocIndex>` |
+| PCS `PerReplica` | `<pcsName>-rep-<pcsReplicaIndex>-rct-<allocIndex>` |
+| PCLQ `Shared` | `<pclqName>-rct-<allocIndex>` |
+| PCLQ `PerReplica` | `<pclqName>-rep-<replicaIndex>-rct-<allocIndex>` |
+| PCSG `Shared` | `<pcsgName>-rct-<allocIndex>` |
+| PCSG `PerReplica` | `<pcsgName>-rep-<pcsgReplicaIndex>-rct-<allocIndex>` |
+
+The `rct-<index>` suffix identifies the position of the entry in the `resourceSharing` list.
+
+**Concrete example** — PCS `disagg` (replica 0), PCSG `model-instance` (replicas: 2), cliques:
+`prefill-wkr` (replicas: 3, PCLQ Shared at index 0), `decode-wkr` (replicas: 2, PCLQ Shared
+at index 0), PCS Shared at index 0, PCSG PerReplica at index 0:
+
+```
+PCS Shared ResourceClaim:
+  disagg-rct-0                                    → shared by ALL pods in the entire PCS
+
+PCS PerReplica ResourceClaims:
+  (none in this example — would be disagg-rep-0-rct-<index> if configured)
+
+PCSG PerReplica ResourceClaims:
+  disagg-0-model-instance-rep-0-rct-0             → shared by ALL pods in PCSG replica 0
+  disagg-0-model-instance-rep-1-rct-0             → shared by ALL pods in PCSG replica 1
+
+PCLQ Shared ResourceClaims:
+  disagg-0-model-instance-0-prefill-wkr-rct-0     → shared by all prefill-wkr pods in PCSG replica 0
+  disagg-0-model-instance-1-prefill-wkr-rct-0     → shared by all prefill-wkr pods in PCSG replica 1
+  disagg-0-model-instance-0-decode-wkr-rct-0      → shared by all decode-wkr pods in PCSG replica 0
+  disagg-0-model-instance-1-decode-wkr-rct-0      → shared by all decode-wkr pods in PCSG replica 1
+```
+
+**For standalone PodCliques** (not in a PCSG), the PCLQ resource name is `<pcs>-<pcsIndex>-<pclqTemplate>`,
+so the pattern is the same:
+
+```
+PCLQ Shared:
+  my-svc-0-frontend-rct-0    → shared by all frontend pods
+```
+
+### Owner References and Garbage Collection
+
+ResourceClaim ownership determines garbage collection behavior. All RCs are owned by the resource that
+defines the broadest scope they serve. On scale-down, explicit cleanup is performed for PerReplica RCs
+whose parent still exists.
+
+| Level + Scope | Owner | Cleanup on Scale-Down |
+|---|---|---|
+| PCS `Shared` | PCS object | GC'd when PCS is deleted |
+| PCS `PerReplica` | PCS object | Explicit cleanup when PCS replicas are scaled down |
+| PCSG `Shared` | PCSG object | GC'd when PCSG is deleted |
+| PCSG `PerReplica` | PCSG object | Explicit cleanup when PCSG replicas are scaled down |
+| PCLQ `Shared` (in PCSG) | PCSG object | Explicit cleanup when PCSG replicas are scaled down |
+| PCLQ `Shared` (standalone) | PCS object | Explicit cleanup when PCS replicas are scaled down |
+| PCLQ `PerReplica` (in PCSG) | PCSG object | Explicit cleanup when PCLQ replicas are scaled down |
+| PCLQ `PerReplica` (standalone) | PCS object | Explicit cleanup when PCLQ replicas are scaled down |
+
+**Design rationale**: Owning RCs at the PCSG/PCS level (rather than the PCLQ level) avoids depending on
+the controller-runtime cache to reflect freshly created PCLQ objects during the same reconcile. It also
+ensures that PCLQ Shared RCs survive PCLQ rolling updates — the replacement PCLQ reuses the existing
+RC rather than the old RC being garbage collected and a new one created.
 
 ### Monitoring
 
@@ -359,8 +773,8 @@ This section contains details of events, metrics, status conditions and other st
 
 ### Dependencies
 
-Dynamic Resource Allocation (DRA) is a prerequisite for this GREP since it relies on ResourceClaim and
-ResourceClaimTemplate APIs to enable resource sharing. DRA graduated to *BETA* in *v1.32* and has been promoted to *GA* since Kubernetes *v1.34*. If you are using a Kubernetes version prior to v1.34, you will need to enable the `DynamicResourceAllocation` feature gate to use this feature. For Kubernetes
+Dynamic Resource Allocation (DRA) is a prerequisite for this GREP since it relies on the ResourceClaim API
+to enable resource sharing. DRA graduated to *BETA* in *v1.32* and has been promoted to *GA* since Kubernetes *v1.34*. If you are using a Kubernetes version prior to v1.34, you will need to enable the `DynamicResourceAllocation` feature gate to use this feature. For Kubernetes
 v1.34 and above, DRA is enabled by default, and you can use this feature without any additional configuration.
 
 ### Test Plan
@@ -368,6 +782,12 @@ v1.34 and above, DRA is enabled by default, and you can use this feature without
 <!--
 For the functionality an epic (issue) should be created. Along with a sub-issue for the GREP, there should be a dedicated issue created for integration and e2e tests. This issue should have details of all scenarios that needs to be tested. Provide a link to issue(s) in this section.
 -->
+
+### Graduation Criteria
+
+## Implementation History
+
+## Alternatives
 
 ## Appendix
 
