@@ -21,11 +21,11 @@
 
 ## Summary
 
-Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (prompt processing) and **decode** (token generation) — running as separate, independently scalable components. While this improves throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling atomic, availability-preserving upgrades at the granularity of **Minimal Viable Units (MVUs)** — the smallest sets of components that must be updated in lockstep to maintain compatibility and ensure availability
+Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (context generation) and **decode** (token generation) — running as separate, independently scalable components. While this improves throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling atomic, availability-preserving software upgrades at the granularity of **Minimal Viable Units (MVUs)** — the smallest sets of components that must be updated in lockstep to maintain compatibility and ensure availability
 
 ## Motivation
 
-Disaggregated inference frameworks (vLLM, SGLang, TensorRT-LLM, etc.) decompose LLM serving across multiple networked components. This topology makes version upgrades operationally risky: a standard Kubernetes rolling update replaces pods one at a time, inevitably producing a transient state where old-version and new-version pods are running simultaneously and may communicate with each other. For disaggregated systems, this cross-version communication is not safe.
+Disaggregated inference frameworks (vLLM, SGLang, TensorRT-LLM, etc.) decompose LLM serving across multiple networked components. This decomposition makes version upgrades operationally risky: a standard Kubernetes rolling update replaces pods one at a time, inevitably producing a transient state where old-version and new-version pods are running simultaneously and may communicate with each other. For disaggregated systems, this cross-version communication is not safe.
 
 ### Why version upgrades can be incompatible in Disaggregated Inference?
 
@@ -33,7 +33,7 @@ When there is a need to upgrade to a newer version of `Prefill` and `Decode` com
 
 **KV-Cache transfer protocol** (*Frequency*: Very common)
 
-Since there is no standard versioned protocol for the lower level wire-format used for KV cache transfers between Prefill and Decode components, it can result in incompatibilities across wire-format versions. Some of the things that can/have changed across inference frameworks versions are as follows:
+Since there is no standard versioned protocol for the KV cache transfers between Prefill and Decode components, it can result in incompatibilities across wire-format versions. Some of the things that can/have changed across inference frameworks versions are as follows:
 
 *dtype (data type)*
 
@@ -47,9 +47,9 @@ KV-cache tensors have multiple logical dimensions: *[num_layers, num_heads, seq_
 
 Paged attention divides the KV-cache into fixed-size blocks (pages), e.g., 16 or 32 tokens per block. The block size is baked into how memory is allocated and how block-table indices are communicated. If prefill was paged with block size 16 and decode expects block size 32, the block-table offsets the prefill sends point to wrong memory addresses on the decode side, causing memory corruption or out-of-bounds reads.
 
-**RPC / wire protocol** *(Frequency: Common)*
+**RPC protocol** *(Frequency: Common)*
 
-The serialisation format (*protobuf schema, msgpack frames*) of scheduler <-> worker (*intra-node communication between a Prefill/Decode node's local scheduler and its GPU workers*) messages and the disaggregation-specific handshake (*request metadata, sequence IDs, block tables - cross-node message the prefill node's scheduler sends to the decode node's scheduler*) can change between versions leading to either a silent error (*Decode node can misparse requests*) or a hard crash because either side (*Prefill/Decode*) does not have a version-negotiation step.
+The serialisation format (*protobuf schema, msgpack frames*) of scheduler <-> worker (*inter-node communication between a Prefill/Decode node's local scheduler and its GPU workers*) messages and the disaggregation-specific handshake (*request metadata, sequence IDs, block tables - cross-node message the prefill node's scheduler sends to the decode node's scheduler*) can change between versions leading to either a silent error (*Decode node can misparse requests*) or a hard crash because either side (*Prefill/Decode*) does not have a version-negotiation step.
 
 **Attention Backend & Kernel ABI ** *(Frequency: Occasional)*
 
@@ -58,10 +58,6 @@ Flash-Attention, Paged-Attention, and custom CUDA kernels expose internal data s
 **Quantisation/compression format** *(Frequency: Occasional)*
 
 Modern models are large. Storing weights and KV-cache in full precision (BF16, 32 bits) consumes enormous GPU memory.  Quantisation  reduces this by storing values in lower-bit formats (e.g., FP8, AWQ, GPTQ) which pack multiple values into single words using a bit layout defined by the framework implementation, not a standard. A version change that alters packing (different FP8 variant, different group size) means decode dequantises correctly-received bytes using the wrong codebook — every value is numerically wrong.
-
-### Why Aggregated Inference Is Not Affected
-
-In **aggregated** (monolithic) inference, prefill and decode execute **within the same process on the same pod**. KV-cache tensors stay in GPU SRAM and are accessed via in-process pointers — they are never serialised and transmitted over a network. A rolling update replaces one pod at a time, and each pod is always a self-consistent, single-version unit. There is never a moment when an old-version prefill hands off to a new-version decode, so backward compatibility across any disaggregation protocol is simply not a concern.
 
 ### The Need for Coherent (MVU-based) Rolling Updates
 
@@ -81,7 +77,7 @@ The solution is to treat a **Minimal Viable Unit (MVU)** — the smallest set of
 
 ### Non-Goals
 
-* Re-use of resources during update of MVUs due to lack of support from schedulers to handle resource reservations.
+* Re-use of topology optimized resources during MVU update using resource reservations.
 * Support for `maxSurge` and `maxUnavailable` like functionality.
 
 ## Proposal
@@ -104,11 +100,20 @@ As a platform engineer managing a large-scale disaggregated inference fleet with
 
 #### Story 3
 
-As an ML infrastructure team member deploying a disaggregated inference system where the prefill tier and decode tier are updated on different release cadences, I need to independently update only the decode `PodClique` (e.g., to pick up a memory-efficiency fix) without touching the prefill `PodClique`. The system should recognise that this is a compatible, single-component update, update decode pods incrementally (up to a configurable concurrency limit), and leave prefill pods untouched — all without requiring a full MVU replacement.
+As an ML infrastructure team member deploying a disaggregated inference system where the prefill tier and decode tier are updated on different release cadences, I need to independently update only the decode `PodClique` (e.g., to pick up a memory-efficiency fix) without touching the prefill `PodClique`. The system should recognise that this is a backward compatible, single-component update, update decode pods incrementally (up to a configurable concurrency limit), and leave prefill pods untouched — all without requiring a full MVU replacement.
 
 
+## Design Details
 
-### Sample 1
+<!-- 
+This section may include API specifications (GO API/YAML) and certain flow control diagrams that will help reviewers to know how the proposal will be implemented.
+-->
+
+### MVU and Gang-Scheduling
+
+...
+
+#### Sample 1
 
 Consider the following example:
 `PodCliqueSet`:
@@ -453,13 +458,17 @@ pclq-cv1: revision: 1
 pclq-cv2: revision: 4 <-active
 pclq-cv2: revision: 7
 
-### Limitations/Risks & Mitigations
+### PodCliqueVersions
 
-<!-- 
-What are the current set of limitations or risks of this proposal? Think broadly by considering the impact of the changes proposed on kubernetes ecosystem. Optionally mention ways to mitigate these.
--->
+### Rolling Update Algorithm
 
-## Design Details
+### Rollback and Rollforward
+
+### Concurrency Controls
+
+### Handling scale-outs and scale-ins
+
+### Status and observability
 
 ```go
 // PodCliqueSetStatus defines the status of a PodCliqueSet.
@@ -513,11 +522,11 @@ type PodCliqueVersionStatus struct {
 }
 ```
 
-<!-- 
-This section may include API specifications (GO API/YAML) and certain flow control diagrams that will help reviewers to know how the proposal will be implemented.
--->
+### Limitations/Risks & Mitigations
 
-`
+<!-- 
+What are the current set of limitations or risks of this proposal? Think broadly by considering the impact of the changes proposed on kubernetes ecosystem. Optionally mention ways to mitigate these.
+-->
 
 ### Monitoring
 
