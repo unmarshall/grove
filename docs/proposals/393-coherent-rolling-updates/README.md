@@ -59,25 +59,20 @@ Flash-Attention, Paged-Attention, and custom CUDA kernels expose internal data s
 
 Modern models are large. Storing weights and KV-cache in full precision (BF16, 32 bits) consumes enormous GPU memory.  Quantisation  reduces this by storing values in lower-bit formats (e.g., FP8, AWQ, GPTQ) which pack multiple values into single words using a bit layout defined by the framework implementation, not a standard. A version change that alters packing (different FP8 variant, different group size) means decode dequantises correctly-received bytes using the wrong codebook — every value is numerically wrong.
 
-### The Need for Coherent (MVU-based) Rolling Updates
-
-The solution is to treat a **Minimal Viable Unit (MVU)** — the smallest set of interdependent components that must always be version compatible— as an atomic update unit. Only pods within the same MVU communicate across the disaggregation boundary. By updating all pods in an MVU together rather than individually, the system avoids mixed-version communication entirely.
-
 ### Goals
 
-* Enable rolling updates at the granularity of **Minimal Viable Units** (a.k.a **MVU**) — minimal sets of interdependent components that must be updated together in lockstep to maintain compatibility.
-* It should be possible for each **MVU** to be gang-scheduling unit.
-* Preserve `PodCliqueSet` availability during rolling updates while enforcing compatibility boundaries across all
-  components within each update unit.
-* Maintain a revision history of `PodClique` versions to support rollback and roll-forward operations.
+* Enable rolling updates at the granularity of minimal sets of interdependent components that must be updated together in lockstep to maintain compatibility.
+* It should be possible to gang-schedule each set of compatible interdependent components.
+* Preserve `PodCliqueSet` availability during rolling updates to serve incoming traffic with sets of compatible interdependent components.
+* Maintain a configurable revision history limit of `PodClique` versions to support rollback and roll-forward operations.
 * Provide user-configurable concurrency control to limit the number of `PodCliqueSet` replicas that can be
   updated simultaneously.
-* Provide user-configurable concurrency control to limit the number of `Minimal Viable Units` that can be updated simultaneously within the same `PodCliqueSet` replica.
-* Support `scale-out` and `scale-in` of scale sub-resources (`PodClique`, `PodCliqueScalingGroup` and `PodCliqueSet`) during update of MVUs.
+* Provide user-configurable concurrency control to accelerate update of interdependents component sets within a `PodCliqueSet` replica.
+* Support `scale-out` and `scale-in` of scale sub-resources (`PodClique`, `PodCliqueScalingGroup` and `PodCliqueSet`) during rolling update.
 
 ### Non-Goals
 
-* Re-use of topology optimized resources during MVU update using resource reservations.
+* Re-use of topology optimized resources during rolling update using resource reservations.
 * Support for `maxSurge` and `maxUnavailable` like functionality.
 
 ## Proposal
@@ -85,6 +80,14 @@ The solution is to treat a **Minimal Viable Unit (MVU)** — the smallest set of
 <!-- 
 Contains the specifics of the proposal. Sufficient details should be provided to help reviewers clearly understand the proposal. It should not include API design, low level design and implementation details which should be mentioned under 'Design Details' section instead.
 -->
+
+The GREP introduces a new construct called the **Minimal Viable Unit** (MVU): the smallest set of interdependent components that must remain version-compatible and is dynamically formed as a single atomic update unit. 
+
+For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic. 
+
+Only pods within the same MVU communicate across the disaggregation boundary. By updating all pods in an MVU together rather than individually, the system avoids mixed-version communication entirely. Consequently, it is necessary that each MVU needs to be gang-scheduled.
+
+This GREP also introduces versioning of PodCliques that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operation.
 
 ### User Stories
 
@@ -102,6 +105,11 @@ As a platform engineer managing a large-scale disaggregated inference fleet with
 
 As an ML infrastructure team member deploying a disaggregated inference system where the prefill tier and decode tier are updated on different release cadences, I need to independently update only the decode `PodClique` (e.g., to pick up a memory-efficiency fix) without touching the prefill `PodClique`. The system should recognise that this is a backward compatible, single-component update, update decode pods incrementally (up to a configurable concurrency limit), and leave prefill pods untouched — all without requiring a full MVU replacement.
 
+### Limitations/Risks & Mitigations
+
+<!-- 
+What are the current set of limitations or risks of this proposal? Think broadly by considering the impact of the changes proposed on kubernetes ecosystem. Optionally mention ways to mitigate these.
+-->
 
 ## Design Details
 
@@ -109,9 +117,10 @@ As an ML infrastructure team member deploying a disaggregated inference system w
 This section may include API specifications (GO API/YAML) and certain flow control diagrams that will help reviewers to know how the proposal will be implemented.
 -->
 
-### MVU and Gang-Scheduling
 
-...
+### PodCliqueVersions
+
+### Rolling Update Algorithm
 
 #### Sample 1
 
@@ -207,13 +216,14 @@ PodGangs: `{1P, 1D, 5F}`, 5 * `{P}` , 2 * `{D}`
 A rolling update is triggered at this stage.
 
 Case #1: Only frontend is updated
+
 A new `PodCliqueVersion` will be created for Frontend. Let's call this `Fv1`.
 At the start of the update state of PodGangs is: `{1P, 1D, 5F}, 5 * {P} , 2 * {D}`
-Since only the FrontEnd gets updated, it is assumed that this is a backward compatible update. The no of replicas in FrontEnd PCLQ to update is defined by the MinReplicas as defined in FrontEnd PCLQ.  That will form the minimum unit for update. In the above example it is 2.
+Since only the FrontEnd gets updated, it is assumed that this is a backward compatible update. The number of replicas in FrontEnd PCLQ to update is defined by the MinReplicas as defined in FrontEnd PCLQ.  That will form the minimum unit for update. In the above example it is 2.
 PodGangs:
-Step1:  `{1P, 1D, 3F, 2 * Fv1}`, `5 * {P}` , `2 * {D}`
-Step2:  `{1P, 1D, 1F, 4 * Fv1}`, `5 * {P}` , `2 * {D}`
-Step3:  `{1P, 1D, 5Fv1}`, `5 * {P}` , `2 * {D}`
+- Step1:  `{1P, 1D, 3F, 2 * Fv1}`, `5 * {P}` , `2 * {D}`
+- Step2:  `{1P, 1D, 1F, 4 * Fv1}`, `5 * {P}` , `2 * {D}`
+- Step3:  `{1P, 1D, 5Fv1}`, `5 * {P}` , `2 * {D}`
 
 Since FrontEnd is a standalone PCLQ no new PodGangs are created which effectively means that the minimum viable unit to update (in this case 2 units of Frontend) are not gang scheduled but remain part of the original podgang.
 
@@ -227,12 +237,12 @@ A new `PodCliqueVersion` will be created for Prefill worker and leader. Let's ca
 At the start of the update state of PodGangs is: `{1P, 1D, 5F}, 5 * {P} , 2 * {D}`
 Since only the Prefill PCLQs gets updated, it is assumed that this is a backward compatible update.
 PodGangs:
-Step1: `{1D, 5F}, 5 * {P} , 2 * {D}`, `1 * {Pv1}`
-Step2:  `{1D, 5F}, 4 * {P} , 2 * {D}`, `2 * {Pv1}`
-Step3:  `{1D, 5F}, 3 * {P} , 2 * {D}`, `3 * {Pv1}`
-Step4: `{1D, 5F}, 2 * {P} , 2 * {D}`, `4 * {Pv1}`
-Step5: `{1D, 5F}, 1 * {P}, 2 * {D}`, `5 * {Pv1}`
-Step6: `{1D, 5F}, 2 * {D}`, `6 * {Pv1}`
+- Step1: `{1D, 5F}, 5 * {P} , 2 * {D}`, `1 * {Pv1}`
+- Step2:  `{1D, 5F}, 4 * {P} , 2 * {D}`, `2 * {Pv1}`
+- Step3:  `{1D, 5F}, 3 * {P} , 2 * {D}`, `3 * {Pv1}`
+- Step4: `{1D, 5F}, 2 * {P} , 2 * {D}`, `4 * {Pv1}`
+- Step5: `{1D, 5F}, 1 * {P}, 2 * {D}`, `5 * {Pv1}`
+- Step6: `{1D, 5F}, 2 * {D}`, `6 * {Pv1}`
 
 
 
@@ -243,31 +253,34 @@ At the start of the update state of PodGangs is: `{1P, 1D, 5F}, 5 * {P} , 2 * {D
 
 PodGangs:
 
-Initial: `{1P, 1D, 5F}`, `5 * {P}` , `2 * {D}`
+- Initial: `{1P, 1D, 5F}`, `5 * {P}` , `2 * {D}`
 
-Step1: `{1P, 1D, 5F}`, `5 * {P}` , `2 * {D}`
-Step2: `{1P, 1D, 5F}`, `3 * {P}` , `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`
-Step3: `{1P, 5F}`, `3 * {P}` , `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, 
+- Step1: `{1P, 1D, 5F}`, `5 * {P}` , `2 * {D}`
+- Step2: `{1P, 1D, 5F}`, `3 * {P}` , `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`
+- Step3: `{1P, 5F}`, `3 * {P}` , `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, 
 `{4F}`, `2 * {P}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1}`
 `{4F}`, `1 * {P}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1}`, `{1Pv1}`
 `{4F}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1, 1Dv1}`, `{1Pv1}`, `{1Pv1}`, `{1Pv1}`
 
 
 
-Case #3: All PodCliques are updated
+Case #4: All PodCliques are updated
 
 A new `PodCliqueVersion` will be created for Prefill and Decode. Let's call this `Pv1`, `Dv1` and `Fv1`.
-At the start of the update state of MVUs is: `{1P, 1D, 4F}, 5 * {P} , 2 * {D}`
+At the start of the update state of PodGangs is: `{1P, 1D, 5F}, 5 * {P} , 2 * {D}`
 
-`{1P, 1D, 4F}`, `5 * {P}` , `2 * {D}`
-`{3F}`, `5 * {P}` , `2 * {D}`, `{1Pv1, 1Dv1, 1Fv1}`
-`{2F}`, `4 * {P}` , `1 * {D}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`
-`2 * {P}` , `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Fv1}`
-`1 * {P}` , `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Fv1}`, `{1Pv1}`
-`{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1, 1Fv1}`, `{1Pv1}`, `{1Pv1}`
+- `{1P, 1D, 5F}`, `5 * {P}` , `2 * {D}`
+- `{3F}`, `5 * {P}` , `2 * {D}`, `{1Pv1, 1Dv1, 2Fv1}`
+- `{1F}`, `4 * {P}` , `1 * {D}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`
+- `3 * {P}` , `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`
+- `2 * {P}` , `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1}`
+- `1 * {P}` , `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1}`, `{1Pv1}`
+- `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1}`, `{1Pv1}`, `{1Pv1}`
+
+### Rollback and Rollforward
 
 #### Sample 2
-
+```
 PCS:
 pclq-av1, pclq-bv1, pclq-cv1
 pcsg-x:
@@ -457,12 +470,7 @@ pclq-bv3: revision: 7
 pclq-cv1: revision: 1
 pclq-cv2: revision: 4 <-active
 pclq-cv2: revision: 7
-
-### PodCliqueVersions
-
-### Rolling Update Algorithm
-
-### Rollback and Rollforward
+```
 
 ### Concurrency Controls
 
@@ -521,12 +529,6 @@ type PodCliqueVersionStatus struct {
     ScheduledReplicas int32  `json:"scheduledReplicas"`
 }
 ```
-
-### Limitations/Risks & Mitigations
-
-<!-- 
-What are the current set of limitations or risks of this proposal? Think broadly by considering the impact of the changes proposed on kubernetes ecosystem. Optionally mention ways to mitigate these.
--->
 
 ### Monitoring
 
