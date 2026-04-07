@@ -77,10 +77,6 @@ Modern models are large. Storing weights and KV-cache in full precision (BF16, 3
 
 ## Proposal
 
-<!-- 
-Contains the specifics of the proposal. Sufficient details should be provided to help reviewers clearly understand the proposal. It should not include API design, low level design and implementation details which should be mentioned under 'Design Details' section instead.
--->
-
 The GREP introduces a new construct called the **Minimal Viable Unit** (MVU): the smallest set of interdependent components that must remain version-compatible and is dynamically formed as a single atomic update unit. 
 
 For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic. 
@@ -113,12 +109,29 @@ What are the current set of limitations or risks of this proposal? Think broadly
 
 ## Design Details
 
-<!-- 
-This section may include API specifications (GO API/YAML) and certain flow control diagrams that will help reviewers to know how the proposal will be implemented.
--->
+### Spec Versioning
+
+Currently `PodCliqueSet` does not maintain its current revision and history of revisions  and its child resources (specifically `PodClique`)
 
 
-### PodCliqueVersions
+
+```go
+// PodCliqueVersion captures the 
+type PodCliqueVersion struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec              PodCliqueVersionSpec `json:"spec"`
+}
+
+type PodCliqueVersionSpec struct {
+    PodSpec  corev1.PodSpec `json:"podSpec"`
+}
+```
+
+naming convention: `<pcs>-<pclq>-v<revision>`
+revision label: `grove.io/revision`
+
+
 
 ### Rolling Update Algorithm
 
@@ -292,7 +305,7 @@ only pclq-a gets updated.
 
 pcs revision: 2
 pcs maxRevision: 2
-revision-history: 2: [1, 1, 1], [2, 1, 1]
+revision-history: [1, 1, 1], [2, 1, 1]
 pclq-av1: revision: 1
 pclq-av2: revision: 2 <- active
 pclq-bv1: revision: 1 <- active
