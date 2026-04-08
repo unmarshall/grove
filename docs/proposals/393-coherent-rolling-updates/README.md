@@ -77,11 +77,11 @@ Modern models are large. Storing weights and KV-cache in full precision (BF16, 3
 
 ## Proposal
 
-The GREP introduces a new construct called the **Minimal Viable Unit** (MVU): the smallest set of interdependent components that must remain version-compatible and is dynamically formed as a single atomic update unit. 
+The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of MinAvailable number of pods from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
 
-For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic. 
+For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
 
-Only pods within the same MVU communicate across the disaggregation boundary. By updating all pods in an MVU together rather than individually, the system avoids mixed-version communication entirely. Consequently, it is necessary that each MVU needs to be gang-scheduled.
+If pods in different PodCliques can’t communicate safely across disaggregation boundaries because their software versions are incompatible, updating all pods in an MVU as a unit (rather than individually) eliminates mixed-version communication. Therefore, each MVU must be gang-scheduled.
 
 This GREP also introduces versioning of PodCliques that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operation.
 
@@ -109,31 +109,7 @@ What are the current set of limitations or risks of this proposal? Think broadly
 
 ## Design Details
 
-### Spec Versioning
-
-Currently `PodCliqueSet` does not maintain its current revision and history of revisions  and its child resources (specifically `PodClique`)
-
-
-
-```go
-// PodCliqueVersion captures the 
-type PodCliqueVersion struct {
-    metav1.TypeMeta   `json:",inline"`
-    metav1.ObjectMeta `json:"metadata,omitempty"`
-    Spec              PodCliqueVersionSpec `json:"spec"`
-}
-
-type PodCliqueVersionSpec struct {
-    PodSpec  corev1.PodSpec `json:"podSpec"`
-}
-```
-
-naming convention: `<pcs>-<pclq>-v<revision>`
-revision label: `grove.io/revision`
-
-
-
-### Rolling Update Algorithm
+### MVUs and gang-scheduling
 
 #### Sample 1
 
@@ -290,7 +266,27 @@ At the start of the update state of PodGangs is: `{1P, 1D, 5F}, 5 * {P} , 2 * {D
 - `1 * {P}` , `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1}`, `{1Pv1}`
 - `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 2Fv1}`, `{1Pv1, 1Dv1, 1Fv1}`, `{1Pv1}`, `{1Pv1}`, `{1Pv1}`
 
-### Rollback and Rollforward
+### PCS rollback and rollforward
+
+Currently `PodCliqueSet` does not maintain its current revision and history of revisions  and its child resources (specifically `PodClique`)
+
+
+
+```go
+// PodCliqueVersion captures the 
+type PodCliqueVersion struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec              PodCliqueVersionSpec `json:"spec"`
+}
+
+type PodCliqueVersionSpec struct {
+    PodSpec  corev1.PodSpec `json:"podSpec"`
+}
+```
+
+naming convention: `<pcs>-<pclq>-v<revision>`
+revision label: `grove.io/revision`
 
 #### Sample 2
 ```
@@ -485,9 +481,9 @@ pclq-cv2: revision: 4 <-active
 pclq-cv2: revision: 7
 ```
 
-### Concurrency Controls
+### Update concurrency
 
-### Handling scale-outs and scale-ins
+### Handling scale-outs and scale-ins during update
 
 ### Status and observability
 
