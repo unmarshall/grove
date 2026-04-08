@@ -75,6 +75,17 @@ Modern models are large. Storing weights and KV-cache in full precision (BF16, 3
 * Re-use of topology optimized resources during rolling update using resource reservations.
 * Support for `maxSurge` and `maxUnavailable` like functionality.
 
+## Abbreviations
+
+Throughout this proposal we will be using the Grove custom resource short forms for brevity:
+
+| Long Form             | Short Form |
+| --------------------- | ---------- |
+| PodCliqueSet          | PCS        |
+| PodCliqueScalingGroup | PCSG       |
+| PodClique             | PCS        |
+| PodGang               | PG         |
+
 ## Proposal
 
 The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of MinAvailable number of pods from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
@@ -109,12 +120,52 @@ What are the current set of limitations or risks of this proposal? Think broadly
 
 ## Design Details
 
-### MVUs and gang-scheduling
+### Gang scheduling during initial deployment of PCS
 
-#### Sample 1
+<TODO>
 
-Consider the following example:
-`PodCliqueSet`:
+### MVUs and gang-scheduling during update
+
+A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  An MVU consist of `MinAvailable` replicas of each of the PCLQ's that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU can be gang scheduled.
+
+#### Rules of MVU gang-scheduling
+
+**For standalone PodCliques**
+If one or more standalone PCLQs get updated then following rules will be followed to determine if the newer version of Pods for these PCLQs will get new PGs.
+
+| Case# | Description                                                  | Gang Scheduling behavior                                     |
+| ----- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| 1     | There is only one standalone PCLQ with minAvailable == 1     | No new PG will be created. New versions of PCLQ replicas will be replaced in their original PG |
+| 2     | There is only one standalone PCLQ with minAvailable > 1      | One or more new PGs will be created with `minAvailable` replicas of the PCLQ in each PG |
+| 3     | There are more than one standalone PCLQ  with minAvailable >= 1 | One or more new PGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
+
+**For PodCliques belonging to PodCliqueScalingGroups**
+<TODO>
+
+| Case# | Description | Gang Scheduling behavior |
+| ----- | ----------- | ------------------------ |
+|       |             |                          |
+|       |             |                          |
+|       |             |                          |
+
+#### MVU update flow
+
+<TODO>
+
+#### Illustration by example
+
+To illustrate how MVUs are carved out from the child resources of a `PodCliqueSet`, consider a `PodCliqueSet` representing a typical disaggregated inference application, composed of the following PodCliques:
+
+* `FrontEnd` - handles request ingestion, tokenization, KV cache routing, and load balancing.
+* `Prefill Leader` - handles batch coordination, KV cache orchestration, sequence splitting, and completion signaling.
+* `Prefill Worker` - handles KV cache population and tensor parallel compute.
+* `Decode Leader` - handles step orchestration, sampling, and output streaming.
+* `Decode Worker` - handles forward pass, KV cache updates, and activation sync.
+
+There are two `PodCliqueScalingGroups` -
+
+* `Prefill` - comprising of `Prefill Leader` and `Prefill Worker` PodCliques.
+* `Decode` - comprising of `Decode Leader` and `Decode Worker` PodCliques.
 
 ```yaml
 apiVersion: grove.io/v1alpha1
@@ -127,8 +178,8 @@ spec:
     cliques:
       - name: frontend
         spec:
-          replicas: 3
-          minAvailable: 2
+          replicas: 1
+          minAvailable: 1
           podSpec:
             containers:
               - name: frontend
@@ -139,6 +190,7 @@ spec:
       - name: pleader
         spec:
           replicas: 1
+          minAvailable: 1
           podSpec:
             containers:
               - name: prefill
@@ -148,7 +200,8 @@ spec:
                     cpu: 10m
       - name: pworker
         spec:
-          replicas: 1
+          replicas: 3
+          minAvailable: 2
           podSpec:
             containers:
               - name: prefill
@@ -159,6 +212,7 @@ spec:
       - name: dleader
         spec:
           replicas: 1
+          minAvailable: 1
           podSpec:
             containers:
               - name: decode
@@ -168,7 +222,8 @@ spec:
                     cpu: 10m
       - name: dworker
         spec:
-          replicas: 1
+          replicas: 4
+          minAvailable: 2
           podSpec:
             containers:
               - name: decode
@@ -178,29 +233,71 @@ spec:
                     cpu: 10m
     podCliqueScalingGroups:
       - name: prefill
+        minAvailable: 1
+        replicas: 1
         cliqueNames:
           - pleader
           - pworker
       - name: decode
+        minAvailable: 1
+        replicas: 1
         cliqueNames:
           - dleader
           - dworker
 ```
 
-At the time of creation: `1P + 1D + 3F`
-`minAvailable` for P, D = 1 and F = 2
-PCSG : {P, D}
-PCLQ: F
-Initial PodGang: `{1P, 1D, 3F}`
+Prior to update, replicas of each of the child resources of the `disagg-serving` PCS is as shown in the resource YAML above. The initial set of `PodGang`s that are created have the following composition:
 
-Scaling event: +5P
-PodGangs: `{1P, 1D, 3F}`, 5 * `{P}`
+*At time T1:*
 
-Scaling event: +2D
-PodGangs: `{1P, 1D, 3F}`, 5 * `{P}` , 2 * `{D}`
+```
+PodGang-1: {  # this is the base PodGang that must be scheduled
+  frontend (F): 1 Pod,
+  prefill (P): { prefill-leader: 1 Pod, prefill-worker: 3 Pods (minAvailable=2) },
+  decode (D): { decode-leader:  1 Pod, decode-worker: 4 Pods (minAvailable=2) },
+}
+# In short represented as {1F, 1P, 1D}
+```
 
-Scaling event: +2F
-PodGangs: `{1P, 1D, 5F}`, 5 * `{P}` , 2 * `{D}`
+*At time T2 (T2> T1):*
+
+`Prefill` PodCliqueScalingGroup scales out by 3, this results in the following additional PodGangs.
+
+```
+[PodGang-2, PodGang-3, PodGang-4] each will have: { prefill-leader: 1 Pod, prefill-worker: 3 Pods (minAvailable=2) } pods.
+# In short represented as 3 * {P}
+```
+
+*At time T3 (T3> T2):*
+
+`Decode` PodCliqueScalingGroup scales out by 2, this results in the following additional PodGangs:
+
+```
+[PodGang-5, PodGang-6] each will have: { decode-leader: 1 Pod, decode-worker: 4 Pods (minAvailable=2) } pods.
+# In short represented as 2 * {D}
+```
+
+`Frontend` PodClique scales out by 2, this results in update of the first PodGang (a.k.a the base podgang):
+
+```
+PodGang-1: {  # this is the base PodGang that must be scheduled
+  frontend: 3 Pod,
+  prefill: { prefill-leader: 1 Pod, prefill-worker: 3 Pods (minAvailable=2) },
+  decode: { decode-leader:  1 Pod, decode-worker: 4 Pods (minAvailable=2) }
+}
+# In short represented as {3F, 1P, 1D}
+```
+
+*At time T4 (T4 > T3)* - An update is triggered
+Updates to a PCS can be done to a subset of PodCliques or all of the PodCliques. Lets evaluate how MVUs are computed and PodGangs are created in different cases.
+
+**Case #1: Only standalone PodClique(s) are updated**
+
+In the above example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. Therefore the composition of the MVU will be {1F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
+
+
+
+
 
 A rolling update is triggered at this stage.
 
