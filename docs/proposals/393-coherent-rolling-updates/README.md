@@ -85,16 +85,19 @@ Throughout this proposal we will be using the Grove custom resource short forms 
 | PodCliqueScalingGroup | PCSG       |
 | PodClique             | PCS        |
 | PodGang               | PG         |
+| BasePodGang           | BPG        |
+| ScaledPodGang         | SPG        |
+| MVUPodGang            | MPG        |
 
 ## Proposal
 
 The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of MinAvailable number of pods from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
 
-For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
-
 If pods in different PodCliques can’t communicate safely across disaggregation boundaries because their software versions are incompatible, updating all pods in an MVU as a unit (rather than individually) eliminates mixed-version communication. Therefore, each MVU must be gang-scheduled.
 
-This GREP also introduces versioning of PodCliques that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operation.
+For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
+
+This GREP also introduces versioning of PodCliques that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operations.
 
 ### User Stories
 
@@ -122,35 +125,41 @@ What are the current set of limitations or risks of this proposal? Think broadly
 
 ### Gang scheduling during initial deployment of PCS
 
-<TODO>
+Grove’s scheduling API uses PodGangs to represent an application’s gang-scheduling constraints. The first PodGang created as part of a PCS’s initial deployment is called the `BasePodGang`, and any PodGangs created as a result for PCSG replicas that are above `MinAvailable`, are called `ScaledPodGang`s. In Grove’s current design, both BasePodGangs and ScaledPodGangs persist across update events: their PodReferences may be refreshed, but the PodGangs themselves—and their overall structure—remain the same. With the new **Coherent Rolling Update** strategy, this will change: rolling updates will dynamically generate new PodGangs, as described in the next section.
 
 ### MVUs and gang-scheduling during update
 
-A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  An MVU consist of `MinAvailable` replicas of each of the PCLQ's that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU can be gang scheduled.
+A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  An MVU consist of `MinAvailable` replicas of each of the PCLQ's that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU needs to be gang scheduled. Hence, Grove will now generate a new PodGangs called `MVUPodGang`s (a.k.a MPG) out of the existing PodGangs, which will encode the gang-scheduling intent of the MVUs.
 
 #### Rules of MVU gang-scheduling
 
 **For standalone PodCliques**
-If one or more standalone PCLQs get updated then following rules will be followed to determine if the newer version of Pods for these PCLQs will get new PGs.
+If one or more standalone PCLQs get updated then following rules will be followed to determine if the newer version of Pods for these PCLQs will get new MPGs.
 
 | Case# | Description                                                  | Gang Scheduling behavior                                     |
 | ----- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| 1     | There is only one standalone PCLQ with minAvailable == 1     | No new PG will be created. New versions of PCLQ replicas will be replaced in their original PG |
-| 2     | There is only one standalone PCLQ with minAvailable > 1      | One or more new PGs will be created with `minAvailable` replicas of the PCLQ in each PG |
-| 3     | There are more than one standalone PCLQ  with minAvailable >= 1 | One or more new PGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
+| 1     | There is only one standalone PCLQ with minAvailable == 1     | No new MPG will be created. New versions of PCLQ replicas will be replaced in their original PG |
+| 2     | There is only one standalone PCLQ with minAvailable > 1      | One or more new MPGs will be created with `minAvailable` replicas of the PCLQ in each MPG |
+| 3     | There are more than one standalone PCLQ  with minAvailable >= 1 | One or more new MPGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
 
 **For PodCliques belonging to PodCliqueScalingGroups**
-<TODO>
 
 | Case# | Description | Gang Scheduling behavior |
 | ----- | ----------- | ------------------------ |
-|       |             |                          |
-|       |             |                          |
-|       |             |                          |
+| 1     | One or more PCLQs of a PCSG updated | One or more new MPG created with `minAvailable` replicas from each of the PCLQs of that PCSG and replicated for all replicas of the PCSG |
+| 2     | One or more PCLQs from more than one PCSG are updated | One or more new MPG created with `minAvailable` replicas from each of the PCLQs of every PCSG and replicated over all the replicas of each PCSG |
+| 3     | One or more PCLQs from one or more PCSG and/or one or more standalone PCLQs are updated | One or more new MPG created with `minAvailable` replicas from each of the PCLQs of every PCSG and replicated over all the replicas of each PCSG, along with `minAvailable` replicas of each of the standalone PCLQs |
 
 #### MVU update flow
 
-<TODO>
+When new `MVUPodGang`s are generated on every update, this fundamentally changes the gang-scheduling structure of the application from pre-update phase to the post-update phase. In other words, update events mark an epoch transition in the lifecycle of the PCS. The mental model of this is: an epoch will start with an initial number of PodGangs in the system. Over the epoch period, more PodGangs can be added due to scale-out of the application and some deleted due to scale-ins. When the next update event comes in, a completely new set of MPGs are generated based on the state of the system at that time.
+
+When a PCS is updated, Grove operator will react to that event by triggering a rollout of the changes to the appropriate PodClique resources. At the same time, Grove operator will create a plan to transition pods from existing PGs to the new MPGs. This will be handled as per the following steps:
+* First, all pending and unhealthy pods will be recreated and placed into their respective MPGs. These pending MPGs will be schedule-gated.
+* Next, running pods from updated PodCliques that form one MPG will be deleted and recreated with their new specs.
+* Block until that one MPG to get scheduled
+* Once scheduled pickup create the next MPG from the running pods, and repeat until all running pods are updated.
+* Remove the schedule-gates on the pending MPGs.
 
 #### Illustration by example
 
@@ -294,9 +303,6 @@ Updates to a PCS can be done to a subset of PodCliques or all of the PodCliques.
 **Case #1: Only standalone PodClique(s) are updated**
 
 In the above example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. Therefore the composition of the MVU will be {1F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
-
-
-
 
 
 A rolling update is triggered at this stage.
