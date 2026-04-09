@@ -35,13 +35,13 @@
 
 ## Summary
 
-Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (context generation) and **decode** (token generation) — running as separate, independently scalable components. While this improves throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling atomic, availability-preserving software upgrades at the granularity of **Minimal Viable Units (MVUs)** — the smallest sets of components that must be updated in lockstep to maintain compatibility and ensure availability
+Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (context generation) and **decode** (token generation) — running as separate, independently scalable components. While this can improve throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling atomic, availability-preserving software upgrades at the granularity of **Minimal Viable Units (MVUs)** — the smallest sets of components that must be updated in lockstep to maintain compatibility and ensure availability.
 
 ## Motivation
 
-Disaggregated inference frameworks (vLLM, SGLang, TensorRT-LLM, etc.) decompose LLM serving across multiple networked components. This decomposition makes version upgrades operationally risky: a standard Kubernetes rolling update replaces pods one at a time, inevitably producing a transient state where old-version and new-version pods are running simultaneously and may communicate with each other. For disaggregated systems, this cross-version communication is not safe.
+ Inference frameworks (e.g., vLLM, SGLang, TensorRT-LLM) support disaggregated LLM serving, where stages like prefill and decode run as separate, networked components. While this can improve throughput and resource efficiency, it complicates standard deployment practices. A standard Kubernetes rolling update inevitably creates a period where old and new version pods run at the same time and may communicate. In disaggregated systems, this cross-version communication is unsafe, so applications must prevent it. However, once cross-version communication is disabled, rolling updates introduce another issue: different components often update at different rates, which leads to mismatched pools of compatible instances. For example, you might still have many old-version prefill instances running while most old-version decode instances have already been replaced. Since old prefill can only talk to old decode, a portion of the prefill capacity becomes unusable due to the lack of matching decode capacity. This kind of mismatch reduces effective end-to-end serving capacity during the update. Our goal is to design a rolling update strategy that maintains balanced, compatible capacity across components, so version upgrades do not reduce serving capacity.
 
-### Why version upgrades can be incompatible in Disaggregated Inference?
+### Why cross-version communication is considered unsafe in Disaggregated Inference?
 
 When there is a need to upgrade to a newer version of `Prefill` and `Decode` components in disaggregated inference, following are some of the areas where incompatibilities are usually seen (the list is only indicative and not comprehensive).
 
@@ -81,13 +81,13 @@ Modern models are large. Storing weights and KV-cache in full precision (BF16, 3
 * Maintain a configurable revision history limit of `PodClique` versions to support rollback and roll-forward operations.
 * Provide user-configurable concurrency control to limit the number of `PodCliqueSet` replicas that can be
   updated simultaneously.
-* Provide user-configurable concurrency control to accelerate update of interdependents component sets within a `PodCliqueSet` replica.
+* Provide user-configurable concurrency control to accelerate update of interdependent component sets within a `PodCliqueSet` replica.
 * Support `scale-out` and `scale-in` of scale sub-resources (`PodClique`, `PodCliqueScalingGroup` and `PodCliqueSet`) during rolling update.
 
 ### Non-Goals
 
-* Re-use of topology optimized resources during rolling update using resource reservations.
-* Support for `maxSurge` and `maxUnavailable` like functionality.
+* Re-use of topology optimized resources during rolling update using resource reservations. Will be handled in future as a separate feature.
+* Explicit support for `maxSurge` and `maxUnavailable` API. However, similar concurrency controls and functionality will be supported.
 
 ## Abbreviations
 
@@ -109,11 +109,11 @@ Throughout this proposal we will be using the Grove custom resource short forms 
 
 The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of MinAvailable number of pods from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
 
-If pods in different PodCliques can’t communicate safely across disaggregation boundaries because their software versions are incompatible, updating all pods in an MVU as a unit (rather than individually) eliminates mixed-version communication. Therefore, each MVU must be gang-scheduled.
+If pods in different PodCliques can’t communicate safely across disaggregation boundaries because their software versions are incompatible, updating all pods in an MVU as a unit (rather than individually) eliminates mixed-version imbalance.
 
-For a typical disaggregated inference application consisting of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
+For a typical disaggregated inference application where the compatibility boundary consists of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
 
-This GREP also introduces versioning of PodCliques that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operations.
+This GREP also introduces PodClique revisions that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operations.
 
 ### User Stories
 
@@ -145,7 +145,7 @@ Grove’s scheduling API uses PodGangs to represent an application’s gang-sche
 
 ### MVUs and gang-scheduling during update
 
-A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  A MVU consist of `MinAvailable` replicas of each of the PCLQ's that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU needs to be gang scheduled. Hence, Grove will now generate a new PodGangs called `MVUPodGang`s (a.k.a MPG) out of the existing PodGangs, which will encode the gang-scheduling intent of the MVUs.
+A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  A MVU consist of `MinAvailable` replicas of each of the standalone PCLQs and the PCSGs that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU needs to be gang scheduled. Hence, Grove will now generate new PodGangs called `MVUPodGang`s (a.k.a MPG) out of the existing PodGangs, which will encode the gang-scheduling intent of the MVUs.
 
 #### Rules of MVU gang-scheduling
 
@@ -170,9 +170,9 @@ At the PCSG level, the MPG will contain `MinAvailable` replicas of the updated P
 
 #### MVU update flow
 
-When new `MVUPodGang`s are generated on every update, this fundamentally changes the gang-scheduling structure of the application from pre-update phase to the post-update phase. In other words, an update event marks an epoch transition in the lifecycle of the PCS. The mental model of this is: an epoch will start with an initial number of PodGangs in the system. Over the epoch period, more PodGangs can be added due to scale-out of the application and some deleted due to scale-ins. When the next update event comes in, a completely new set of MPGs are generated based on the state of the system at that time.
+When new `MVUPodGang`s are generated on every update, this fundamentally changes the gang-scheduling structure of the application from pre-update phase to the post-update phase. In other words, an update event marks an epoch transition in the lifecycle of the PCS. The mental model of this is: an epoch will start with an initial number of PodGangs in the system. Within one epoch, more PodGangs can be added due to scale-out of the application and some deleted due to scale-ins. When the next update event comes in, a completely new set of MPGs are generated based on the state of the system at that time.
 
-When a PCS is updated, Grove operator will react to that event by triggering a rollout of the changes to the appropriate PodClique resources. At the same time, Grove operator will create a plan to transition pods from existing PGs to the new MPGs based MVU templates. 
+When a PCS is updated, Grove operator will react to that event by triggering a rollout of the changes to the appropriate PodClique resources. At the same time, Grove operator will create a plan to transition pods from existing PGs to the new MPGs based on MVU templates. 
 
 An **MVU template** is used to create MPG and is based on `MinAvailable` replicas of both standalone PCLQs and PCSGs which have pending updates. *Caveat:* When creating an MPG one can have additional replicas above the `MinAvailable` replicas for standalone PCLQs. At this time MVU update process might create additional PGs at the end which do not adhere to the MVU template. We call these additional PGs as **Tail-MPGs**.
 
@@ -364,10 +364,14 @@ MVU template is {2F, 1P, 1D} as it is a function of `MinAvailable` replicas of a
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
 ```
-Step-1 -> PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2F, 1P, 1D}
-Step-2 -> PG: {1F}, 2 * {P}, 1 * {D}, MPG: {2F, 1P, 1D}, {2F, 1P, 1D}
-Step-3 -> PG: 1 * {P}, MPG: {2F, 1P, 1D}, {1F, 1P, 1D}
-Step-4 -> MPG: {2Fv1, 1Pv1, 1Dv1}, {1Fv1, 1Pv1, 1Dv1}, Tail-MPG: {1Pv1}
+Step-1:
+  Take-down set: {2F, 1P, 1D}
+  Recreate-order: {2Fv1, 1Pv1, 1Dv1}
+  Expected: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
+Step-2:
+  Take-down set: {2F, 1P, 1D}, {1F}, 2 * {P}, 1 * {D}
+  Recreate-order: [{2Fv1, 1Pv1, 1Dv1}] -> [{1Fv1}, {1Pv1}, {1Dv1}, {1Pv1}]
+  Expected: MPG: {2Fv1, 1Pv1, 1Dv1}, {2Fv1, 1Pv1, 1Dv1}, {1Fv1}, {1Pv1}, {1Dv1}, {1Pv1}
 ```
 
 ### PCS Rollback and Roll-Forward
