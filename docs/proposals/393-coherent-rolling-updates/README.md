@@ -369,9 +369,9 @@ Step-1:
   Recreate-order: {2Fv1, 1Pv1, 1Dv1}
   Expected: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
 Step-2:
-  Take-down set: {2F, 1P, 1D}, {1F}, 2 * {P}, 1 * {D}
-  Recreate-order: [{2Fv1, 1Pv1, 1Dv1}] -> [{1Fv1}, {1Pv1}, {1Dv1}, {1Pv1}]
-  Expected: MPG: {2Fv1, 1Pv1, 1Dv1}, {2Fv1, 1Pv1, 1Dv1}, {1Fv1}, {1Pv1}, {1Dv1}, {1Pv1}
+  Take-down set: {3F}, 3 * {P}, 2 * {D}
+  Recreate-order: [{3Fv1, 1Pv1, 1Dv1}] -> [{1Pv1}, {1Dv1}, {1Pv1}]
+  Expected: MPG: {2Fv1, 1Pv1, 1Dv1}, {3Fv1, 1Pv1, 1Dv1}, Tail-MPGs: {1Pv1}, {1Dv1}, {1Pv1}
 ```
 
 ### PCS Rollback and Roll-Forward
@@ -384,7 +384,7 @@ Roll-forward addresses the complementary case: after rolling back to investigate
 
 To support rollback and roll-forward, two things are needed:
 
-* **Revision tracking at the PCS level** — the PCS records a *monotonically increasing* revision counter and maintains a bounded history of revision tuples, where each tuple captures the set of `PodCliqueRevision` revisions that were active together across all PCLQs at a given PCS revision. This history is what makes it possible to reconstruct a prior compatible set of component specs.
+* **Revision tracking at the PCS level** — the PCS records a *monotonically increasing* revision counter and maintains a bounded history of revision tuples, where each tuple captures the set of `PodCliqueRevision`s that were active together across all PCLQs at a given PCS revision. This history is what makes it possible to reconstruct a prior compatible set of component specs.
 * **A snapshot of the PodSpec at each revision** — captured as a `PodCliqueRevision` resource, one per PCLQ per revision in which its PodSpec changed.
 
 #### PodCliqueRevision custom resource
@@ -457,13 +457,13 @@ type PodCliqueSetStatus struct {
 }
 ```
 
-The number of revision tuples retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest entry is evicted and the `PodCliqueRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 3.
+The number of revision tuples retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest entry is evicted and the `PodCliqueRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
 ```go
 type PodCliqueSetSpec struct {
     // RevisionHistoryLimit is the maximum number of revision tuples to retain in
     // RevisionHistory. Once the limit is reached, the oldest entry is evicted.
-    // Defaults to 3.
+    // Defaults to 5.
     // +optional
     RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 
@@ -495,35 +495,36 @@ PodCliqueRevisions:
 
 ---
 
-**Update 1** — `pworker` image is updated (e.g. prefill worker upgraded to a new version). A new `PodCliqueRevision` `pworker-r2` is created.
+**Update 1** — `frontend` image is updated. A new `PodCliqueRevision` `frontend-r2` is created.
 
 ```
 currentRevision: 2  maxRevision: 2
-revisionHistory: [[1, 1, 1, 1, 1], [1, 1, 2, 1, 1]]
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1]]
 
 PodCliqueRevisions:
-  frontend-r1  <- active
+  frontend-r1
+  frontend-r2  <- active
   pleader-r1   <- active
-  pworker-r1
-  pworker-r2   <- active
+  pworker-r1   <- active
   dleader-r1   <- active
   dworker-r1   <- active
 ```
 
 ---
 
-**Update 2** — `dworker` image is updated (decode worker upgraded, compatible with current prefill). A new `PodCliqueRevision` `dworker-r3` is created.
+**Update 2** —  `dleader and dworker` images are updated. A new `PodCliqueRevision` `dleader-r3 and dworker-r3` are created.
 
 ```
 currentRevision: 3  maxRevision: 3
-revisionHistory: [[1, 1, 1, 1, 1], [1, 1, 2, 1, 1], [1, 1, 2, 1, 3]]
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3]]
 
 PodCliqueRevisions:
-  frontend-r1  <- active
+  frontend-r1
+  frontend-r2  <- active
   pleader-r1   <- active
-  pworker-r1
-  pworker-r2   <- active
-  dleader-r1   <- active
+  pworker-r1   <- active
+  dleader-r1
+  dleader-r3   <- active
   dworker-r1
   dworker-r3   <- active
 ```
@@ -534,17 +535,18 @@ PodCliqueRevisions:
 
 ```
 currentRevision: 4  maxRevision: 4
-revisionHistory: [[1, 1, 1, 1, 1], [1, 1, 2, 1, 1], [1, 1, 2, 1, 3], [4, 4, 4, 4, 4]]
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
 
 PodCliqueRevisions:
   frontend-r1
+  frontend-r2
   frontend-r4  <- active
   pleader-r1
   pleader-r4   <- active
   pworker-r1
-  pworker-r2
   pworker-r4   <- active
   dleader-r1
+  dleader-r3
   dleader-r4   <- active
   dworker-r1
   dworker-r3
@@ -559,55 +561,116 @@ Silent quality degradation is detected after Update 3. The operator rolls back.
 
 ```
 currentRevision: 3  maxRevision: 4
-revisionHistory: [[1, 1, 1, 1, 1], [1, 1, 2, 1, 1], [1, 1, 2, 1, 3], [4, 4, 4, 4, 4]]
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
 
 PodCliqueRevisions:
-  frontend-r1  <- active   (was frontend-r4)
+  frontend-r1
+  frontend-r2  <- active   (was frontend-r4)
   frontend-r4
   pleader-r1   <- active   (was pleader-r4)
   pleader-r4
-  pworker-r2   <- active   (was pworker-r4)
+  pworker-r1   <- active   (was pworker-r4)
   pworker-r4
-  dleader-r1   <- active   (was dleader-r4)
+  dleader-r1
+  dleader-r3   <- active   (was dleader-r4)
   dleader-r4
+  dworker-r1
   dworker-r3   <- active   (was dworker-r4)
   dworker-r4
 ```
 
-After investigation the operator determines the new version is safe and re-applies it.
-
 ---
 
-**Roll-forward** — `rollout redo --to-revision=4`. The controller looks up `revisionHistory[3]` = `[4, 4, 4, 4, 4]` and restores the active pointers to the revision-4 resources. Again, no new resources are created.
+**New update while rolled back** — while `currentRevision` is still at 3, the operator pushes a new `frontend` image. A new `PodCliqueRevision` `frontend-r5` is created. The revision counter always increments from `maxRevision+1` regardless of where `currentRevision` currently sits, so both `currentRevision` and `maxRevision` advance to 5. The existing history entries — including revision 4 — are retained. It remains a valid target for a future rollback since it represents a known compatible set of specs.
 
 ```
-currentRevision: 4  maxRevision: 4
-revisionHistory: [[1, 1, 1, 1, 1], [1, 1, 2, 1, 1], [1, 1, 2, 1, 3], [4, 4, 4, 4, 4]]
+currentRevision: 5  maxRevision: 5
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
 
 PodCliqueRevisions:
   frontend-r1
-  frontend-r4  <- active
-  pleader-r1
-  pleader-r4   <- active
-  pworker-r2
-  pworker-r4   <- active
+  frontend-r2
+  frontend-r4
+  frontend-r5  <- active
+  pleader-r1   <- active
+  pworker-r1   <- active
   dleader-r1
-  dleader-r4   <- active
+  dleader-r3   <- active
+  dleader-r4
+  dworker-r1
+  dworker-r3   <- active
+  dworker-r4
+```
+
+History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest entry is removed along with any `PodCliqueRevision` resources that are no longer referenced by any remaining history entry.
+
+---
+
+**Rollback again** — `rollout undo --to-revision=4`. The controller looks up `revisionHistory[3]` = `[4, 4, 4, 4, 4]` and moves the active pointers back to the revision-4 resources. `maxRevision` remains 5.
+
+```
+currentRevision: 4  maxRevision: 5
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
+
+PodCliqueRevisions:
+  frontend-r1
+  frontend-r2
+  frontend-r4  <- active   (was frontend-r5)
+  frontend-r5
+  pleader-r1
+  pleader-r4   <- active   (was pleader-r1)
+  pworker-r1
+  pworker-r4   <- active   (was pworker-r1)
+  dleader-r1
+  dleader-r3
+  dleader-r4   <- active   (was dleader-r3)
+  dworker-r1
   dworker-r3
-  dworker-r4   <- active
+  dworker-r4   <- active   (was dworker-r3)
+```
+
+---
+
+**Roll-forward** — `rollout redo --to-revision=5`. The controller looks up `revisionHistory[4]` = `[5, 1, 1, 3, 3]` and restores the active pointers. No new resources are created.
+
+```
+currentRevision: 5  maxRevision: 5
+revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
+
+PodCliqueRevisions:
+  frontend-r1
+  frontend-r2
+  frontend-r4
+  frontend-r5  <- active   (was frontend-r4)
+  pleader-r1   <- active   (was pleader-r4)
+  pleader-r4
+  pworker-r1   <- active   (was pworker-r4)
+  pworker-r4
+  dleader-r1
+  dleader-r3   <- active   (was dleader-r4)
+  dleader-r4
+  dworker-r1
+  dworker-r3   <- active   (was dworker-r4)
+  dworker-r4
 ```
 
 ### Update concurrency
 
+<TBD>
+
 ### Handling scale-outs and scale-ins during update
 
+<TBD>
+
 ### Monitoring
+
+<TBD>
 
 <!--
 This section contains details of events, metrics, status conditions and other status fields that will aid in determining health of the feature, or help measure any service level objectives that might be optionally defined.
 -->
 
-### Dependencies (*Optional*)
+### Dependencies
 
 <!--
 Are there any dependencies for this feature to work? If yes then those should be clearly listed with optional links on how to ensure that the dependencies are setup.
