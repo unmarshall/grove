@@ -39,7 +39,7 @@ Disaggregated inference architectures split LLM serving into distinct phases —
 
 ## Motivation
 
- Inference frameworks (e.g., vLLM, SGLang, TensorRT-LLM) support disaggregated LLM serving, where stages like prefill and decode run as separate, networked components. While this can improve throughput and resource efficiency, it complicates standard deployment practices. A standard Kubernetes rolling update inevitably creates a period where old and new version pods run at the same time and may communicate. In disaggregated systems, this cross-version communication is unsafe, so applications must prevent it. However, once cross-version communication is disabled, rolling updates introduce another issue: different components often update at different rates, which leads to mismatched pools of compatible instances. For example, you might still have many old-version prefill instances running while most old-version decode instances have already been replaced. Since old prefill can only talk to old decode, a portion of the prefill capacity becomes unusable due to the lack of matching decode capacity. This kind of mismatch reduces effective end-to-end serving capacity during the update. Our goal is to design a rolling update strategy that maintains balanced, compatible capacity across components, so version upgrades do not reduce serving capacity.
+Inference frameworks (e.g., vLLM, SGLang, TensorRT-LLM) support disaggregated LLM serving, where stages like prefill and decode run as separate, networked components. While this can improve throughput and resource efficiency, it complicates standard deployment practices. A standard Kubernetes rolling update inevitably creates a period where old and new version pods run at the same time and may communicate. In disaggregated systems, this cross-version communication is unsafe, so applications must prevent it. However, once cross-version communication is disabled, rolling updates introduce another issue: different components often update at different rates, which leads to mismatched pools of compatible instances. For example, you might still have many old-version prefill instances running while most old-version decode instances have already been replaced. Since old prefill can only talk to old decode, a portion of the prefill capacity becomes unusable due to the lack of matching decode capacity. This kind of mismatch reduces effective end-to-end serving capacity during the update. Our goal is to design a rolling update strategy that maintains balanced, compatible capacity across components, so version upgrades do not reduce serving capacity.
 
 ### Why cross-version communication is considered unsafe in Disaggregated Inference?
 
@@ -154,9 +154,9 @@ If one or more standalone PCLQs get updated then following rules will be followe
 
 | Case# | Description                                                  | Gang Scheduling behavior                                     |
 | ----- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| 1     | There is only one standalone PCLQ with minAvailable == 1     | No new MPG will be created. New versions of PCLQ replicas will be replaced in their original PG |
-| 2     | There is only one standalone PCLQ with minAvailable > 1      | One or more new MPGs will be created with `minAvailable` replicas of the PCLQ in each MPG |
-| 3     | There are more than one standalone PCLQ  with minAvailable >= 1 | One or more new MPGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
+| 1     | Only one standalone PCLQ with minAvailable == 1 is updated | No new MPG will be created. New versions of PCLQ replicas will be replaced in their original PG |
+| 2     | Only one standalone PCLQ with minAvailable > 1 is updated | One or more new MPGs will be created with `minAvailable` replicas of the PCLQ in each MPG |
+| 3     | More than one standalone PCLQs with minAvailable >= 1 are updated | One or more new MPGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
 
 **For PodCliques belonging to PodCliqueScalingGroups**
 
@@ -170,20 +170,22 @@ At the PCSG level, the MPG will contain `MinAvailable` replicas of the updated P
 
 #### MVU update flow
 
-When new `MVUPodGang`s are generated on every update, this fundamentally changes the gang-scheduling structure of the application from pre-update phase to the post-update phase. In other words, an update event marks an epoch transition in the lifecycle of the PCS. The mental model of this is: an epoch will start with an initial number of PodGangs in the system. Within one epoch, more PodGangs can be added due to scale-out of the application and some deleted due to scale-ins. When the next update event comes in, a completely new set of MPGs are generated based on the state of the system at that time.
+When new `MVUPodGang`s are generated on every update, this fundamentally changes the gang-scheduling structure of the application from the pre-update phase to the post-update phase. In many ways, an update event marks an epoch transition in the lifecycle of the PCS. The mental model can be summarized as: an epoch starts with an initial number of PodGangs in the system, and progressively, more PodGangs are added due to scale-outs and some deleted due to scale-ins. When the next update event comes in, it marks an epoch transition and a completely new set of MPGs are generated based on the state of the system at that time.
 
-When a PCS is updated, Grove operator will react to that event by triggering a rollout of the changes to the appropriate PodClique resources. At the same time, Grove operator will create a plan to transition pods from existing PGs to the new MPGs based on MVU templates. 
+When a PCS is updated, Grove operator will react to that event by triggering a rollout of the changes to the appropriate PodClique resources. At the same time, Grove operator will create a plan to transition pods from existing PGs to the new MPGs based on the *MVU template* of that update event.
 
-An **MVU template** is used to create MPG and is based on `MinAvailable` replicas of both standalone PCLQs and PCSGs which have pending updates. *Caveat:* When creating an MPG one can have additional replicas above the `MinAvailable` replicas for standalone PCLQs. At this time MVU update process might create additional PGs at the end which do not adhere to the MVU template. We call these additional PGs as **Tail-MPGs**.
+An **MVU template** is basis on which a MPG is created and is based on `MinAvailable` replicas of both standalone PCLQs and PCSGs which need to be updated. *Caveat:* When creating an MPG one can have additional replicas above the `MinAvailable` replicas for standalone PCLQs. At this time MVU update process might create additional PGs at the end which do not adhere to the MVU template. We call these additional PGs as **Tail-MPGs**.
 
 The update flow will be handled as per the following steps:
 
-> Order of selection: Currently scheduled pods are selected for update ahead of pending pods.
-
 * Schedule gate all `Pending` pods across all PCLQs. This ensures that pending pods at the older version do not get scheduled when we start to replace older version scheduled pods by first deleting them and then creating newer versioned pods.
-* Create MPG based on MVU template. In case the remaining number of Pods of a standalone PCLQ are less than `MinAvailable` of that PCLQ, those Pods get recreated and added to the MPG currently under creation.
-* Once MPG is created, further update is blocked until this MPG gets scheduled and becomes available.
-* Keep repeating the MPG creation and scheduling steps until all older version pods are updated.
+* Start MVU update loop: *(continue until all the targeted older version pods have been updated)*
+  * Based on MVU template, select the set of standalone PCLQ pods and PCSG replica pods to be taken down. If the remaining PCLQ pods and PCSG replicas together do not make up a full MVU template, then add the remaining pods to the *take-down set*.
+    * Currently scheduled pods are selected for the take-down set ahead of pending pods.
+  * Recreate all pods in the take-down set as schedule gated.
+  * Create the MPG based on MVU template. In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on the MPG.
+  * Further update is blocked until this MPG gets scheduled and becomes available.
+  * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove their scheduling gate.
 
 #### Illustration by example
 
@@ -339,8 +341,14 @@ MVU template is {2F} as it is a function of `MinAvailable` replicas of all PodCl
 Following are the steps demonstrating the creation and update of MPGs during the update:
 
 ```
-Step-1 -> PG: {3F, 1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}
-Step-2 -> PG: {1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}, {3Fv1}
+Step-1:
+  Take-down set: {2F}
+  Recreate order: {2Fv1}
+  Expected state: PG: {3F, 1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}
+Step-2 -> 
+  Take-down set: {3F}
+  Recreate order: {3Fv1}
+  Expected state: PG: {1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}, {3Fv1}
 ```
 
 **Case #2: Prefill and Decode are updated**
@@ -351,10 +359,18 @@ MVU template is {1P, 1D} as it is a function of `MinAvailable` replicas of all P
 Following are the steps demonstrating the creation and update of MPGs during the update:
 
 ```
-Step-1 -> PG: {5F}, 3 * {P}, 2 * {D}, MPG: {1Pv1, 1Dv1}
-Step-2 -> PG: {5F}, 2 * {P}, 1 * {D}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}
-Step-3 -> PG: {5F}, 1 * {P}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, {1Pv1, 1Dv1}
-Step-4 -> PG: {5F}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, Tail-MPG: {1Pv1}
+Step-1:
+  Take-down set: {1P, 1D}
+  Recreate order: {1Pv1, 1Dv1}
+  Expected state: PG: {5F}, 3 * {P}, 2 * {D}, MPG: {1Pv1, 1Dv1}
+Step-2 -> 
+  Take-down set: 1 * {P}, 1 * {D}
+  Recreate order: {1Pv1, 1Dv1}
+  Expected state: PG: {5F}, 2 * {P}, 1 * {D}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}
+Step-3 -> 
+  Take-down set: 2 * {P}, 1 * {D}
+  Recreate order: [{1Pv1, 1Dv1}] -> [{1Pv1}]
+  Expected state: PG: {5F}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, Tail-MPG: {1Pv1}
 ```
 
 **Case #3: All PCLQs are updated**
@@ -366,12 +382,12 @@ Following are the steps demonstrating the creation and update of MPGs during the
 ```
 Step-1:
   Take-down set: {2F, 1P, 1D}
-  Recreate-order: {2Fv1, 1Pv1, 1Dv1}
-  Expected: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
+  Recreate order: {2Fv1, 1Pv1, 1Dv1}
+  Expected state: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
 Step-2:
   Take-down set: {3F}, 3 * {P}, 2 * {D}
-  Recreate-order: [{3Fv1, 1Pv1, 1Dv1}] -> [{1Pv1}, {1Dv1}, {1Pv1}]
-  Expected: MPG: {2Fv1, 1Pv1, 1Dv1}, {3Fv1, 1Pv1, 1Dv1}, Tail-MPGs: {1Pv1}, {1Dv1}, {1Pv1}
+  Recreate order: [{3Fv1, 1Pv1, 1Dv1}] -> [{1Pv1}, {1Dv1}, {1Pv1}]
+  Expected state: MPG: {2Fv1, 1Pv1, 1Dv1}, {3Fv1, 1Pv1, 1Dv1}, Tail-MPGs: {1Pv1}, {1Dv1}, {1Pv1}
 ```
 
 ### PCS Rollback and Roll-Forward
