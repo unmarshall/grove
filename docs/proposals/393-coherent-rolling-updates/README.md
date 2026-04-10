@@ -180,12 +180,12 @@ The update flow will be handled as per the following steps:
 
 * Schedule gate all `Pending` pods across all PCLQs. This ensures that pending pods at the older version do not get scheduled when we start to replace older version scheduled pods by first deleting them and then creating newer versioned pods.
 * Start MVU update loop: *(continue until all the targeted older version pods have been updated)*
-  * Based on MVU template, select the set of standalone PCLQ pods and PCSG replica pods to be taken down. If the remaining PCLQ pods and PCSG replicas together do not make up a full MVU template, then add the remaining pods to the *take-down set*.
-    * Currently scheduled pods are selected for the take-down set ahead of pending pods.
-  * Recreate all pods in the take-down set as schedule gated.
-  * Create the MPG based on MVU template. In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on the MPG.
-  * Further update is blocked until this MPG gets scheduled and becomes available.
-  * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove their scheduling gate.
+  * Based on MVU template, select the set of standalone PCLQ pods and PCSG replica pods to be taken down and are added to a **take-down set**. If the remaining PCLQ pods and PCSG replicas together do not make up a full MVU template, then add the remaining pods to the *take-down set*.
+    * Scheduled pods are selected for the take-down set ahead of pending pods.
+  * Recreate all pods in the take-down set as schedule gated. This will allow Grove to schedule the MPGs ahead of Tail-MPGs.
+  * Create the MPG based on MVU template (*note*: there will always be only one MPG to create per update iteration). In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on pods in the MPG.
+  * Further update is blocked until this MPG gets scheduled and becomes available. The MPG is considered available when each of its constituent PodGroups are available. Each PodGroup is considered available when atleast `MinReplica` number of its constituent pods are ready.
+  * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove the scheduling gates on all of their constituent pods.
 
 #### Illustration by example
 
@@ -333,22 +333,21 @@ BPG: {5F, 1P, 1D}, SPG: 3 * {P}, 2 * {D}
 MinAvailable: {F: 2, P: 1, D: 1}
 ```
 
-**Case #1: Only standalone PodClique(s) are updated**
+**Case #1: All PCLQs (frontend, prefill, decode) are updated**
 
-In the above example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. 
-MVU template is {2F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
+In this example the user has updated all PCLQs in a PCS.
+MVU template is {2F, 1P, 1D} as it is a function of `MinAvailable` replicas of all PCSGs that have been updated.
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
-
 ```
 Step-1:
-  Take-down set: {2F}
-  Recreate order: {2Fv1}
-  Expected state: PG: {3F, 1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}
-Step-2 -> 
-  Take-down set: {3F}
-  Recreate order: {3Fv1}
-  Expected state: PG: {1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}, {3Fv1}
+  Take-down set: {2F, 1P, 1D}
+  Recreate order: {2Fv1, 1Pv1, 1Dv1}
+  Expected state: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
+Step-2:
+  Take-down set: {3F}, 3 * {P}, 2 * {D}
+  Recreate order: [{3Fv1, 1Pv1, 1Dv1}] -> [{1Pv1}, {1Dv1}, {1Pv1}]
+  Expected state: MPG: {2Fv1, 1Pv1, 1Dv1}, {3Fv1, 1Pv1, 1Dv1}, Tail-MPGs: {1Pv1}, {1Dv1}, {1Pv1}
 ```
 
 **Case #2: Prefill and Decode are updated**
@@ -373,22 +372,24 @@ Step-3 ->
   Expected state: PG: {5F}, MPG: {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, {1Pv1, 1Dv1}, Tail-MPG: {1Pv1}
 ```
 
-**Case #3: All PCLQs are updated**
+**Case #3: Only standalone PodClique(s) are updated**
 
-In this example the user has updated all PCLQs in a PCS.
-MVU template is {2F, 1P, 1D} as it is a function of `MinAvailable` replicas of all PCSGs that have been updated.
+In this example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. 
+MVU template is {2F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
+
 ```
 Step-1:
-  Take-down set: {2F, 1P, 1D}
-  Recreate order: {2Fv1, 1Pv1, 1Dv1}
-  Expected state: PG: {3F}, 3 * {P}, 2 * {D}, MPG: {2Fv1, 1Pv1, 1Dv1}
-Step-2:
-  Take-down set: {3F}, 3 * {P}, 2 * {D}
-  Recreate order: [{3Fv1, 1Pv1, 1Dv1}] -> [{1Pv1}, {1Dv1}, {1Pv1}]
-  Expected state: MPG: {2Fv1, 1Pv1, 1Dv1}, {3Fv1, 1Pv1, 1Dv1}, Tail-MPGs: {1Pv1}, {1Dv1}, {1Pv1}
+  Take-down set: {2F}
+  Recreate order: {2Fv1}
+  Expected state: PG: {3F, 1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}
+Step-2 -> 
+  Take-down set: {3F}
+  Recreate order: {3Fv1}
+  Expected state: PG: {1P, 1D}, 3 * {P}, 2 * {D}, MPG: {2Fv1}, {3Fv1}
 ```
+
 
 ### PCS Rollback and Roll-Forward
 
