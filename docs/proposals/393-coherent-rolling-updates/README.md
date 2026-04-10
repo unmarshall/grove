@@ -43,35 +43,7 @@ Inference frameworks (e.g., vLLM, SGLang, TensorRT-LLM) support disaggregated LL
 
 ### Why cross-version communication is considered unsafe in Disaggregated Inference?
 
-When there is a need to upgrade to a newer version of `Prefill` and `Decode` components in disaggregated inference, following are some of the areas where incompatibilities are usually seen (the list is only indicative and not comprehensive).
-
-**KV-Cache transfer protocol** (*Frequency*: Very common)
-
-Since there is no standard versioned protocol for the KV cache transfers between Prefill and Decode components, it can result in incompatibilities across wire-format versions. Some of the things that can/have changed across inference frameworks versions are as follows:
-
-*dtype (data type)*
-
-Defines the nature, precision and memory size of elements stored within a tensor. e.g., float16, bfloat16, float8_e4m3. A new version might default to FP8 for memory efficiency where the previous version used BF16. If the prefill sends FP8-packed bytes but the decode expects BF16, it will misinterpret every value, producing garbage tokens or NaNs.
-
-*head-dim ordering*
-
-KV-cache tensors have multiple logical dimensions: *[num_layers, num_heads, seq_len, head_dim]* which can be reordered across different versions of the same inference framework. This is typically done to optimize performance, memory layout optimization (e.g., switching to a more cache-friendly layout for Flash Attention 3) or to support newer attention mechanisms like `Grouped Query Attention` (GQA) or `Multi-Head Latent Attention` (MLA) among other reasons. If the decode reads a tensor using a different dimension order than the prefill used to write it, every attention computation is wrong silently.
-
-*block size*
-
-Paged attention divides the KV-cache into fixed-size blocks (pages), e.g., 16 or 32 tokens per block. The block size is baked into how memory is allocated and how block-table indices are communicated. If prefill was paged with block size 16 and decode expects block size 32, the block-table offsets the prefill sends point to wrong memory addresses on the decode side, causing memory corruption or out-of-bounds reads.
-
-**RPC protocol** *(Frequency: Common)*
-
-The serialisation format (*protobuf schema, msgpack frames*) of scheduler <-> worker (*inter-node communication between a Prefill/Decode node's local scheduler and its GPU workers*) messages and the disaggregation-specific handshake (*request metadata, sequence IDs, block tables - cross-node message the prefill node's scheduler sends to the decode node's scheduler*) can change between versions leading to either a silent error (*Decode node can misparse requests*) or a hard crash because either side (*Prefill/Decode*) does not have a version-negotiation step.
-
-**Attention Backend & Kernel ABI ** *(Frequency: Occasional)*
-
-Flash-Attention, Paged-Attention, and custom CUDA kernels expose internal data structures (block-tables, metadata buffers) that are shared across the disaggregation boundary. Kernel upgrades often change these layouts. In disaggregated inference, the prefill node writes KV blocks into its GPU memory, then transfers those raw bytes to the decode node via NCCL/NIXL/RDMA. The decode node's kernel then reads those bytes directly. There is no deserialisation step, no schema — just raw memory  copied from one GPU to another. The decode kernel must interpret those bytes using the exact same layout assumptions the prefill kernel used to write them. Raw GPU memory has no type tags, no field names, no length prefixes. It is just bytes at an address. A layout mismatch does not produce an error — the kernel runs to completion and produces numerically wrong results. The model generates plausible-looking but incorrect tokens, which is the worst failure mode: silent quality  degradation with no crash to alert the operator.
-
-**Quantisation/compression format** *(Frequency: Occasional)*
-
-Modern models are large. Storing weights and KV-cache in full precision (BF16, 32 bits) consumes enormous GPU memory.  Quantisation  reduces this by storing values in lower-bit formats (e.g., FP8, AWQ, GPTQ) which pack multiple values into single words using a bit layout defined by the framework implementation, not a standard. A version change that alters packing (different FP8 variant, different group size) means decode dequantises correctly-received bytes using the wrong codebook — every value is numerically wrong.
+AI inference frameworks are evolving rapidly as new architectures/models are released, prioritising performance optimisations over backwards compatibility between versions. In aggregated serving this is generally acceptable — model instances are self-contained within pods of the same version, so internal format changes are invisible to the deployment layer. In disaggregated serving, however, as explained above, a naive rolling update could result in cross-version communication where an old-version prefill may attempt a KV-cache transfer to a new-version decode. Across versions, any number of things can change and break this contract — the KV-cache data layout (dtype, dimension ordering, block size), the protocol used for the transfer handshake, even user-specified updates to the sharding strategy across new versions etc. Ultimately since the kv-cache managers are not backwards compatible and often optimized there is no guarantee that cross version communication is safe and its fairly likely that it is not safe.
 
 ### Goals
 
