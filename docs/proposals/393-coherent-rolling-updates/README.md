@@ -21,9 +21,10 @@
   - [MVUs and gang-scheduling during update](#mvus-and-gang-scheduling-during-update)
     - [Rules of MVU gang-scheduling](#rules-of-mvu-gang-scheduling)
     - [MVU update flow](#mvu-update-flow)
+    - [MVUPodGang naming convention](#mvupodgang-naming-convention)
     - [Illustration by example](#illustration-by-example)
   - [PCS Rollback and Roll-Forward](#pcs-rollback-and-roll-forward)
-    - [PodCliqueRevision custom resource](#podcliquerevision-custom-resource)
+    - [PodCliqueTemplateSpecRevision custom resource](#podcliquetemplatespecrevision-custom-resource)
     - [PCS-level revision tracking](#pcs-level-revision-tracking)
       - [Where to store this state: annotations, labels, or <code>PodCliqueSet.Status</code>?](#where-to-store-this-state-annotations-labels-or-podcliquesetstatus)
     - [Illustration](#illustration)
@@ -55,7 +56,7 @@ AI inference frameworks are evolving rapidly as new architectures/models are rel
 * Enable rolling updates at the granularity of minimal sets of interdependent components that must be updated together in lockstep to maintain compatibility.
 * It should be possible to gang-schedule each set of compatible interdependent components.
 * Preserve `PodCliqueSet` availability during rolling updates to serve incoming traffic with sets of compatible interdependent components.
-* Maintain a configurable revision history limit of `PodClique` versions to support rollback and roll-forward operations.
+* Maintain a configurable revision history limit of `PodCliqueTemplateSpecRevision`s to support rollback and roll-forward operations.
 * Provide user-configurable concurrency control to limit the number of `PodCliqueSet` replicas that can be
   updated simultaneously.
 * Provide user-configurable concurrency control to accelerate update of interdependent component sets within a `PodCliqueSet` replica.
@@ -90,7 +91,7 @@ If pods in different PodCliques can’t communicate safely across disaggregation
 
 For a typical disaggregated inference application where the compatibility boundary consists of prefill, decode and frontend components, a single MVU would contain the minimum number of version-compatible prefill, decode and frontend pods necessary to serve traffic.
 
-This GREP also introduces PodClique revisions that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operations.
+This GREP also introduces `PodCliqueTemplateSpecRevision`s that can be used to maintain versioned sets of compatible interdependent components to support rollback and rollforward operations.
 
 ### User Stories
 
@@ -133,7 +134,7 @@ If one or more standalone PCLQs get updated then following rules will be followe
 | ----- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | 1     | Only one standalone PCLQ with minAvailable == 1 is updated | No new MPG will be created. New versions of PCLQ replicas will be replaced in their original PG |
 | 2     | Only one standalone PCLQ with minAvailable > 1 is updated | One or more new MPGs will be created with `minAvailable` replicas of the PCLQ in each MPG |
-| 3     | More than one standalone PCLQs with minAvailable >= 1 are updated | One or more new MPGs will be created with `minAvailable` replicas of each standalone PCLQ in each PG |
+| 3     | More than one standalone PCLQs with minAvailable >= 1 are updated | One or more new MPGs will be created with `minAvailable` replicas of each standalone PCLQ in each MPG |
 
 **For PodCliques belonging to PodCliqueScalingGroups**
 
@@ -163,6 +164,25 @@ The update flow will be handled as per the following steps:
   * Create the MPG based on MVU template (*note*: there will always be only one MPG to create per update iteration). In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on pods in the MPG.
   * Further update is blocked until this MPG gets scheduled and becomes available. The MPG is considered available when each of its constituent PodGroups are available. Each PodGroup is considered available when atleast `MinReplica` number of its constituent pods are ready.
   * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove the scheduling gates on all of their constituent pods.
+  * Delete any `PodGang`s whose `PodGroups[*].PodReferences` are now empty (i.e., all the pods of the `PodGang` have been moved into MPGs or Tail-MPGs during the update). This ensures that stale, pod-less PodGangs do not accumulate across update iterations.
+
+#### MVUPodGang naming convention
+
+MPGs follow the naming convention:
+
+```
+<pcs-name>-<pcs-replica-index>-<pcs-revision>-<iteration-index>
+```
+
+where `pcs-name` is the name of the owning `PodCliqueSet`, `pcs-replica-index` is the index of the PCS replica being updated, `pcs-revision` is the PCS revision number as described in [PCS-level revision tracking](#pcs-level-revision-tracking), and `iteration-index` is the iteration number of the MVU update loop in which the MPG was created (starting from 0).
+
+Tail-MPGs follow a different naming convention:
+
+```
+<pcs-name>-<pcs-replica-index>-<pcsg-name>-<pcsg-replica-index>
+```
+
+where `pcsg-name` is the name of the `PodCliqueScalingGroup` whose remaining replicas forms the Tail-MPGs, and `pcsg-replica-index` is the index of that PCSG replica within the take-down set. Tail-MPGs are named after their PCSG rather than using the PCS revision and iteration index because they represent individual leftover PCSG replicas that did not fit into a full MVU template, and their identity is tied to a specific PCSG replica rather than to an MVU iteration which would contain `minAvailable` PCSG replicas for each constituent PCSG.
 
 #### Illustration by example
 
@@ -351,7 +371,7 @@ Step-3 ->
 
 **Case #3: Only standalone PodClique(s) are updated**
 
-In this example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. 
+In this example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodCliqueTemplateSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. 
 MVU template is {2F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
@@ -372,47 +392,48 @@ Step-2 ->
 
 Version upgrades in disaggregated inference are high-risk operations. As described earlier, incompatibilities in KV-cache transfer protocols, RPC serialisation formats, attention kernel ABIs, or quantisation layouts can produce silent correctness failures — garbage tokens, memory corruption, or numerically wrong outputs — with no crash to alert the operator. A new version may pass initial validation and begin serving traffic before these failures surface under real load or specific model inputs.
 
-When such a regression is detected, the ability to quickly revert PCS to a last known-good state is critical. All PCS constituents must be collectively roll-backed together (atomically), restoring all PCLQs to the exact set of Pod specs that were in service together at a prior revision. A partial rollback (reverting only subset of components) is unsafe and can end up with the same cross-version incompatibilities that the update was designed to avoid.
+When such a regression is detected, the ability to quickly revert PCS to a last known-good state is critical. All PCS constituents must be collectively roll-backed together (atomically), restoring all PCLQs to the exact set of `PodCliqueTemplateSpec`s that were in service together at a prior revision. A partial rollback (reverting only subset of components) is unsafe and can end up with the same cross-version incompatibilities that the update was designed to avoid.
 
 Roll-forward addresses the complementary case: after rolling back to investigate a regression, an operator may determine that the new version is actually safe and wish to re-apply it without triggering a fresh rollout.
 
 To support rollback and roll-forward, two things are needed:
 
-* **Revision tracking at the PCS level** — the PCS records a *monotonically increasing* revision counter and maintains a bounded history of revision tuples, where each tuple captures the set of `PodCliqueRevision`s that were active together across all PCLQs at a given PCS revision. This history is what makes it possible to reconstruct a prior compatible set of component specs.
-* **A snapshot of the PodSpec at each revision** — captured as a `PodCliqueRevision` resource, one per PCLQ per revision in which its PodSpec changed.
+* **Revision tracking at the PCS level** — the PCS records a *monotonically increasing* revision counter and maintains a bounded history of revision tuples, where each tuple captures the set of `PodCliqueTemplateSpecRevision`s that were active together across all PCLQs at a given PCS revision. This history is what makes it possible to reconstruct a prior compatible set of component specs.
+* **A snapshot of the `PodCliqueTemplateSpec` at each revision** — captured as a `PodCliqueTemplateSpecRevision` resource, one per PCLQ per revision in which its `PodCliqueTemplateSpec` changed.
 
-#### PodCliqueRevision custom resource
+#### PodCliqueTemplateSpecRevision custom resource
 
 ```go
-// PodCliqueRevision is an immutable snapshot of a PodClique's PodSpec at a specific revision.
-// It is created whenever a PodClique's PodSpec changes as part of a PodCliqueSet update, and
-// is never modified after creation.
-type PodCliqueRevision struct {
+// PodCliqueTemplateSpecRevision is an immutable snapshot of a PodClique's PodCliqueTemplateSpec
+// at a specific revision. It is created whenever a PodClique's PodCliqueTemplateSpec changes as
+// part of a PodCliqueSet update, and is never modified after creation.
+type PodCliqueTemplateSpecRevision struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
-    Spec              PodCliqueRevisionSpec `json:"spec"`
+    Spec              PodCliqueTemplateSpecRevisionSpec `json:"spec"`
 }
 
-// PodCliqueRevisionSpec holds the PodSpec captured at the time this revision was created.
-type PodCliqueRevisionSpec struct {
-    // PodSpec is the exact PodSpec of the PodClique at this revision.
-    PodSpec  corev1.PodSpec `json:"podSpec"`
+// PodCliqueTemplateSpecRevisionSpec holds the PodCliqueTemplateSpec captured at the time this
+// revision was created.
+type PodCliqueTemplateSpecRevisionSpec struct {
+    // PodCliqueTemplateSpec is the exact PodCliqueTemplateSpec of the PodClique at this revision.
+    PodCliqueTemplateSpec PodCliqueTemplateSpec `json:"podCliqueTemplateSpec"`
 }
 ```
 
-**Naming convention:** `<pcs-name>-<pclq-name>-v<revision-number>`, where `pcs-name` is the name of the owning `PodCliqueSet`, `pclq-name` is the unqualified name of the `PodClique` whose spec is captured, and `revision-number` is a monotonically increasing integer assigned at the time of creation.
+**Naming convention:** `<pcs-name>-<pclq-name>-v<revision-number>`, where `pcs-name` is the name of the owning `PodCliqueSet`, `pclq-name` is the unqualified name of the `PodClique` whose `PodCliqueTemplateSpec` is captured, and `revision-number` is a monotonically increasing integer assigned at the time of creation.
 
-**Revision label:** `grove.io/revision` is set to the revision number on each `PodCliqueRevision`. This label exists solely to allow efficient lookup of the exact `PodCliqueRevision` resource targeted by a rollback or roll-forward operation.
+**Revision label:** `grove.io/revision` is set to the revision number on each `PodCliqueTemplateSpecRevision`. This label exists solely to allow efficient lookup of the exact `PodCliqueTemplateSpecRevision` resource targeted by a rollback or roll-forward operation.
 
-`PodCliqueRevision` has no `scale-subresource` and plays no active role in pod lifecycle management — it is purely a snapshot for audit and recovery purposes. The PCLQ resource remains the single source of truth for all Pods and the target for any scaling operations on standalone PCLQs.
+`PodCliqueTemplateSpecRevision` has no `scale-subresource` and plays no active role in pod lifecycle management — it is purely a snapshot for audit and recovery purposes. The PCLQ resource remains the single source of truth for all Pods and the target for any scaling operations on standalone PCLQs.
 
 #### PCS-level revision tracking
 
 Three pieces of revision state must be tracked at the `PodCliqueSet` level:
 
-- **`maxRevision`** — the highest revision number assigned to any `PodCliqueRevision` across all PCLQs. This is the ceiling for roll-forward: an operator cannot roll forward past `maxRevision`.
+- **`maxRevision`** — the highest revision number assigned to any `PodCliqueTemplateSpecRevision` across all PCLQs. This is the ceiling for roll-forward: an operator cannot roll forward past `maxRevision`.
 - **`currentRevision`** — the revision at which the PCS currently sits. After a fresh update this equals `maxRevision`; after a rollback it is less than `maxRevision`, reflecting that the active specs belong to an earlier point in history.
-- **`revisionHistory`** — an ordered list of revision tuples, one entry per PCS revision. Each tuple records the `PodCliqueRevision` revision number that was active for every PCLQ at that point. This is what allows the controller to reconstruct the exact compatible set of specs for any prior revision.
+- **`revisionHistory`** — an ordered list of revision tuples, one entry per PCS revision. Each tuple records the `PodCliqueTemplateSpecRevision` revision number that was active for every PCLQ at that point. This is what allows the controller to reconstruct the exact compatible set of specs for any prior revision.
 
 ##### Where to store this state: annotations, labels, or `PodCliqueSet.Status`?
 
@@ -430,12 +451,12 @@ type PodCliqueSetStatus struct {
     // After a fresh update this equals MaxRevision. After a rollback it is less than MaxRevision.
     CurrentRevision int32 `json:"currentRevision"`
 
-    // MaxRevision is the highest revision number assigned across all PodCliqueRevision resources
+    // MaxRevision is the highest revision number assigned across all PodCliqueTemplateSpecRevision resources
     // owned by this PCS. It is the upper bound for roll-forward operations.
     MaxRevision int32 `json:"maxRevision"`
 
     // RevisionHistory is a bounded list of revision tuples recorded at each PCS revision.
-    // Each tuple is an ordered slice of PodCliqueRevision revision numbers, one per PCLQ, in
+    // Each tuple is an ordered slice of PodCliqueTemplateSpecRevision revision numbers, one per PCLQ, in
     // the order PCLQs are defined in the PCS spec. Each tuple represents the set of PCLQ
     // revisions that were active together at a given PCS revision, enabling reconstruction of
     // any prior compatible set of specs. The number of retained tuples is controlled by
@@ -451,7 +472,7 @@ type PodCliqueSetStatus struct {
 }
 ```
 
-The number of revision tuples retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest entry is evicted and the `PodCliqueRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
+The number of revision tuples retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest entry is evicted and the `PodCliqueTemplateSpecRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
 ```go
 type PodCliqueSetSpec struct {
@@ -469,7 +490,7 @@ type PodCliqueSetSpec struct {
 
 The following illustration uses the `disagg-serving` PCS defined earlier. It has five PCLQs: `frontend`, `pleader`, `pworker`, `dleader`, `dworker`. The revision tuple in `RevisionHistory` follows that same order throughout: `[frontend, pleader, pworker, dleader, dworker]`.
 
-For brevity, `PodCliqueRevision` resources are named `<pclq>-r<N>` (e.g. `frontend-r1`, `pworker-r3`).
+For brevity, `PodCliqueTemplateSpecRevision` resources are named `<pclq>-r<N>` (e.g. `frontend-r1`, `pworker-r3`).
 
 ---
 
@@ -479,7 +500,7 @@ For brevity, `PodCliqueRevision` resources are named `<pclq>-r<N>` (e.g. `fronte
 currentRevision: 1  maxRevision: 1
 revisionHistory: [[1, 1, 1, 1, 1]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1  <- active
   pleader-r1   <- active
   pworker-r1   <- active
@@ -489,13 +510,13 @@ PodCliqueRevisions:
 
 ---
 
-**Update 1** — `frontend` image is updated. A new `PodCliqueRevision` `frontend-r2` is created.
+**Update 1** — `frontend` image is updated. A new `PodCliqueTemplateSpecRevision` `frontend-r2` is created.
 
 ```
 currentRevision: 2  maxRevision: 2
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2  <- active
   pleader-r1   <- active
@@ -506,13 +527,13 @@ PodCliqueRevisions:
 
 ---
 
-**Update 2** —  `dleader and dworker` images are updated. A new `PodCliqueRevision` `dleader-r3 and dworker-r3` are created.
+**Update 2** —  `dleader and dworker` images are updated. A new `PodCliqueTemplateSpecRevision` `dleader-r3 and dworker-r3` are created.
 
 ```
 currentRevision: 3  maxRevision: 3
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2  <- active
   pleader-r1   <- active
@@ -525,13 +546,13 @@ PodCliqueRevisions:
 
 ---
 
-**Update 3** — All PCLQs are updated together (e.g. a breaking protocol change requires all components to move in lockstep). New `PodCliqueRevision` resources are created for all five PCLQs.
+**Update 3** — All PCLQs are updated together (e.g. a breaking protocol change requires all components to move in lockstep). New `PodCliqueTemplateSpecRevision` resources are created for all five PCLQs.
 
 ```
 currentRevision: 4  maxRevision: 4
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2
   frontend-r4  <- active
@@ -551,13 +572,13 @@ Silent quality degradation is detected after Update 3. The operator rolls back.
 
 ---
 
-**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory[2]` = `[1, 1, 2, 1, 3]` and moves the active pointer on each PCLQ to the corresponding `PodCliqueRevision`. No new resources are created. `maxRevision` is preserved.
+**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory[2]` = `[1, 1, 2, 1, 3]` and moves the active pointer on each PCLQ to the corresponding `PodCliqueTemplateSpecRevision`. No new resources are created. `maxRevision` is preserved.
 
 ```
 currentRevision: 3  maxRevision: 4
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2  <- active   (was frontend-r4)
   frontend-r4
@@ -575,13 +596,13 @@ PodCliqueRevisions:
 
 ---
 
-**New update while rolled back** — while `currentRevision` is still at 3, the operator pushes a new `frontend` image. A new `PodCliqueRevision` `frontend-r5` is created. The revision counter always increments from `maxRevision+1` regardless of where `currentRevision` currently sits, so both `currentRevision` and `maxRevision` advance to 5. The existing history entries — including revision 4 — are retained. It remains a valid target for a future rollback since it represents a known compatible set of specs.
+**New update while rolled back** — while `currentRevision` is still at 3, the operator pushes a new `frontend` image. A new `PodCliqueTemplateSpecRevision` `frontend-r5` is created. The revision counter always increments from `maxRevision+1` regardless of where `currentRevision` currently sits, so both `currentRevision` and `maxRevision` advance to 5. The existing history entries — including revision 4 — are retained. It remains a valid target for a future rollback since it represents a known compatible set of specs.
 
 ```
 currentRevision: 5  maxRevision: 5
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2
   frontend-r4
@@ -596,7 +617,7 @@ PodCliqueRevisions:
   dworker-r4
 ```
 
-History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest entry is removed along with any `PodCliqueRevision` resources that are no longer referenced by any remaining history entry.
+History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest entry is removed along with any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry.
 
 ---
 
@@ -606,7 +627,7 @@ History entries are only evicted when `RevisionHistoryLimit` is reached, at whic
 currentRevision: 4  maxRevision: 5
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2
   frontend-r4  <- active   (was frontend-r5)
@@ -631,7 +652,7 @@ PodCliqueRevisions:
 currentRevision: 5  maxRevision: 5
 revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
 
-PodCliqueRevisions:
+PodCliqueTemplateSpecRevisions:
   frontend-r1
   frontend-r2
   frontend-r4
