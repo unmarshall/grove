@@ -6,7 +6,7 @@
 
 - [Summary](#summary)
 - [Motivation](#motivation)
-  - [Why version upgrades can be incompatible in Disaggregated Inference?](#why-version-upgrades-can-be-incompatible-in-disaggregated-inference)
+  - [Why cross-version communication is considered unsafe in Disaggregated Inference?](#why-cross-version-communication-is-considered-unsafe-in-disaggregated-inference)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Abbreviations](#abbreviations)
@@ -75,13 +75,14 @@ Throughout this proposal we will be using the Grove custom resource short forms 
 | --------------------- | ---------- |
 | PodCliqueSet          | PCS        |
 | PodCliqueScalingGroup | PCSG       |
-| PodClique             | PCS        |
+| PodClique             | PCLQ       |
 | PodGang               | PG         |
 | BasePodGang           | BPG        |
 | ScaledPodGang         | SPG        |
 | MVUPodGang            | MPG        |
+| PodCliqueTemplateSpecRevision | PCTSR |
 
-> *NOTE:*`BPG`, `SPG` and `MPG` are abbreviations introduced only to differentiate different types of `PodGang` resources and are not new custom resources.
+> *NOTE:* `BPG`, `SPG` and `MPG` are abbreviations introduced only to differentiate different types of `PodGang` resources and are not new custom resources. `PCTSR` is a new custom resource introduced by this GREP.
 
 ## Proposal
 
@@ -162,7 +163,7 @@ The update flow will be handled as per the following steps:
     * Scheduled pods are selected for the take-down set ahead of pending pods.
   * Recreate all pods in the take-down set as schedule gated. This will allow Grove to schedule the MPGs ahead of Tail-MPGs.
   * Create the MPG based on MVU template (*note*: there will always be only one MPG to create per update iteration). In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on pods in the MPG.
-  * Further update is blocked until this MPG gets scheduled and becomes available. The MPG is considered available when each of its constituent PodGroups are available. Each PodGroup is considered available when atleast `MinReplica` number of its constituent pods are ready.
+  * Further update is blocked until this MPG gets scheduled and becomes available. The MPG is considered available when each of its constituent PodGroups are available. Each PodGroup is considered available when at least `MinReplicas` (as defined on the `PodGroup` within the `PodGang` spec) number of its constituent pods are ready.
   * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove the scheduling gates on all of their constituent pods.
   * Delete any `PodGang`s whose `PodGroups[*].PodReferences` are now empty (i.e., all the pods of the `PodGang` have been moved into MPGs or Tail-MPGs during the update). This ensures that stale, pod-less PodGangs do not accumulate across update iterations.
 
@@ -333,7 +334,7 @@ MinAvailable: {F: 2, P: 1, D: 1}
 **Case #1: All PCLQs (frontend, prefill, decode) are updated**
 
 In this example the user has updated all PCLQs in a PCS.
-MVU template is {2F, 1P, 1D} as it is a function of `MinAvailable` replicas of all PCSGs that have been updated.
+MVU template is {2F, 1P, 1D} as it is a function of `MinAvailable` replicas of all standalone PCLQs and PCSGs that have been updated.
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
 ```
@@ -371,8 +372,8 @@ Step-3 ->
 
 **Case #3: Only standalone PodClique(s) are updated**
 
-In this example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodCliqueTemplateSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 1. 
-MVU template is {2F} as it is a function of `MinAvailable` replicas of all PodCliques that have been updated.
+In this example, `Frontend` is the only standalone PodClique. Let us represent the new version of `Frontend` PodClique as Fv1 (where standalone `F` represents v0 or the initial version of the PodCliqueTemplateSpec). The `MinAvailable` replicas for `Frontend` PodClique is defined as 2. 
+MVU template is {2F} as it is a function of `MinAvailable` replicas of all standalone PCLQs that have been updated.
 
 Following are the steps demonstrating the creation and update of MPGs during the update:
 
@@ -421,7 +422,7 @@ type PodCliqueTemplateSpecRevisionSpec struct {
 }
 ```
 
-**Naming convention:** `<pcs-name>-<pclq-name>-v<revision-number>`, where `pcs-name` is the name of the owning `PodCliqueSet`, `pclq-name` is the unqualified name of the `PodClique` whose `PodCliqueTemplateSpec` is captured, and `revision-number` is a monotonically increasing integer assigned at the time of creation.
+**Naming convention:** `<pcs-name>-<pclq-name>-r<revision-number>`, where `pcs-name` is the name of the owning `PodCliqueSet`, `pclq-name` is the unqualified name of the `PodClique` whose `PodCliqueTemplateSpec` is captured, and `revision-number` is a monotonically increasing integer assigned at the time of creation.
 
 **Revision label:** `grove.io/revision` is set to the revision number on each `PodCliqueTemplateSpecRevision`. This label exists solely to allow efficient lookup of the exact `PodCliqueTemplateSpecRevision` resource targeted by a rollback or roll-forward operation.
 
@@ -433,7 +434,7 @@ Three pieces of revision state must be tracked at the `PodCliqueSet` level:
 
 - **`maxRevision`** — the highest revision number assigned to any `PodCliqueTemplateSpecRevision` across all PCLQs. This is the ceiling for roll-forward: an operator cannot roll forward past `maxRevision`.
 - **`currentRevision`** — the revision at which the PCS currently sits. After a fresh update this equals `maxRevision`; after a rollback it is less than `maxRevision`, reflecting that the active specs belong to an earlier point in history.
-- **`revisionHistory`** — an ordered list of revision tuples, one entry per PCS revision. Each tuple records the `PodCliqueTemplateSpecRevision` revision number that was active for every PCLQ at that point. This is what allows the controller to reconstruct the exact compatible set of specs for any prior revision.
+- **`revisionHistory`** — a map from PCS revision number to its revision tuple. Each tuple records the `PodCliqueTemplateSpecRevision` revision number that was active for every PCLQ at that point. This is what allows the controller to reconstruct the exact compatible set of specs for any prior revision.
 
 ##### Where to store this state: annotations, labels, or `PodCliqueSet.Status`?
 
@@ -441,7 +442,7 @@ Three pieces of revision state must be tracked at the `PodCliqueSet` level:
 
 **Labels** are also untyped strings and are intended for selection and filtering, not for storing operational state. Additionally, label values are limited to 63 characters, making them unsuitable for storing anything beyond simple scalars. They are the wrong tool here.
 
-✅ **`PodCliqueSet.Status` fields** are the right choice. Status is the canonical location for controller-managed operational state in Kubernetes. It is strongly typed, versioned with the API, survives schema evolution, and is directly accessible to clients without parsing. The revision history in particular — a structured slice of tuples — is only representable cleanly as a typed status field. `currentRevision` and `maxRevision` are scalar integers that could technically live as annotations, but co-locating them in status alongside the history keeps all revision state in one place and makes it atomically observable.
+✅ **`PodCliqueSet.Status` fields** are the right choice. Status is the canonical location for controller-managed operational state in Kubernetes. It is strongly typed, versioned with the API, survives schema evolution, and is directly accessible to clients without parsing. The revision history in particular — a structured map of revision tuples — is only representable cleanly as a typed status field. `currentRevision` and `maxRevision` are scalar integers that could technically live as annotations, but co-locating them in status alongside the history keeps all revision state in one place and makes it atomically observable.
 
 The three fields are therefore introduced as part of `PodCliqueSetStatus`:
 
@@ -455,24 +456,27 @@ type PodCliqueSetStatus struct {
     // owned by this PCS. It is the upper bound for roll-forward operations.
     MaxRevision int32 `json:"maxRevision"`
 
-    // RevisionHistory is a bounded list of revision tuples recorded at each PCS revision.
+    // RevisionHistory is a bounded map from PCS revision number to its revision tuple.
     // Each tuple is an ordered slice of PodCliqueTemplateSpecRevision revision numbers, one per PCLQ, in
     // the order PCLQs are defined in the PCS spec. Each tuple represents the set of PCLQ
     // revisions that were active together at a given PCS revision, enabling reconstruction of
-    // any prior compatible set of specs. The number of retained tuples is controlled by
+    // any prior compatible set of specs. The number of retained entries is controlled by
     // RevisionHistoryLimit on the PCS spec.
     //
-    // Example: given PCLQs [a, b, c], the history [[1,1,1],[2,1,1],[2,3,1]] means:
+    // Example: given PCLQs [a, b, c], the history {1: [1,1,1], 2: [2,1,1], 3: [2,3,1]} means:
     //   PCS revision 1: a@1, b@1, c@1
     //   PCS revision 2: a@2, b@1, c@1
     //   PCS revision 3: a@2, b@3, c@1
-    RevisionHistory [][]int32 `json:"revisionHistory,omitempty"`
+    //
+    // Note: in the Kubernetes API, map[int32][]int32 serializes as a JSON object with string
+    // keys (e.g., {"1": [1,1,1], "2": [2,1,1]}), which is standard for Kubernetes map types.
+    RevisionHistory map[int32][]int32 `json:"revisionHistory,omitempty"`
 
     // ... other existing status fields
 }
 ```
 
-The number of revision tuples retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest entry is evicted and the `PodCliqueTemplateSpecRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
+The number of entries retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest revision key is removed from the map and the `PodCliqueTemplateSpecRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
 ```go
 type PodCliqueSetSpec struct {
@@ -498,7 +502,7 @@ For brevity, `PodCliqueTemplateSpecRevision` resources are named `<pclq>-r<N>` (
 
 ```
 currentRevision: 1  maxRevision: 1
-revisionHistory: [[1, 1, 1, 1, 1]]
+revisionHistory: {1: [1, 1, 1, 1, 1]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1  <- active
@@ -514,7 +518,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 2  maxRevision: 2
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -531,7 +535,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 3  maxRevision: 3
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -550,7 +554,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 4  maxRevision: 4
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -572,11 +576,11 @@ Silent quality degradation is detected after Update 3. The operator rolls back.
 
 ---
 
-**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory[2]` = `[1, 1, 2, 1, 3]` and moves the active pointer on each PCLQ to the corresponding `PodCliqueTemplateSpecRevision`. No new resources are created. `maxRevision` is preserved.
+**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory[3]` = `[2, 1, 1, 3, 3]` and moves the active pointer on each PCLQ to the corresponding `PodCliqueTemplateSpecRevision`. No new resources are created. `maxRevision` is preserved.
 
 ```
 currentRevision: 3  maxRevision: 4
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -600,7 +604,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 5  maxRevision: 5
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -617,15 +621,15 @@ PodCliqueTemplateSpecRevisions:
   dworker-r4
 ```
 
-History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest entry is removed along with any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry.
+History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest revision key is removed from the map along with any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry.
 
 ---
 
-**Rollback again** — `rollout undo --to-revision=4`. The controller looks up `revisionHistory[3]` = `[4, 4, 4, 4, 4]` and moves the active pointers back to the revision-4 resources. `maxRevision` remains 5.
+**Rollback again** — `rollout undo --to-revision=4`. The controller looks up `revisionHistory[4]` = `[4, 4, 4, 4, 4]` and moves the active pointers back to the revision-4 resources. `maxRevision` remains 5.
 
 ```
 currentRevision: 4  maxRevision: 5
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -646,11 +650,11 @@ PodCliqueTemplateSpecRevisions:
 
 ---
 
-**Roll-forward** — `rollout redo --to-revision=5`. The controller looks up `revisionHistory[4]` = `[5, 1, 1, 3, 3]` and restores the active pointers. No new resources are created.
+**Roll-forward** — `rollout redo --to-revision=5`. The controller looks up `revisionHistory[5]` = `[5, 1, 1, 3, 3]` and restores the active pointers. No new resources are created.
 
 ```
 currentRevision: 5  maxRevision: 5
-revisionHistory: [[1, 1, 1, 1, 1], [2, 1, 1, 1, 1], [2, 1, 1, 3, 3], [4, 4, 4, 4, 4], [5, 1, 1, 3, 3]]
+revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
