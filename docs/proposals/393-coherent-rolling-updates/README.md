@@ -56,7 +56,7 @@ AI inference frameworks are evolving rapidly as new architectures/models are rel
 * Enable rolling updates at the granularity of minimal sets of interdependent components that must be updated together in lockstep to maintain compatibility.
 * It should be possible to gang-schedule each set of compatible interdependent components.
 * Preserve `PodCliqueSet` availability during rolling updates to serve incoming traffic with sets of compatible interdependent components.
-* Maintain a configurable revision history limit of `PodCliqueTemplateSpecRevision`s to support rollback and roll-forward operations.
+* Maintain a configurable revision history limit of `PodCliqueSet` revisions to support rollback and roll-forward operations. `PodCliqueTemplateSpecRevision` resources are retained as long as they are referenced by at least one surviving history entry.
 * Provide user-configurable concurrency control to limit the number of `PodCliqueSet` replicas that can be
   updated simultaneously.
 * Provide user-configurable concurrency control to accelerate update of interdependent component sets within a `PodCliqueSet` replica.
@@ -476,12 +476,14 @@ type PodCliqueSetStatus struct {
 }
 ```
 
-The number of entries retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest revision key is removed from the map and the `PodCliqueTemplateSpecRevision` resources associated with that entry are deleted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
+The number of PCS revision entries retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest PCS revision key is removed from the map; any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry are then garbage-collected. A PCTSR that is shared across multiple history entries (i.e., a PCLQ whose spec did not change between two PCS revisions) is only deleted once all entries referencing it have been evicted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
 ```go
 type PodCliqueSetSpec struct {
-    // RevisionHistoryLimit is the maximum number of revision tuples to retain in
-    // RevisionHistory. Once the limit is reached, the oldest entry is evicted.
+    // RevisionHistoryLimit is the maximum number of PCS revision entries to retain in
+    // RevisionHistory. Once the limit is reached, the oldest PCS revision entry is evicted.
+    // PodCliqueTemplateSpecRevision resources are garbage-collected only when they are no
+    // longer referenced by any remaining history entry.
     // Defaults to 5.
     // +optional
     RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
@@ -621,7 +623,7 @@ PodCliqueTemplateSpecRevisions:
   dworker-r4
 ```
 
-History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest revision key is removed from the map along with any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry.
+History entries are only evicted when `RevisionHistoryLimit` is reached, at which point the oldest PCS revision key is removed from the map. `PodCliqueTemplateSpecRevision` resources are then garbage-collected if they are no longer referenced by any remaining history entry.
 
 ---
 
