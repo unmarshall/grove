@@ -478,6 +478,10 @@ type PodCliqueSetStatus struct {
 
 The number of PCS revision entries retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest PCS revision key is removed from the map; any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry are then garbage-collected. A PCTSR that is shared across multiple history entries (i.e., a PCLQ whose spec did not change between two PCS revisions) is only deleted once all entries referencing it have been evicted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
+**PodClique ordering is now immutable regardless of `StartupType`.** Because `RevisionHistory` tuples are positional — each slot at index `i` always refers to the PCLQ at position `i` in `PodCliqueSetTemplateSpec.Cliques` — the order of PodCliques in the spec must never change after the PCS is created. If the order were allowed to change, a stored history tuple such as `[2, 1, 1, 3, 3]` would silently map its entries to the wrong PCLQs, making rollback and roll-forward produce incorrect, potentially incompatible sets of specs.
+
+Currently, the admission webhook only rejects reordering for `InOrder` and `Explicit` startup types; `AnyOrder` permits it. This GREP **extends the immutability of PCLQ order to all startup types**, including `AnyOrder`. The webhook's `validatePodCliqueUpdate` function must be updated to enforce this unconditionally, removing the `requiresOrderValidation` guard that currently exempts `AnyOrder`. Existing test cases that assert reordering is valid under `AnyOrder` will need to be updated to expect a validation error.
+
 ```go
 type PodCliqueSetSpec struct {
     // RevisionHistoryLimit is the maximum number of PCS revision entries to retain in
