@@ -21,7 +21,7 @@
   - [MVUs and gang-scheduling during update](#mvus-and-gang-scheduling-during-update)
     - [Rules of MVU gang-scheduling](#rules-of-mvu-gang-scheduling)
     - [MVU update flow](#mvu-update-flow)
-    - [MVUPodGang naming convention](#mvupodgang-naming-convention)
+    - [PodGang naming convention](#podgang-naming-convention)
     - [Illustration by example](#illustration-by-example)
   - [PCS Rollback and Roll-Forward](#pcs-rollback-and-roll-forward)
     - [PodCliqueTemplateSpecRevision custom resource](#podcliquetemplatespecrevision-custom-resource)
@@ -86,7 +86,7 @@ Throughout this proposal we will be using the Grove custom resource short forms 
 
 ## Proposal
 
-The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of MinAvailable number of pods from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
+The GREP introduces a new rolling update strategy, named **Coherent Rolling Updates**, based on the concept of a **Minimal Viable Unit** (a.k.a. MVU): the set of `MinAvailable` number of replicas from each updated component (which defines the compatibility boundary as set by user) and is dynamically formed as single atomic update unit that needs to be gang-scheduled.
 
 If pods in different PodCliques can’t communicate safely across disaggregation boundaries because their software versions are incompatible, updating all pods in an MVU as a unit (rather than individually) eliminates mixed-version imbalance.
 
@@ -124,7 +124,7 @@ Grove’s scheduling API uses PodGangs to represent an application’s gang-sche
 
 ### MVUs and gang-scheduling during update
 
-A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  A MVU consist of `MinAvailable` replicas of each of the standalone PCLQs and the PCSGs that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU needs to be gang scheduled. Hence, Grove will now generate new PodGangs called `MVUPodGang`s (a.k.a MPG) out of the existing PodGangs, which will encode the gang-scheduling intent of the MVUs.
+A PCS is composed of PCLQs and PCSGs.  Updates may target a subset of PCLQs or all of them.  A MVU consist of `MinAvailable` replicas of each of the standalone PCLQs (pods) and the PCSGs (PCSG replicas) that are updated. Between two updates since one or more `Scale` subresources (`PodClique.Scale`, `PodCliqueScalingGroup.Scale`) may have been scaled in or out between two updates, MVUs must be recomputed before each update begins. Every identified MVU needs to be gang scheduled. Hence, Grove will now generate new PodGangs called `MVUPodGang`s (a.k.a MPG) out of the existing PodGangs, which will encode the gang-scheduling intent of the MVUs.
 
 #### Rules of MVU gang-scheduling
 
@@ -167,23 +167,15 @@ The update flow will be handled as per the following steps:
   * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove the scheduling gates on all of their constituent pods.
   * Delete any `PodGang`s whose `PodGroups[*].PodReferences` are now empty (i.e., all the pods of the `PodGang` have been moved into MPGs or Tail-MPGs during the update). This ensures that stale, pod-less PodGangs do not accumulate across update iterations.
 
-#### MVUPodGang naming convention
+#### PodGang naming convention
 
-MPGs follow the naming convention:
-
-```
-<pcs-name>-<pcs-replica-index>-<pcs-revision>-<iteration-index>
-```
-
-where `pcs-name` is the name of the owning `PodCliqueSet`, `pcs-replica-index` is the index of the PCS replica being updated, `pcs-revision` is the PCS revision number as described in [PCS-level revision tracking](#pcs-level-revision-tracking), and `iteration-index` is the iteration number of the MVU update loop in which the MPG was created (starting from 0).
-
-Tail-MPGs follow a different naming convention:
+All PodGangs — BasePodGangs, ScaledPodGangs, and MVUPodGangs — follow the same newly proposed naming convention:
 
 ```
-<pcs-name>-<pcs-replica-index>-<pcsg-name>-<pcsg-replica-index>
+<pcs-name>-<pcs-replica-index>-<pcs-replica-global-counter>
 ```
 
-where `pcsg-name` is the name of the `PodCliqueScalingGroup` whose remaining replicas forms the Tail-MPGs, and `pcsg-replica-index` is the index of that PCSG replica within the take-down set. Tail-MPGs are named after their PCSG rather than using the PCS revision and iteration index because they represent individual leftover PCSG replicas that did not fit into a full MVU template, and their identity is tied to a specific PCSG replica rather than to an MVU iteration which would contain `minAvailable` PCSG replicas for each constituent PCSG.
+where `pcs-name` is the name of the owning `PodCliqueSet`, `pcs-replica-index` is the index of the PCS replica the PodGang belongs to, and `pcs-replica-global-counter` is a monotonically increasing integer scoped to that PCS replica, assigned at PodGang creation time. The counter increments each time a new PodGang is created for a given PCS replica — whether during initial deployment (BPG, SPGs) or during a rolling update (MPGs, Tail-MPGs) — and is never reused. This ensures every PodGang across the lifetime of a PCS replica has a unique, stable name regardless of when or why it was created.
 
 #### Illustration by example
 
@@ -442,63 +434,106 @@ Three pieces of revision state must be tracked at the `PodCliqueSet` level:
 
 **Labels** are also untyped strings and are intended for selection and filtering, not for storing operational state. Additionally, label values are limited to 63 characters, making them unsuitable for storing anything beyond simple scalars. They are the wrong tool here.
 
-✅ **`PodCliqueSet.Status` fields** are the right choice. Status is the canonical location for controller-managed operational state in Kubernetes. It is strongly typed, versioned with the API, survives schema evolution, and is directly accessible to clients without parsing. The revision history in particular — a structured map of revision tuples — is only representable cleanly as a typed status field. `currentRevision` and `maxRevision` are scalar integers that could technically live as annotations, but co-locating them in status alongside the history keeps all revision state in one place and makes it atomically observable.
+**`PodCliqueSet.Status` fields** are the right choice. Status is the canonical location for controller-managed operational state in Kubernetes. It is strongly typed, versioned with the API, survives schema evolution, and is directly accessible to clients without parsing. The revision history in particular — a structured map of revision maps — is only representable cleanly as a typed status field. `currentRevision`, `minRevision`, and `maxRevision` are scalar integers that could technically live as annotations, but co-locating them in status alongside the history keeps all revision state in one place and makes it atomically observable.
 
-The three fields are therefore introduced as part of `PodCliqueSetStatus`:
+The four fields are therefore introduced as part of `PodCliqueSetStatus`:
 
 ```go
 type PodCliqueSetStatus struct {
     // CurrentRevision is the PCS revision at which all PCLQs are currently active.
     // After a fresh update this equals MaxRevision. After a rollback it is less than MaxRevision.
-    CurrentRevision int32 `json:"currentRevision"`
+    // +optional
+    CurrentRevision *int32 `json:"currentRevision,omitempty"`
 
-    // MaxRevision is the highest revision number assigned across all PodCliqueTemplateSpecRevision resources
-    // owned by this PCS. It is the upper bound for roll-forward operations.
-    MaxRevision int32 `json:"maxRevision"`
+    // MinRevision is the lowest revision number still retained in RevisionHistory.
+    // It is the lower bound for rollback operations. As historical revisions beyond
+    // RevisionHistoryLimit are evicted, MinRevision advances accordingly.
+    // +optional
+    MinRevision *int32 `json:"minRevision,omitempty"`
 
-    // RevisionHistory is a bounded map from PCS revision number to its revision tuple.
-    // Each tuple is an ordered slice of PodCliqueTemplateSpecRevision revision numbers, one per PCLQ, in
-    // the order PCLQs are defined in the PCS spec. Each tuple represents the set of PCLQ
-    // revisions that were active together at a given PCS revision, enabling reconstruction of
-    // any prior compatible set of specs. The number of retained entries is controlled by
+    // MaxRevision is the highest revision number assigned across all PodCliqueTemplateSpecRevision
+    // resources owned by this PCS. It is the upper bound for roll-forward operations.
+    // +optional
+    MaxRevision *int32 `json:"maxRevision,omitempty"`
+
+    // RevisionHistory is a bounded map from PCS revision number to a revision map for that
+    // PCS revision. Each revision map maps a PodClique name to the
+    // PodCliqueTemplateSpecRevision revision number that was active for that PodClique at the
+    // given PCS revision. This enables reconstruction of any prior compatible set of specs
+    // without relying on a fixed ordering of PodCliques in the PodCliqueSetTemplateSpec.
+    // The total number of historical entries (excluding the current revision) is bounded by
     // RevisionHistoryLimit on the PCS spec.
     //
-    // Example: given PCLQs [a, b, c], the history {1: [1,1,1], 2: [2,1,1], 3: [2,3,1]} means:
+    // Example: given PCLQs a, b, c:
+    //   {"1": {"a":1, "b":1, "c":1}, "2": {"a":2, "b":1, "c":1}, "3": {"a":2, "b":2, "c":1}}
+    // means:
     //   PCS revision 1: a@1, b@1, c@1
     //   PCS revision 2: a@2, b@1, c@1
-    //   PCS revision 3: a@2, b@3, c@1
-    //
-    // Note: in the Kubernetes API, map[int32][]int32 serializes as a JSON object with string
-    // keys (e.g., {"1": [1,1,1], "2": [2,1,1]}), which is standard for Kubernetes map types.
-    RevisionHistory map[int32][]int32 `json:"revisionHistory,omitempty"`
+    //   PCS revision 3: a@2, b@2, c@1
+    // +optional
+    RevisionHistory map[string]map[string]int32 `json:"revisionHistory,omitempty"`
 
     // ... other existing status fields
 }
 ```
 
-The number of PCS revision entries retained in `RevisionHistory` is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest PCS revision key is removed from the map; any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry are then garbage-collected. A PCTSR that is shared across multiple history entries (i.e., a PCLQ whose spec did not change between two PCS revisions) is only deleted once all entries referencing it have been evicted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
+The number of PCS revision entries retained in `RevisionHistory` (excluding the current revision) is controlled by `RevisionHistoryLimit` on the `PodCliqueSet` spec. Once the limit is reached, the oldest PCS revision key is removed from the map and `MinRevision` advances accordingly; any `PodCliqueTemplateSpecRevision` resources that are no longer referenced by any remaining history entry are then garbage-collected. A PCTSR that is shared across multiple history entries (i.e., a PCLQ whose spec did not change between two PCS revisions) is only deleted once all entries referencing it have been evicted. This mirrors the same concept as `revisionHistoryLimit` on `Deployment`. Operators should set this high enough to cover the rollback depth they require; the default is 5.
 
-**PodClique ordering is now immutable regardless of `StartupType`.** Because `RevisionHistory` tuples are positional — each slot at index `i` always refers to the PCLQ at position `i` in `PodCliqueSetTemplateSpec.Cliques` — the order of PodCliques in the spec must never change after the PCS is created. If the order were allowed to change, a stored history tuple such as `[2, 1, 1, 3, 3]` would silently map its entries to the wrong PCLQs, making rollback and roll-forward produce incorrect, potentially incompatible sets of specs.
-
-Currently, the admission webhook only rejects reordering for `InOrder` and `Explicit` startup types; `AnyOrder` permits it. This GREP **extends the immutability of PCLQ order to all startup types**, including `AnyOrder`. The webhook's `validatePodCliqueUpdate` function must be updated to enforce this unconditionally, removing the `requiresOrderValidation` guard that currently exempts `AnyOrder`. Existing test cases that assert reordering is valid under `AnyOrder` will need to be updated to expect a validation error.
+**PodClique ordering is now immutable regardless of `StartupType`.** Because `RevisionHistory` is keyed by PCLQ name, ordering changes in the spec do not corrupt stored history. However, PCLQ order remains immutable for other reasons: `InOrder` and `Explicit` startup types depend on positional ordering, and allowing reordering under `AnyOrder` would be a source of confusion. This GREP **extends the immutability of PCLQ order to all startup types**, including `AnyOrder`. The webhook's `validatePodCliqueUpdate` function must be updated to enforce this unconditionally, removing the `requiresOrderValidation` guard that currently exempts `AnyOrder`. Existing test cases that assert reordering is valid under `AnyOrder` will need to be updated to expect a validation error.
 
 ```go
 type PodCliqueSetSpec struct {
-    // RevisionHistoryLimit is the maximum number of PCS revision entries to retain in
-    // RevisionHistory. Once the limit is reached, the oldest PCS revision entry is evicted.
-    // PodCliqueTemplateSpecRevision resources are garbage-collected only when they are no
-    // longer referenced by any remaining history entry.
+    // RevisionHistoryLimit specifies the number of old PCS revisions to retain in RevisionHistory
+    // in addition to the current revision, to allow rollback. PodCliqueTemplateSpecRevision resources
+    // are garbage-collected only when they are no longer referenced by any remaining history entry.
     // Defaults to 5.
     // +optional
+    // +kubebuilder:default=5
     RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 
     // ... other existing spec fields
 }
 ```
 
+The `Coherent` update strategy is introduced as a new value of `UpdateStrategyType`:
+
+```go
+// +kubebuilder:validation:Enum={RollingRecreate,Coherent,OnDelete}
+type UpdateStrategyType string
+
+const (
+    // CoherentUpdateStrategy indicates that the PodCliqueSet will be progressively
+    // updated at the granularity of MinimalViableUnits. A MinimalViableUnit
+    // indicates the smallest set of components that must be updated in lockstep to
+    // maintain compatibility and availability.
+    CoherentUpdateStrategy UpdateStrategyType = "Coherent"
+)
+```
+
+Per-replica coherent update progress is tracked in `PodCliqueSetReplicaUpdateProgress` via a new optional field:
+
+```go
+type PodCliqueSetReplicaUpdateProgress struct {
+    // CoherentUpdate captures coherent-update-specific progress.
+    // This field is only set when the update strategy is Coherent.
+    // +optional
+    CoherentUpdate *CoherentUpdateProgress `json:"coherentUpdate,omitempty"`
+
+    // ... other existing fields
+}
+
+// CoherentUpdateProgress captures the progress of a coherent update for a single PCS replica.
+type CoherentUpdateProgress struct {
+    // LatestMPGName is the name of the latest MPG PodGang resource being waited on
+    // for the currently-updating replica.
+    // +optional
+    LatestMPGName *string `json:"latestMPGName,omitempty"`
+}
+```
+
 #### Illustration
 
-The following illustration uses the `disagg-serving` PCS defined earlier. It has five PCLQs: `frontend`, `pleader`, `pworker`, `dleader`, `dworker`. The revision tuple in `RevisionHistory` follows that same order throughout: `[frontend, pleader, pworker, dleader, dworker]`.
+The following illustration uses the `disagg-serving` PCS defined earlier. It has five PCLQs: `frontend`, `pleader`, `pworker`, `dleader`, `dworker`.
 
 For brevity, `PodCliqueTemplateSpecRevision` resources are named `<pclq>-r<N>` (e.g. `frontend-r1`, `pworker-r3`).
 
@@ -508,7 +543,7 @@ For brevity, `PodCliqueTemplateSpecRevision` resources are named `<pclq>-r<N>` (
 
 ```
 currentRevision: 1  maxRevision: 1
-revisionHistory: {1: [1, 1, 1, 1, 1]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1  <- active
@@ -524,7 +559,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 2  maxRevision: 2
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -541,7 +576,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 3  maxRevision: 3
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -560,7 +595,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 4  maxRevision: 4
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}, "4": {"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -582,11 +617,11 @@ Silent quality degradation is detected after Update 3. The operator rolls back.
 
 ---
 
-**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory[3]` = `[2, 1, 1, 3, 3]` and moves the active pointer on each PCLQ to the corresponding `PodCliqueTemplateSpecRevision`. No new resources are created. `maxRevision` is preserved.
+**Rollback** — `rollout undo --to-revision=3`. The controller looks up `revisionHistory["3"]` = `{"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}` and moves the active pointer on each PCLQ to the corresponding `PodCliqueTemplateSpecRevision`. No new resources are created. `maxRevision` is preserved.
 
 ```
 currentRevision: 3  maxRevision: 4
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}, "4": {"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -610,7 +645,7 @@ PodCliqueTemplateSpecRevisions:
 
 ```
 currentRevision: 5  maxRevision: 5
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}, "4": {"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}, "5": {"frontend":5, "pleader":1, "pworker":1, "dleader":3, "dworker":3}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -631,11 +666,11 @@ History entries are only evicted when `RevisionHistoryLimit` is reached, at whic
 
 ---
 
-**Rollback again** — `rollout undo --to-revision=4`. The controller looks up `revisionHistory[4]` = `[4, 4, 4, 4, 4]` and moves the active pointers back to the revision-4 resources. `maxRevision` remains 5.
+**Rollback again** — `rollout undo --to-revision=4`. The controller looks up `revisionHistory["4"]` = `{"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}` and moves the active pointers back to the revision-4 resources. `maxRevision` remains 5.
 
 ```
 currentRevision: 4  maxRevision: 5
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}, "4": {"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}, "5": {"frontend":5, "pleader":1, "pworker":1, "dleader":3, "dworker":3}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
@@ -656,11 +691,11 @@ PodCliqueTemplateSpecRevisions:
 
 ---
 
-**Roll-forward** — `rollout redo --to-revision=5`. The controller looks up `revisionHistory[5]` = `[5, 1, 1, 3, 3]` and restores the active pointers. No new resources are created.
+**Roll-forward** — `rollout redo --to-revision=5`. The controller looks up `revisionHistory["5"]` = `{"frontend":5, "pleader":1, "pworker":1, "dleader":3, "dworker":3}` and restores the active pointers. No new resources are created.
 
 ```
 currentRevision: 5  maxRevision: 5
-revisionHistory: {1: [1, 1, 1, 1, 1], 2: [2, 1, 1, 1, 1], 3: [2, 1, 1, 3, 3], 4: [4, 4, 4, 4, 4], 5: [5, 1, 1, 3, 3]}
+revisionHistory: {"1": {"frontend":1, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "2": {"frontend":2, "pleader":1, "pworker":1, "dleader":1, "dworker":1}, "3": {"frontend":2, "pleader":1, "pworker":1, "dleader":3, "dworker":3}, "4": {"frontend":4, "pleader":4, "pworker":4, "dleader":4, "dworker":4}, "5": {"frontend":5, "pleader":1, "pworker":1, "dleader":3, "dworker":3}}
 
 PodCliqueTemplateSpecRevisions:
   frontend-r1
