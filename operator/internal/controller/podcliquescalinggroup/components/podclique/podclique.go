@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
+	volcanoscheduler "github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
@@ -304,6 +306,8 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 			fmt.Sprintf("Error setting controller reference for PodClique: %v", client.ObjectKeyFromObject(pclq)),
 		)
 	}
+	// Add finalizer at creation so PCLQ controller does not need a separate PATCH on first reconcile.
+	controllerutil.AddFinalizer(pclq, apiconstants.FinalizerPodClique)
 
 	pcsReplicaIndex, err := getPCSReplicaFromPCSG(pcsg)
 	if err != nil {
@@ -313,7 +317,8 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 	podGangName := apicommon.GeneratePodGangNameForPodCliqueOwnedByPCSG(pcs, pcsReplicaIndex, pcsg, pcsgReplicaIndex)
 
 	pclq.Labels = getLabels(pcs, pcsReplicaIndex, pcsg, pcsgReplicaIndex, pclqObjectKey, pclqTemplateSpec, podGangName)
-	pclq.Annotations = pclqTemplateSpec.Annotations
+	pclq.Annotations = mergedPodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
+	delete(pclq.Annotations, apiconstants.AnnotationTopologyName)
 	// set PodCliqueSpec
 	// ------------------------------------
 	if pclqExists {
@@ -332,12 +337,33 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 	}
 	pclq.Spec.StartsAfter = dependentPCLQNames
 
-	// Inject MNNVL resourceClaims if enabled on PCSG (propagated from PCS)
-	if mnnvl.IsAutoMNNVLEnabled(pcsg.Annotations) {
-		mnnvl.InjectMNNVLIntoPodSpec(logger, &pclq.Spec.PodSpec, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex})
+	// Inject MNNVL resourceClaims: resolve group hierarchically (PCLQ → PCSG).
+	// PCS-level annotations are already propagated onto the PCSG by the PCS
+	// controller via propagateMNNVLAnnotations, so a two-layer check suffices.
+	groupName, mnnvlEnabled := mnnvl.ResolveGroupNameHierarchically(pclqTemplateSpec.Annotations, pcsg.Annotations)
+	if mnnvlEnabled {
+		mnnvl.InjectMNNVLIntoPodSpec(logger, &pclq.Spec.PodSpec, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}, groupName)
 	}
 
 	return nil
+}
+
+// mergedPodCliqueAnnotations preserves PodClique-local annotations and only
+// backfills the Volcano queue annotation from the PodCliqueSet when the
+// PodClique template does not specify its own queue.
+func mergedPodCliqueAnnotations(pcsAnnotations, cliqueAnnotations map[string]string) map[string]string {
+	annotations := maps.Clone(cliqueAnnotations)
+	queue := strings.TrimSpace(annotations[volcanoscheduler.QueueAnnotationKey])
+	if queue == "" {
+		queue = strings.TrimSpace(pcsAnnotations[volcanoscheduler.QueueAnnotationKey])
+	}
+	if queue != "" {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[volcanoscheduler.QueueAnnotationKey] = queue
+	}
+	return annotations
 }
 
 // addEnvironmentVariablesToPodContainerSpecs injects PCSG-specific environment variables into all containers in the PodClique

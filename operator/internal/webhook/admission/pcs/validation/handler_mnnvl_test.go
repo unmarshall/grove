@@ -118,6 +118,26 @@ func TestValidateCreate_MNNVL(t *testing.T) {
 			expectError:      true,
 			errorContains:    "contradictory",
 		},
+		{
+			description:      "mnnvl-group on PCSG config + feature enabled -> no error",
+			pcs:              createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "workers"}),
+			autoMNNVLEnabled: true,
+			expectError:      false,
+		},
+		{
+			description:      "invalid mnnvl-group on PCSG config -> error",
+			pcs:              createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "-bad"}),
+			autoMNNVLEnabled: true,
+			expectError:      true,
+			errorContains:    "not a valid DNS-1123 label",
+		},
+		{
+			description:      "conflict on PCSG config: disabled + group -> error",
+			pcs:              createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationAutoMNNVL: mnnvl.AnnotationAutoMNNVLDisabled, mnnvl.AnnotationMNNVLGroup: "training"}),
+			autoMNNVLEnabled: true,
+			expectError:      true,
+			errorContains:    "contradictory",
+		},
 	}
 
 	for _, tt := range tests {
@@ -238,6 +258,27 @@ func TestValidateUpdate_MNNVL(t *testing.T) {
 			expectError:   true,
 			errorContains: "immutable",
 		},
+		// mnnvl-group immutability on PCSG config
+		{
+			description: "PCSG config mnnvl-group unchanged -> no error",
+			oldPCS:      createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "training"}),
+			newPCS:      createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "training"}),
+			expectError: false,
+		},
+		{
+			description:   "PCSG config mnnvl-group changed -> error",
+			oldPCS:        createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "training"}),
+			newPCS:        createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "inference"}),
+			expectError:   true,
+			errorContains: "immutable",
+		},
+		{
+			description:   "PCSG config mnnvl-group added -> error",
+			oldPCS:        createValidPCSWithPCSGConfigAnnotations(nil),
+			newPCS:        createValidPCSWithPCSGConfigAnnotations(map[string]string{mnnvl.AnnotationMNNVLGroup: "training"}),
+			expectError:   true,
+			errorContains: "cannot be added",
+		},
 	}
 
 	for _, tt := range tests {
@@ -283,82 +324,53 @@ func TestValidateUpdate_MNNVL(t *testing.T) {
 //  2. Validating webhook saw the annotation was "added" (old=absent, new=present) and rejected it
 //  3. The resource could not be modified at all (e.g., finalizer removal was blocked)
 func TestMNNVL_WebhookPipeline_LegacyPCSUpdate(t *testing.T) {
-	tests := []struct {
-		description      string
-		autoMNNVLEnabled bool
-	}{
-		{
-			description:      "legacy PCS updated with MNNVL feature enabled -> no deadlock",
-			autoMNNVLEnabled: true,
-		},
-		{
-			description:      "legacy PCS updated with MNNVL feature disabled -> no deadlock",
-			autoMNNVLEnabled: false,
-		},
-	}
+	t.Run("legacy PCS updated -> no deadlock", func(t *testing.T) {
+		cl := testutils.NewTestClientBuilder().Build()
+		mgr := &testutils.FakeManager{
+			Client: cl,
+			Scheme: cl.Scheme(),
+			Logger: logr.Discard(),
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.description, func(t *testing.T) {
-			cl := testutils.NewTestClientBuilder().Build()
-			mgr := &testutils.FakeManager{
-				Client: cl,
-				Scheme: cl.Scheme(),
-				Logger: logr.Discard(),
-			}
+		oldPCS := createValidPCSWithGPU(nil)
+		newPCS := createValidPCSWithGPU(nil)
 
-			networkConfig := configv1alpha1.NetworkAcceleration{
-				AutoMNNVLEnabled: tt.autoMNNVLEnabled,
-			}
-
-			// Simulate a legacy PCS (created before MNNVL feature) — no auto-mnnvl annotation.
-			// The oldPCS represents the stored object in etcd.
-			oldPCS := createValidPCSWithGPU(nil)
-
-			// The newPCS represents the user's update request (e.g., removing a finalizer).
-			// Start with a copy of oldPCS — no annotation, just like the stored object.
-			newPCS := createValidPCSWithGPU(nil)
-
-			// Step 1: Simulate the defaulting webhook running on the new object during an UPDATE.
-			// In the real admission pipeline, the mutating webhook runs first and modifies newPCS.
-			// We use the actual defaulting handler (not MutateAutoMNNVL directly) to test
-			// the real code path including the operation-type guard.
-			defaultingHandler := defaulting.NewHandler(mgr, networkConfig)
-			updateCtx := admission.NewContextWithRequest(context.Background(), admission.Request{
-				AdmissionRequest: admissionv1.AdmissionRequest{
-					Name:      "test-pcs",
-					Namespace: "default",
-					Operation: admissionv1.Update,
-					UserInfo: authenticationv1.UserInfo{
-						Username: "test-user",
-					},
+		// Step 1: Simulate the defaulting webhook running on the new object during an UPDATE.
+		// The defaulting webhook no longer mutates MNNVL annotations, but we still verify
+		// the full pipeline (defaulting -> validation) doesn't break.
+		defaultingHandler := defaulting.NewHandler(mgr)
+		updateCtx := admission.NewContextWithRequest(context.Background(), admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				Name:      "test-pcs",
+				Namespace: "default",
+				Operation: admissionv1.Update,
+				UserInfo: authenticationv1.UserInfo{
+					Username: "test-user",
 				},
-			})
-			err := defaultingHandler.Default(updateCtx, newPCS)
-			require.NoError(t, err, "defaulting webhook should not error on update")
-
-			// Step 2: Simulate the validating webhook running with oldPCS vs (possibly mutated) newPCS.
-			validationCfg := configv1alpha1.OperatorConfiguration{
-				TopologyAwareScheduling: getDefaultTASConfig(),
-				Network:                 networkConfig,
-				Scheduler:               configv1alpha1.SchedulerConfiguration{Profiles: []configv1alpha1.SchedulerProfile{{Name: configv1alpha1.SchedulerNameKube}}, DefaultProfileName: string(configv1alpha1.SchedulerNameKube)},
-			}
-			validationHandler := NewHandler(mgr, &validationCfg)
-
-			ctx := context.Background()
-			warnings, err := validationHandler.ValidateUpdate(ctx, oldPCS, newPCS)
-
-			// The update MUST succeed — the defaulting webhook should not have injected the annotation
-			// during an update, so the validating webhook should see no annotation change.
-			assert.NoError(t, err, "legacy PCS update should not be rejected by validation webhook")
-			_ = warnings // warnings (e.g., restartPolicy) are informational and not relevant to this test
-
-			// Verify the annotation was NOT added to newPCS by the defaulting webhook.
-			if newPCS.Annotations != nil {
-				_, exists := newPCS.Annotations[mnnvl.AnnotationAutoMNNVL]
-				assert.False(t, exists, "defaulting webhook should not inject auto-mnnvl annotation during update")
-			}
+			},
 		})
-	}
+		err := defaultingHandler.Default(updateCtx, newPCS)
+		require.NoError(t, err, "defaulting webhook should not error on update")
+
+		// Step 2: Simulate the validating webhook running with oldPCS vs newPCS.
+		validationCfg := configv1alpha1.OperatorConfiguration{
+			TopologyAwareScheduling: getDefaultTASConfig(),
+			Network:                 getDefaultNetworkConfig(),
+			Scheduler:               configv1alpha1.SchedulerConfiguration{Profiles: []configv1alpha1.SchedulerProfile{{Name: configv1alpha1.SchedulerNameKube}}, DefaultProfileName: string(configv1alpha1.SchedulerNameKube)},
+		}
+		validationHandler := NewHandler(mgr, &validationCfg)
+
+		ctx := context.Background()
+		warnings, err := validationHandler.ValidateUpdate(ctx, oldPCS, newPCS)
+
+		assert.NoError(t, err, "legacy PCS update should not be rejected by validation webhook")
+		_ = warnings
+
+		if newPCS.Annotations != nil {
+			_, exists := newPCS.Annotations[mnnvl.AnnotationAutoMNNVL]
+			assert.False(t, exists, "defaulting webhook should not inject auto-mnnvl annotation during update")
+		}
+	})
 }
 
 // createValidPCSWithGPU creates a fully valid PCS with GPU and PCS-level annotations.
@@ -391,5 +403,26 @@ func createValidPCSWithCliqueAnnotations(cliqueAnnotations map[string]string) *g
 				WithContainer(testutils.NewGPUContainer("train", "nvidia/cuda:latest", 8)).
 				Build(),
 		).
+		Build()
+}
+
+// createValidPCSWithPCSGConfigAnnotations creates a fully valid PCS with a
+// PCSG config carrying the given annotations, for testing spec-level validation.
+func createValidPCSWithPCSGConfigAnnotations(pcsgAnnotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
+	return testutils.NewPodCliqueSetBuilder("test-pcs", "default", "").
+		WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+		WithTerminationDelay(4 * time.Hour).
+		WithPodCliqueTemplateSpec(
+			testutils.NewPodCliqueTemplateSpecBuilder("worker").
+				WithRoleName("worker").
+				WithMinAvailable(1).
+				WithContainer(testutils.NewGPUContainer("train", "nvidia/cuda:latest", 8)).
+				Build(),
+		).
+		WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+			Name:        "scaling-group-1",
+			CliqueNames: []string{"worker"},
+			Annotations: pcsgAnnotations,
+		}).
 		Build()
 }

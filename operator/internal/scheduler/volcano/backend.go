@@ -19,6 +19,7 @@ package volcano
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
@@ -27,14 +28,18 @@ import (
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
+
+const volcanoPodGroupCRDName = "podgroups.scheduling.volcano.sh"
 
 type schedulerBackend struct {
 	client        client.Client
@@ -62,6 +67,41 @@ func (b *schedulerBackend) Name() string {
 }
 
 func (b *schedulerBackend) Init() error {
+	err := CheckCapability(b.client, nil)
+	if err == nil {
+		return nil
+	}
+	if !isCacheNotStartedError(err) {
+		return CheckCapability(b.client, b.eventRecorder)
+	}
+
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster config for Volcano capability check: %w", err)
+	}
+	directClient, err := client.New(cfg, client.Options{Scheme: b.scheme})
+	if err != nil {
+		return fmt.Errorf("failed to create direct API client for Volcano capability check: %w", err)
+	}
+	return CheckCapability(directClient, b.eventRecorder)
+}
+
+// CheckCapability verifies that the installed Volcano PodGroup CRD supports
+// the subgroup policy fields Grove needs for gang scheduling.
+func CheckCapability(cl client.Client, eventRecorder record.EventRecorder) error {
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: volcanoPodGroupCRDName},
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: volcanoPodGroupCRDName}, crd); err != nil {
+		initErr := fmt.Errorf("volcano scheduler backend requires Volcano 1.14 or newer with PodGroup.spec.subGroupPolicy: failed to get CRD %q: %w", volcanoPodGroupCRDName, err)
+		recordCapabilityEvent(eventRecorder, crd, initErr)
+		return initErr
+	}
+	if !podGroupCRDHasSubGroupPolicy(crd) {
+		initErr := fmt.Errorf("volcano scheduler backend requires Volcano 1.14 or newer with PodGroup.spec.subGroupPolicy on scheduling.volcano.sh/v1beta1 PodGroup")
+		recordCapabilityEvent(eventRecorder, crd, initErr)
+		return initErr
+	}
 	return nil
 }
 
@@ -93,6 +133,7 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 		podGroup.Spec.MinMember = minMemberForPodGang(podGang)
 		podGroup.Spec.Queue = queue
 		podGroup.Spec.PriorityClassName = podGang.Spec.PriorityClassName
+		podGroup.Spec.SubGroupPolicy = subGroupPoliciesForPodGang(podGang)
 		return nil
 	})
 	if err != nil {
@@ -100,6 +141,17 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 	}
 
 	return nil
+}
+
+func recordCapabilityEvent(eventRecorder record.EventRecorder, obj runtime.Object, err error) {
+	if eventRecorder == nil || obj == nil {
+		return
+	}
+	eventRecorder.Eventf(obj, corev1.EventTypeWarning, "VolcanoCapabilityUnavailable", "%v", err)
+}
+
+func isCacheNotStartedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "cache is not started")
 }
 
 func (b *schedulerBackend) OnPodGangDelete(_ context.Context, _ *groveschedulerv1alpha1.PodGang) error {
@@ -145,6 +197,42 @@ func minMemberForPodGang(podGang *groveschedulerv1alpha1.PodGang) int32 {
 		return 1
 	}
 	return total
+}
+
+func subGroupPoliciesForPodGang(podGang *groveschedulerv1alpha1.PodGang) []volcanov1beta1.SubGroupPolicySpec {
+	subGroups := make([]volcanov1beta1.SubGroupPolicySpec, 0, len(podGang.Spec.PodGroups))
+	for _, group := range podGang.Spec.PodGroups {
+		size := group.MinReplicas
+		if size == 0 {
+			size = 1
+		}
+		subGroups = append(subGroups, volcanov1beta1.SubGroupPolicySpec{
+			Name: group.Name,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					apicommon.LabelPodClique: group.Name,
+				},
+			},
+			MatchLabelKeys: []string{apicommon.LabelPodClique},
+			SubGroupSize:   &size,
+		})
+	}
+	return subGroups
+}
+
+func podGroupCRDHasSubGroupPolicy(crd *apiextensionsv1.CustomResourceDefinition) bool {
+	for _, version := range crd.Spec.Versions {
+		if version.Name != volcanov1beta1.SchemeGroupVersion.Version || !version.Served || version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
+			continue
+		}
+		specSchema, ok := version.Schema.OpenAPIV3Schema.Properties["spec"]
+		if !ok {
+			return false
+		}
+		_, ok = specSchema.Properties["subGroupPolicy"]
+		return ok
+	}
+	return false
 }
 
 func (b *schedulerBackend) resolveQueueForPodGang(ctx context.Context, podGang *groveschedulerv1alpha1.PodGang) (string, error) {

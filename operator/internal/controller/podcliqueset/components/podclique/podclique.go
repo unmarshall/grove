@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
@@ -304,8 +305,11 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 			fmt.Sprintf("Error setting controller reference for PodClique: %v", client.ObjectKeyFromObject(pclq)),
 		)
 	}
+	// Add finalizer at creation so PCLQ controller does not need a separate PATCH on first reconcile.
+	controllerutil.AddFinalizer(pclq, apiconstants.FinalizerPodClique)
 	pclq.Labels = getLabels(pcs, pcsReplica, pclqObjectKey, pclqTemplateSpec, apicommon.GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet(pcs, pcsReplica))
 	pclq.Annotations = mergedPodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
+	delete(pclq.Annotations, apiconstants.AnnotationTopologyName)
 	if len(pclq.Annotations) == 0 {
 		pclq.Annotations = nil
 	}
@@ -325,9 +329,10 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 	}
 	pclq.Spec.StartsAfter = dependentPclqNames
 
-	// Inject MNNVL resourceClaims if enabled on PCS
-	if mnnvl.IsAutoMNNVLEnabled(pcs.Annotations) {
-		mnnvl.InjectMNNVLIntoPodSpec(logger, &pclq.Spec.PodSpec, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplica})
+	// Inject MNNVL resourceClaims: resolve group hierarchically (PCLQ → PCS).
+	groupName, mnnvlEnabled := mnnvl.ResolveGroupNameHierarchically(pclqTemplateSpec.Annotations, pcs.Annotations)
+	if mnnvlEnabled {
+		mnnvl.InjectMNNVLIntoPodSpec(logger, &pclq.Spec.PodSpec, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplica}, groupName)
 	}
 
 	return nil

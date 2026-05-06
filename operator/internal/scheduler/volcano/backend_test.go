@@ -51,6 +51,43 @@ func TestBackend_PreparePod(t *testing.T) {
 	assert.Equal(t, "pg-1", pod.Annotations[volcanov1beta1.KubeGroupNameAnnotationKey])
 }
 
+func TestCheckCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		objects []client.Object
+		wantErr string
+	}{
+		{
+			name:    "PodGroup CRD exposes subGroupPolicy",
+			objects: []client.Object{testutils.NewVolcanoPodGroupCRD(true)},
+		},
+		{
+			name:    "PodGroup CRD missing",
+			wantErr: "failed to get CRD",
+		},
+		{
+			name:    "PodGroup CRD does not expose subGroupPolicy",
+			objects: []client.Object{testutils.NewVolcanoPodGroupCRD(false)},
+			wantErr: "requires Volcano 1.14 or newer",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := testutils.CreateDefaultFakeClient(tt.objects)
+			recorder := record.NewFakeRecorder(10)
+
+			err := CheckCapability(cl, recorder)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestBackend_SyncPodGang(t *testing.T) {
 	pclqWorker := testutils.NewPodCliqueBuilder("pcs", "uid-1", "worker", "default", 0).Build()
 	pclqWorker.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
@@ -87,6 +124,15 @@ func TestBackend_SyncPodGang(t *testing.T) {
 	assert.Equal(t, int32(5), podGroup.Spec.MinMember)
 	assert.Equal(t, "gpu-training", podGroup.Spec.Queue)
 	assert.Equal(t, "high-priority", podGroup.Spec.PriorityClassName)
+	require.Len(t, podGroup.Spec.SubGroupPolicy, 2)
+	assert.Equal(t, pclqWorker.Name, podGroup.Spec.SubGroupPolicy[0].Name)
+	assert.Equal(t, map[string]string{apicommon.LabelPodClique: pclqWorker.Name}, podGroup.Spec.SubGroupPolicy[0].LabelSelector.MatchLabels)
+	assert.Equal(t, []string{apicommon.LabelPodClique}, podGroup.Spec.SubGroupPolicy[0].MatchLabelKeys)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
+	assert.Equal(t, int32(2), *podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
+	assert.Equal(t, pclqPS.Name, podGroup.Spec.SubGroupPolicy[1].Name)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
+	assert.Equal(t, int32(3), *podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
 }
 
 func TestBackend_SyncPodGangQueueConflict(t *testing.T) {

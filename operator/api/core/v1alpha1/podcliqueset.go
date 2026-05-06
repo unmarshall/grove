@@ -271,13 +271,18 @@ type PodCliqueTemplateSpec struct {
 
 // TopologyConstraint defines topology placement requirements.
 type TopologyConstraint struct {
+	// TopologyName is the name of the ClusterTopology resource to use for topology-aware scheduling.
+	// If topologyConstraint is set, topologyName and packDomain must both be specified.
+	// Immutable after creation.
+	// +required
+	TopologyName string `json:"topologyName"`
 	// PackDomain specifies the topology domain for grouping replicas.
 	// Controls placement constraint for EACH individual replica instance.
-	// Must be one of: region, zone, datacenter, block, rack, host, numa
+	// Must reference a domain in the topology levels defined in the ClusterTopology CR name as set in TopologyName
 	// Example: "rack" means each replica independently placed within one rack.
 	// Note: Does NOT constrain all replicas to the same rack together.
 	// Different replicas can be in different topology domains.
-	// +kubebuilder:validation:Enum=region;zone;datacenter;block;rack;host;numa
+	// +required
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
@@ -290,6 +295,12 @@ type PodCliqueScalingGroupConfig struct {
 	Name string `json:"name"`
 	// CliqueNames is the list of names of the PodClique's that are part of the scaling group.
 	CliqueNames []string `json:"cliqueNames"`
+	// Annotations is an unstructured key value map stored with a resource that may be
+	// set by external tools to store and retrieve arbitrary metadata. They are not
+	// queryable and should be preserved when modifying objects.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
 	// Replicas is the desired number of replicas for the scaling group at template level.
 	// This allows one to control the replicas of the scaling group at startup.
 	// If not specified, it defaults to 1.

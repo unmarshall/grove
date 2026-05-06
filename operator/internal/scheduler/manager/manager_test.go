@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // TestInitialize tests backend initialization with different schedulers.
@@ -61,7 +62,11 @@ func TestInitialize(t *testing.T) {
 			backends = nil
 			defaultBackend = nil
 
-			cl := testutils.CreateDefaultFakeClient(nil)
+			var objects []client.Object
+			if tt.schedulerName == configv1alpha1.SchedulerNameVolcano {
+				objects = []client.Object{testutils.NewVolcanoPodGroupCRD(true)}
+			}
+			cl := testutils.CreateDefaultFakeClient(objects)
 			recorder := record.NewFakeRecorder(10)
 
 			cfg := configv1alpha1.SchedulerConfiguration{

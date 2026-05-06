@@ -66,10 +66,43 @@ func DetectMNNVLConflict(annotations map[string]string) error {
 	return nil
 }
 
+// ResolveGroupName extracts the MNNVL group from a single annotation set.
+// Returns (group, true) when mnnvl-group is set.
+// Returns ("", true) when auto-mnnvl is enabled without a group (default group).
+// Returns ("", false) when MNNVL is not requested.
+func ResolveGroupName(annotations map[string]string) (string, bool) {
+	if group, hasGroup := annotations[AnnotationMNNVLGroup]; hasGroup {
+		return group, true
+	}
+	if IsAutoMNNVLEnabled(annotations) {
+		return "", true
+	}
+	return "", false
+}
+
+// ResolveGroupNameHierarchically resolves the MNNVL group from multiple
+// annotation layers, ordered from most specific to least specific
+// (e.g., PCLQ → PCSG/PCS). The first layer that requests MNNVL wins —
+// this lets a child layer intentionally override its parent's group,
+// including escaping a named group back to the default group by setting
+// only auto-mnnvl: enabled without mnnvl-group.
+func ResolveGroupNameHierarchically(annotationLayers ...map[string]string) (string, bool) {
+	for _, annotations := range annotationLayers {
+		if group, ok := ResolveGroupName(annotations); ok {
+			return group, true
+		}
+	}
+	return "", false
+}
+
 // GenerateRCTName creates the ResourceClaimTemplate name for a PCS replica.
-// The RCT name matches the ComputeDomain name: {pcs-name}-{replica-index}
-func GenerateRCTName(pcsNameReplica apicommon.ResourceNameReplica) string {
-	return fmt.Sprintf("%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica)
+// Without a group: {pcs-name}-{replica-index} (default CD).
+// With a group: {pcs-name}-{replica-index}-{group-name}.
+func GenerateRCTName(pcsNameReplica apicommon.ResourceNameReplica, groupName string) string {
+	if groupName == "" {
+		return fmt.Sprintf("%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica)
+	}
+	return fmt.Sprintf("%s-%d-%s", pcsNameReplica.Name, pcsNameReplica.Replica, groupName)
 }
 
 // hasGPURequirement checks if any container in any clique of the PCS requests nvidia.com/gpu.
@@ -78,15 +111,15 @@ func hasGPURequirement(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 		if clique == nil {
 			continue
 		}
-		if hasGPUInPodSpec(&clique.Spec.PodSpec) {
+		if HasGPUInPodSpec(&clique.Spec.PodSpec) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasGPUInPodSpec checks if any container in the PodSpec requests GPU resources.
-func hasGPUInPodSpec(podSpec *corev1.PodSpec) bool {
+// HasGPUInPodSpec checks if any container in the PodSpec requests GPU resources.
+func HasGPUInPodSpec(podSpec *corev1.PodSpec) bool {
 	if podSpec == nil {
 		return false
 	}

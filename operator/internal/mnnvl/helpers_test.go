@@ -83,32 +83,173 @@ func TestIsAutoMNNVLEnabled(t *testing.T) {
 	}
 }
 
+func TestResolveGroupName(t *testing.T) {
+	testCases := []struct {
+		description   string
+		annotations   map[string]string
+		expectedGroup string
+		expectedOk    bool
+	}{
+		{
+			description:   "auto-mnnvl enabled only — default group",
+			annotations:   map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled},
+			expectedGroup: "",
+			expectedOk:    true,
+		},
+		{
+			description:   "mnnvl-group only — named group",
+			annotations:   map[string]string{AnnotationMNNVLGroup: "workers"},
+			expectedGroup: "workers",
+			expectedOk:    true,
+		},
+		{
+			description: "both — group takes precedence",
+			annotations: map[string]string{
+				AnnotationAutoMNNVL:  AnnotationAutoMNNVLEnabled,
+				AnnotationMNNVLGroup: "training",
+			},
+			expectedGroup: "training",
+			expectedOk:    true,
+		},
+		{
+			description: "auto-mnnvl disabled — not enrolled",
+			annotations: map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLDisabled},
+			expectedOk:  false,
+		},
+		{
+			description: "no annotations — not enrolled",
+			annotations: nil,
+			expectedOk:  false,
+		},
+		{
+			description: "unrelated annotations only — not enrolled",
+			annotations: map[string]string{"other": "value"},
+			expectedOk:  false,
+		},
+	}
+
+	t.Parallel()
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			group, ok := ResolveGroupName(tc.annotations)
+			assert.Equal(t, tc.expectedOk, ok)
+			if ok {
+				assert.Equal(t, tc.expectedGroup, group)
+			}
+		})
+	}
+}
+
+func TestResolveGroupNameHierarchically(t *testing.T) {
+	tests := []struct {
+		description   string
+		layers        []map[string]string
+		expectedGroup string
+		expectedOk    bool
+	}{
+		{
+			description:   "PCLQ has group — parent ignored",
+			layers:        []map[string]string{{AnnotationMNNVLGroup: "pclq-group"}, {AnnotationMNNVLGroup: "parent-group"}},
+			expectedGroup: "pclq-group",
+			expectedOk:    true,
+		},
+		{
+			description:   "PCLQ has auto-mnnvl enabled — parent group ignored (escape to default)",
+			layers:        []map[string]string{{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}, {AnnotationMNNVLGroup: "parent-group"}},
+			expectedGroup: "",
+			expectedOk:    true,
+		},
+		{
+			description:   "PCLQ has nothing — falls back to parent group",
+			layers:        []map[string]string{{}, {AnnotationMNNVLGroup: "parent-group"}},
+			expectedGroup: "parent-group",
+			expectedOk:    true,
+		},
+		{
+			description:   "PCLQ has nothing — falls back to parent auto-mnnvl",
+			layers:        []map[string]string{nil, {AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}},
+			expectedGroup: "",
+			expectedOk:    true,
+		},
+		{
+			description:   "PCLQ has group — nil parent is safe",
+			layers:        []map[string]string{{AnnotationMNNVLGroup: "pclq-group"}, nil},
+			expectedGroup: "pclq-group",
+			expectedOk:    true,
+		},
+		{
+			description: "PCLQ empty — nil parent is safe",
+			layers:      []map[string]string{{}, nil},
+			expectedOk:  false,
+		},
+		{
+			description: "no layers have MNNVL — not enrolled",
+			layers:      []map[string]string{{}, {}},
+			expectedOk:  false,
+		},
+		{
+			description: "no layers at all — not enrolled",
+			layers:      nil,
+			expectedOk:  false,
+		},
+	}
+
+	t.Parallel()
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			group, ok := ResolveGroupNameHierarchically(tc.layers...)
+			assert.Equal(t, tc.expectedOk, ok)
+			if ok {
+				assert.Equal(t, tc.expectedGroup, group)
+			}
+		})
+	}
+}
+
 func TestGenerateRCTName(t *testing.T) {
 	tests := []struct {
 		description    string
 		pcsNameReplica apicommon.ResourceNameReplica
+		groupName      string
 		expected       string
 	}{
 		{
-			description:    "simple name with index 0",
+			description:    "default group index 0",
 			pcsNameReplica: apicommon.ResourceNameReplica{Name: "my-pcs", Replica: 0},
+			groupName:      "",
 			expected:       "my-pcs-0",
 		},
 		{
-			description:    "name with index 5",
+			description:    "default group index 5",
 			pcsNameReplica: apicommon.ResourceNameReplica{Name: "workload", Replica: 5},
+			groupName:      "",
 			expected:       "workload-5",
 		},
 		{
-			description:    "name with dashes",
+			description:    "default group with dashes",
 			pcsNameReplica: apicommon.ResourceNameReplica{Name: "my-long-pcs-name", Replica: 10},
+			groupName:      "",
 			expected:       "my-long-pcs-name-10",
+		},
+		{
+			description:    "named group",
+			pcsNameReplica: apicommon.ResourceNameReplica{Name: "my-pcs", Replica: 0},
+			groupName:      "workers",
+			expected:       "my-pcs-0-workers",
+		},
+		{
+			description:    "named group higher replica",
+			pcsNameReplica: apicommon.ResourceNameReplica{Name: "training", Replica: 3},
+			groupName:      "encoders",
+			expected:       "training-3-encoders",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.description, func(t *testing.T) {
-			result := GenerateRCTName(tc.pcsNameReplica)
+			result := GenerateRCTName(tc.pcsNameReplica, tc.groupName)
 			assert.Equal(t, tc.expected, result)
 		})
 	}
@@ -411,6 +552,22 @@ func createPCSWithCliques(cliques []cliqueAnnotation) *grovecorev1alpha1.PodCliq
 	return builder.Build()
 }
 
+// createPCSWithPCSGConfigAnnotations creates a PCS with a single PCSG config carrying the given annotations.
+func createPCSWithPCSGConfigAnnotations(annotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
+	builder := testutils.NewPodCliqueSetBuilder("test-pcs", "default", "").
+		WithPodCliqueTemplateSpec(
+			testutils.NewPodCliqueTemplateSpecBuilder("worker").
+				WithContainer(testutils.NewGPUContainer("train", "nvidia/cuda:latest", 8)).
+				Build(),
+		)
+	builder.WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+		Name:        "scaling-group-1",
+		CliqueNames: []string{"worker"},
+		Annotations: annotations,
+	})
+	return builder.Build()
+}
+
 // createPCSWithoutGPU creates a PCS without GPU using the builder for tests in this package.
 func createPCSWithoutGPU(annotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
 	return testutils.NewPodCliqueSetBuilder("test-pcs", "default", "").
@@ -423,7 +580,33 @@ func createPCSWithoutGPU(annotations map[string]string) *grovecorev1alpha1.PodCl
 		Build()
 }
 
-func Test_hasGPUInPodSpec(t *testing.T) {
+// createPCSWithNonGPUCliqueAnnotations creates a PCS with a single non-GPU clique
+// carrying the given annotations.
+func createPCSWithNonGPUCliqueAnnotations(cliqueAnnotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
+	return testutils.NewPodCliqueSetBuilder("test-pcs", "default", "").
+		WithPodCliqueTemplateSpec(
+			testutils.NewPodCliqueTemplateSpecBuilder("cpu-worker").
+				WithAnnotations(cliqueAnnotations).
+				WithContainer(testutils.NewContainer("app", "nginx:latest")).
+				Build(),
+		).
+		Build()
+}
+
+// createPCSWithGPUCliqueAnnotations creates a PCS with a single GPU clique
+// carrying the given annotations.
+func createPCSWithGPUCliqueAnnotations(cliqueAnnotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
+	return testutils.NewPodCliqueSetBuilder("test-pcs", "default", "").
+		WithPodCliqueTemplateSpec(
+			testutils.NewPodCliqueTemplateSpecBuilder("gpu-worker").
+				WithAnnotations(cliqueAnnotations).
+				WithContainer(testutils.NewGPUContainer("train", "nvidia/cuda:latest", 8)).
+				Build(),
+		).
+		Build()
+}
+
+func TestHasGPUInPodSpec(t *testing.T) {
 	tests := []struct {
 		description string
 		podSpec     *corev1.PodSpec
@@ -523,7 +706,7 @@ func Test_hasGPUInPodSpec(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.description, func(t *testing.T) {
-			result := hasGPUInPodSpec(tc.podSpec)
+			result := HasGPUInPodSpec(tc.podSpec)
 			assert.Equal(t, tc.expected, result)
 		})
 	}

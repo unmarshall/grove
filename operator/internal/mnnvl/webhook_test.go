@@ -21,70 +21,8 @@ import (
 
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 )
-
-func TestMutateAutoMNNVL(t *testing.T) {
-	tests := []struct {
-		description        string
-		pcs                *grovecorev1alpha1.PodCliqueSet
-		autoMNNVLEnabled   bool
-		expectedAnnotation string
-	}{
-		{
-			description:        "feature enabled + GPU + no annotation -> add enabled",
-			pcs:                createPCSWithGPU(nil),
-			autoMNNVLEnabled:   true,
-			expectedAnnotation: AnnotationAutoMNNVLEnabled,
-		},
-		{
-			description:        "feature enabled + GPU + existing disabled -> no change",
-			pcs:                createPCSWithGPU(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLDisabled}),
-			autoMNNVLEnabled:   true,
-			expectedAnnotation: AnnotationAutoMNNVLDisabled,
-		},
-		{
-			description:        "feature enabled + GPU + existing enabled -> no change",
-			pcs:                createPCSWithGPU(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}),
-			autoMNNVLEnabled:   true,
-			expectedAnnotation: AnnotationAutoMNNVLEnabled,
-		},
-		{
-			description:        "feature enabled + no GPU -> no annotation",
-			pcs:                createPCSWithoutGPU(nil),
-			autoMNNVLEnabled:   true,
-			expectedAnnotation: "",
-		},
-		{
-			description:        "feature disabled + GPU -> no annotation",
-			pcs:                createPCSWithGPU(nil),
-			autoMNNVLEnabled:   false,
-			expectedAnnotation: "",
-		},
-		{
-			description:        "feature disabled + no GPU -> no annotation",
-			pcs:                createPCSWithoutGPU(nil),
-			autoMNNVLEnabled:   false,
-			expectedAnnotation: "",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			MutateAutoMNNVL(logr.Discard(), test.pcs, test.autoMNNVLEnabled)
-
-			if test.expectedAnnotation == "" {
-				if test.pcs.Annotations != nil {
-					_, exists := test.pcs.Annotations[AnnotationAutoMNNVL]
-					assert.False(t, exists, "annotation should not exist")
-				}
-			} else {
-				assert.Equal(t, test.expectedAnnotation, test.pcs.Annotations[AnnotationAutoMNNVL])
-			}
-		})
-	}
-}
 
 func TestValidatePCSOnCreate_Metadata(t *testing.T) {
 	tests := []struct {
@@ -434,6 +372,127 @@ func TestValidatePCSOnCreate_Spec(t *testing.T) {
 	}
 }
 
+func TestValidatePCSOnCreate_PCSGConfig(t *testing.T) {
+	tests := []struct {
+		description      string
+		pcs              *grovecorev1alpha1.PodCliqueSet
+		autoMNNVLEnabled bool
+		expectError      bool
+		errorContains    string
+	}{
+		{
+			description:      "valid mnnvl-group on PCSG config + feature enabled -> no error",
+			pcs:              createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			autoMNNVLEnabled: true,
+			expectError:      false,
+		},
+		{
+			description:      "invalid mnnvl-group on PCSG config -> error",
+			pcs:              createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "INVALID"}),
+			autoMNNVLEnabled: true,
+			expectError:      true,
+			errorContains:    "not a valid DNS-1123 label",
+		},
+		{
+			description:      "conflict on PCSG config (disabled + group) -> error",
+			pcs:              createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLDisabled, AnnotationMNNVLGroup: "training"}),
+			autoMNNVLEnabled: true,
+			expectError:      true,
+			errorContains:    "contradictory",
+		},
+		{
+			description:      "mnnvl-group on PCSG config + feature disabled -> error",
+			pcs:              createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "workers"}),
+			autoMNNVLEnabled: false,
+			expectError:      true,
+			errorContains:    "not enabled",
+		},
+		{
+			description:      "auto-mnnvl enabled on PCSG config + feature disabled -> error",
+			pcs:              createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}),
+			autoMNNVLEnabled: false,
+			expectError:      true,
+			errorContains:    "not enabled",
+		},
+		{
+			description:      "PCSG config without annotations -> no error",
+			pcs:              createPCSWithPCSGConfigAnnotations(nil),
+			autoMNNVLEnabled: true,
+			expectError:      false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			errs := ValidatePCSOnCreate(test.pcs, test.autoMNNVLEnabled)
+
+			if test.expectError {
+				assert.NotEmpty(t, errs, "expected validation errors")
+				assert.Contains(t, errs.ToAggregate().Error(), test.errorContains)
+			} else {
+				assert.Empty(t, errs, "expected no validation errors")
+			}
+		})
+	}
+}
+
+func TestValidatePCSOnUpdate_PCSGConfig(t *testing.T) {
+	tests := []struct {
+		description string
+		oldPCS      *grovecorev1alpha1.PodCliqueSet
+		newPCS      *grovecorev1alpha1.PodCliqueSet
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			description: "PCSG config mnnvl-group unchanged -> no error",
+			oldPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			newPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			expectError: false,
+		},
+		{
+			description: "PCSG config mnnvl-group added -> error",
+			oldPCS:      createPCSWithPCSGConfigAnnotations(nil),
+			newPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			expectError: true,
+			errorMsg:    "cannot be added",
+		},
+		{
+			description: "PCSG config mnnvl-group changed -> error",
+			oldPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			newPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "inference"}),
+			expectError: true,
+			errorMsg:    "immutable",
+		},
+		{
+			description: "PCSG config mnnvl-group removed -> error",
+			oldPCS:      createPCSWithPCSGConfigAnnotations(map[string]string{AnnotationMNNVLGroup: "training"}),
+			newPCS:      createPCSWithPCSGConfigAnnotations(nil),
+			expectError: true,
+			errorMsg:    "cannot be removed",
+		},
+		{
+			description: "PCSG config without annotations on both -> no error",
+			oldPCS:      createPCSWithPCSGConfigAnnotations(nil),
+			newPCS:      createPCSWithPCSGConfigAnnotations(nil),
+			expectError: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			errs := ValidatePCSOnUpdate(test.oldPCS, test.newPCS)
+
+			if test.expectError {
+				assert.NotEmpty(t, errs, "expected validation errors")
+				assert.Contains(t, errs.ToAggregate().Error(), test.errorMsg)
+			} else {
+				assert.Empty(t, errs, "expected no validation errors")
+			}
+		})
+	}
+}
+
 func TestValidatePCSOnUpdate_Spec(t *testing.T) {
 	tests := []struct {
 		description string
@@ -532,6 +591,49 @@ func TestValidatePCSOnUpdate_Spec(t *testing.T) {
 			} else {
 				assert.Empty(t, errs, "expected no validation errors")
 			}
+		})
+	}
+}
+
+// TestValidatePCSOnCreate_NonGPUCliqueWithMNNVL verifies that MNNVL annotations
+// on non-GPU cliques are accepted (silently ignored at injection time).
+func TestValidatePCSOnCreate_NonGPUCliqueWithMNNVL(t *testing.T) {
+	tests := []struct {
+		description      string
+		pcs              *grovecorev1alpha1.PodCliqueSet
+		autoMNNVLEnabled bool
+	}{
+		{
+			description:      "non-GPU clique with auto-mnnvl enabled -> accepted (silently skipped at injection)",
+			pcs:              createPCSWithNonGPUCliqueAnnotations(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}),
+			autoMNNVLEnabled: true,
+		},
+		{
+			description:      "non-GPU clique with mnnvl-group -> accepted (silently skipped at injection)",
+			pcs:              createPCSWithNonGPUCliqueAnnotations(map[string]string{AnnotationMNNVLGroup: "workers"}),
+			autoMNNVLEnabled: true,
+		},
+		{
+			description:      "GPU clique with auto-mnnvl enabled -> accepted",
+			pcs:              createPCSWithGPUCliqueAnnotations(map[string]string{AnnotationAutoMNNVL: AnnotationAutoMNNVLEnabled}),
+			autoMNNVLEnabled: true,
+		},
+		{
+			description:      "GPU clique with mnnvl-group -> accepted",
+			pcs:              createPCSWithGPUCliqueAnnotations(map[string]string{AnnotationMNNVLGroup: "workers"}),
+			autoMNNVLEnabled: true,
+		},
+		{
+			description:      "non-GPU clique without MNNVL annotations -> accepted",
+			pcs:              createPCSWithNonGPUCliqueAnnotations(nil),
+			autoMNNVLEnabled: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			errs := ValidatePCSOnCreate(test.pcs, test.autoMNNVLEnabled)
+			assert.Empty(t, errs, "MNNVL annotations on non-GPU cliques should be accepted")
 		})
 	}
 }

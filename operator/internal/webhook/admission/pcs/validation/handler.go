@@ -74,7 +74,7 @@ func (h *Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admis
 
 	v := newPCSValidator(pcs, admissionv1.Create, h.tasConfig, h.schedulerConfig, h.client)
 	var allErrs field.ErrorList
-	allErrs = append(allErrs, v.validateTopologyConstraintsOnCreate()...)
+	allErrs = append(allErrs, v.validateTopologyConstraintsOnCreate(ctx)...)
 	warnings, errs := v.validate()
 	allErrs = append(allErrs, errs...)
 
