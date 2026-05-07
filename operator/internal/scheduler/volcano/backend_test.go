@@ -130,9 +130,13 @@ func TestBackend_SyncPodGang(t *testing.T) {
 	assert.Equal(t, []string{apicommon.LabelPodClique}, podGroup.Spec.SubGroupPolicy[0].MatchLabelKeys)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
 	assert.Equal(t, int32(2), *podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].MinSubGroups)
+	assert.Equal(t, int32(1), *podGroup.Spec.SubGroupPolicy[0].MinSubGroups)
 	assert.Equal(t, pclqPS.Name, podGroup.Spec.SubGroupPolicy[1].Name)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
 	assert.Equal(t, int32(3), *podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].MinSubGroups)
+	assert.Equal(t, int32(1), *podGroup.Spec.SubGroupPolicy[1].MinSubGroups)
 }
 
 func TestBackend_SyncPodGangQueueConflict(t *testing.T) {

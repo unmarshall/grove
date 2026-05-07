@@ -20,10 +20,12 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -67,6 +69,12 @@ func TestInitialize(t *testing.T) {
 				objects = []client.Object{testutils.NewVolcanoPodGroupCRD(true)}
 			}
 			cl := testutils.CreateDefaultFakeClient(objects)
+			if tt.schedulerName == configv1alpha1.SchedulerNameVolcano {
+				restore := volcano.SetCapabilityClientFactoryForTest(func(_ *runtime.Scheme) (client.Client, error) {
+					return cl, nil
+				})
+				defer restore()
+			}
 			recorder := record.NewFakeRecorder(10)
 
 			cfg := configv1alpha1.SchedulerConfiguration{

@@ -19,7 +19,6 @@ package volcano
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
@@ -51,6 +50,32 @@ type schedulerBackend struct {
 
 var _ scheduler.Backend = (*schedulerBackend)(nil)
 
+// newCapabilityClient creates a direct API client for the startup capability
+// check. The check reads the Volcano PodGroup CRD before the manager cache is
+// started, and using the cached client here would register a CRD informer that
+// requires cluster-wide list/watch permissions on CustomResourceDefinitions.
+var newCapabilityClient = func(scheme *runtime.Scheme) (client.Client, error) {
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cluster config for Volcano capability check: %w", err)
+	}
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create direct API client for Volcano capability check: %w", err)
+	}
+	return directClient, nil
+}
+
+// SetCapabilityClientFactoryForTest replaces the client factory used by Init.
+// It is intended for unit tests that should not talk to a real cluster.
+func SetCapabilityClientFactoryForTest(factory func(*runtime.Scheme) (client.Client, error)) func() {
+	old := newCapabilityClient
+	newCapabilityClient = factory
+	return func() {
+		newCapabilityClient = old
+	}
+}
+
 // New creates a Volcano scheduler backend from the given scheduler profile.
 func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, profile configv1alpha1.SchedulerProfile) scheduler.Backend {
 	return &schedulerBackend{
@@ -67,28 +92,9 @@ func (b *schedulerBackend) Name() string {
 }
 
 func (b *schedulerBackend) Init() error {
-	crd, err := checkCapability(b.client)
-	if err == nil {
-		return nil
-	}
-	// isCacheNotStartedError reports whether the capability check failed because
-	// the controller-runtime cached client was used before its informer cache had
-	// started. This can happen during scheduler backend initialization, which runs
-	// before the manager starts all caches; in that narrow startup window, the CRD
-	// lookup should be retried with a direct API client instead of treating it as a
-	// missing or incompatible Volcano installation.
-	if !isCacheNotStartedError(err) {
-		recordCapabilityEvent(b.eventRecorder, crd, err)
+	directClient, err := newCapabilityClient(b.scheme)
+	if err != nil {
 		return err
-	}
-
-	cfg, err := ctrl.GetConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get cluster config for Volcano capability check: %w", err)
-	}
-	directClient, err := client.New(cfg, client.Options{Scheme: b.scheme})
-	if err != nil {
-		return fmt.Errorf("failed to create direct API client for Volcano capability check: %w", err)
 	}
 	return CheckCapability(directClient, b.eventRecorder)
 }
@@ -163,10 +169,6 @@ func recordCapabilityEvent(eventRecorder record.EventRecorder, obj runtime.Objec
 	eventRecorder.Eventf(obj, corev1.EventTypeWarning, "VolcanoCapabilityUnavailable", "%v", err)
 }
 
-func isCacheNotStartedError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "cache is not started")
-}
-
 func (b *schedulerBackend) OnPodGangDelete(_ context.Context, _ *groveschedulerv1alpha1.PodGang) error {
 	return nil
 }
@@ -219,6 +221,7 @@ func subGroupPoliciesForPodGang(podGang *groveschedulerv1alpha1.PodGang) []volca
 		if size == 0 {
 			size = 1
 		}
+		minSubGroups := int32(1)
 		subGroups = append(subGroups, volcanov1beta1.SubGroupPolicySpec{
 			Name: group.Name,
 			LabelSelector: &metav1.LabelSelector{
@@ -228,6 +231,9 @@ func subGroupPoliciesForPodGang(podGang *groveschedulerv1alpha1.PodGang) []volca
 			},
 			MatchLabelKeys: []string{apicommon.LabelPodClique},
 			SubGroupSize:   &size,
+			// Each Grove PodGroup in a PodGang maps to one Volcano subgroup
+			// policy, so at least one matching subgroup must satisfy subGroupSize.
+			MinSubGroups: &minSubGroups,
 		})
 	}
 	return subGroups
