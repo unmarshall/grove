@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -317,7 +316,7 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 	podGangName := apicommon.GeneratePodGangNameForPodCliqueOwnedByPCSG(pcs, pcsReplicaIndex, pcsg, pcsgReplicaIndex)
 
 	pclq.Labels = getLabels(pcs, pcsReplicaIndex, pcsg, pcsgReplicaIndex, pclqObjectKey, pclqTemplateSpec, podGangName)
-	pclq.Annotations = mergedPodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
+	pclq.Annotations = volcanoscheduler.MergePodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
 	delete(pclq.Annotations, apiconstants.AnnotationTopologyName)
 	// set PodCliqueSpec
 	// ------------------------------------
@@ -346,24 +345,6 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 	}
 
 	return nil
-}
-
-// mergedPodCliqueAnnotations preserves PodClique-local annotations and only
-// backfills the Volcano queue annotation from the PodCliqueSet when the
-// PodClique template does not specify its own queue.
-func mergedPodCliqueAnnotations(pcsAnnotations, cliqueAnnotations map[string]string) map[string]string {
-	annotations := maps.Clone(cliqueAnnotations)
-	queue := strings.TrimSpace(annotations[volcanoscheduler.QueueAnnotationKey])
-	if queue == "" {
-		queue = strings.TrimSpace(pcsAnnotations[volcanoscheduler.QueueAnnotationKey])
-	}
-	if queue != "" {
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-		annotations[volcanoscheduler.QueueAnnotationKey] = queue
-	}
-	return annotations
 }
 
 // addEnvironmentVariablesToPodContainerSpecs injects PCSG-specific environment variables into all containers in the PodClique

@@ -308,7 +308,7 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 	// Add finalizer at creation so PCLQ controller does not need a separate PATCH on first reconcile.
 	controllerutil.AddFinalizer(pclq, apiconstants.FinalizerPodClique)
 	pclq.Labels = getLabels(pcs, pcsReplica, pclqObjectKey, pclqTemplateSpec, apicommon.GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet(pcs, pcsReplica))
-	pclq.Annotations = mergedPodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
+	pclq.Annotations = volcanoscheduler.MergePodCliqueAnnotations(pcs.Annotations, pclqTemplateSpec.Annotations)
 	delete(pclq.Annotations, apiconstants.AnnotationTopologyName)
 	if len(pclq.Annotations) == 0 {
 		pclq.Annotations = nil
@@ -336,21 +336,6 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 	}
 
 	return nil
-}
-
-// mergedPodCliqueAnnotations preserves PodClique-local annotations and only
-// backfills the Volcano queue annotation from the PodCliqueSet when the
-// PodClique template does not specify its own queue.
-func mergedPodCliqueAnnotations(pcsAnnotations, cliqueAnnotations map[string]string) map[string]string {
-	annotations := lo.Assign(map[string]string{}, cliqueAnnotations)
-	queue := strings.TrimSpace(annotations[volcanoscheduler.QueueAnnotationKey])
-	if queue == "" {
-		queue = strings.TrimSpace(pcsAnnotations[volcanoscheduler.QueueAnnotationKey])
-	}
-	if queue != "" {
-		annotations[volcanoscheduler.QueueAnnotationKey] = queue
-	}
-	return annotations
 }
 
 // identifyFullyQualifiedStartupDependencyNames determines the PodClique startup dependencies based on StartupType.

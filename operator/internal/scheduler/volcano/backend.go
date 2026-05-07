@@ -67,12 +67,19 @@ func (b *schedulerBackend) Name() string {
 }
 
 func (b *schedulerBackend) Init() error {
-	err := CheckCapability(b.client, nil)
+	crd, err := checkCapability(b.client)
 	if err == nil {
 		return nil
 	}
+	// isCacheNotStartedError reports whether the capability check failed because
+	// the controller-runtime cached client was used before its informer cache had
+	// started. This can happen during scheduler backend initialization, which runs
+	// before the manager starts all caches; in that narrow startup window, the CRD
+	// lookup should be retried with a direct API client instead of treating it as a
+	// missing or incompatible Volcano installation.
 	if !isCacheNotStartedError(err) {
-		return CheckCapability(b.client, b.eventRecorder)
+		recordCapabilityEvent(b.eventRecorder, crd, err)
+		return err
 	}
 
 	cfg, err := ctrl.GetConfig()
@@ -89,20 +96,26 @@ func (b *schedulerBackend) Init() error {
 // CheckCapability verifies that the installed Volcano PodGroup CRD supports
 // the subgroup policy fields Grove needs for gang scheduling.
 func CheckCapability(cl client.Client, eventRecorder record.EventRecorder) error {
+	crd, err := checkCapability(cl)
+	if err != nil {
+		recordCapabilityEvent(eventRecorder, crd, err)
+	}
+	return err
+}
+
+func checkCapability(cl client.Client) (*apiextensionsv1.CustomResourceDefinition, error) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: volcanoPodGroupCRDName},
 	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: volcanoPodGroupCRDName}, crd); err != nil {
 		initErr := fmt.Errorf("volcano scheduler backend requires Volcano 1.14 or newer with PodGroup.spec.subGroupPolicy: failed to get CRD %q: %w", volcanoPodGroupCRDName, err)
-		recordCapabilityEvent(eventRecorder, crd, initErr)
-		return initErr
+		return crd, initErr
 	}
 	if !podGroupCRDHasSubGroupPolicy(crd) {
 		initErr := fmt.Errorf("volcano scheduler backend requires Volcano 1.14 or newer with PodGroup.spec.subGroupPolicy on scheduling.volcano.sh/v1beta1 PodGroup")
-		recordCapabilityEvent(eventRecorder, crd, initErr)
-		return initErr
+		return crd, initErr
 	}
-	return nil
+	return crd, nil
 }
 
 func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedulerv1alpha1.PodGang) error {

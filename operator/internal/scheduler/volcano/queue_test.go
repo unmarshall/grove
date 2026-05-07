@@ -37,6 +37,50 @@ func TestEffectiveQueueFromAnnotations(t *testing.T) {
 	assert.Equal(t, "gpu-training", EffectiveQueueFromAnnotations(map[string]string{QueueAnnotationKey: "gpu-training"}))
 }
 
+func TestMergePodCliqueAnnotations(t *testing.T) {
+	tests := []struct {
+		name              string
+		pcsAnnotations    map[string]string
+		cliqueAnnotations map[string]string
+		expected          map[string]string
+	}{
+		{
+			name:              "keeps non queue clique annotations",
+			cliqueAnnotations: map[string]string{"example.com/keep": "yes"},
+			expected:          map[string]string{"example.com/keep": "yes"},
+		},
+		{
+			name:           "inherits PCS queue when clique queue is empty",
+			pcsAnnotations: map[string]string{QueueAnnotationKey: "qa-volcano-e2e"},
+			expected:       map[string]string{QueueAnnotationKey: "qa-volcano-e2e"},
+		},
+		{
+			name:           "keeps clique queue when explicitly set",
+			pcsAnnotations: map[string]string{QueueAnnotationKey: "qa-volcano-e2e"},
+			cliqueAnnotations: map[string]string{
+				QueueAnnotationKey: "high-priority",
+				"example.com/keep": "yes",
+			},
+			expected: map[string]string{
+				QueueAnnotationKey: "high-priority",
+				"example.com/keep": "yes",
+			},
+		},
+		{
+			name:              "trims blank clique queue before inheriting PCS queue",
+			pcsAnnotations:    map[string]string{QueueAnnotationKey: "qa-volcano-e2e"},
+			cliqueAnnotations: map[string]string{QueueAnnotationKey: "   "},
+			expected:          map[string]string{QueueAnnotationKey: "qa-volcano-e2e"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, MergePodCliqueAnnotations(tt.pcsAnnotations, tt.cliqueAnnotations))
+		})
+	}
+}
+
 func TestResolvePodCliqueQueue(t *testing.T) {
 	tests := []struct {
 		name              string

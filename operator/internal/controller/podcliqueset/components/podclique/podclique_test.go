@@ -189,7 +189,7 @@ func TestMergedPodCliqueAnnotations(t *testing.T) {
 			"clique-only": "kept",
 		}
 
-		annotations := mergedPodCliqueAnnotations(pcsAnnotations, cliqueAnnotations)
+		annotations := volcanoscheduler.MergePodCliqueAnnotations(pcsAnnotations, cliqueAnnotations)
 
 		assert.Equal(t, "kept", annotations["clique-only"])
 		assert.Equal(t, "default", annotations[volcanoscheduler.QueueAnnotationKey])
@@ -205,7 +205,7 @@ func TestMergedPodCliqueAnnotations(t *testing.T) {
 			"clique-only":                       "kept",
 		}
 
-		annotations := mergedPodCliqueAnnotations(pcsAnnotations, cliqueAnnotations)
+		annotations := volcanoscheduler.MergePodCliqueAnnotations(pcsAnnotations, cliqueAnnotations)
 
 		assert.Equal(t, "gpu-training", annotations[volcanoscheduler.QueueAnnotationKey])
 		assert.Equal(t, "kept", annotations["clique-only"])
