@@ -36,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
@@ -272,6 +273,10 @@ func TestValidateVolcanoQueues(t *testing.T) {
 			tc.mutate(pcs)
 			existingObjs := append([]client.Object{testutils.NewVolcanoPodGroupCRD(true)}, tc.existingObjs...)
 			cl := testutils.CreateDefaultFakeClient(existingObjs)
+			restore := volcanoscheduler.SetCapabilityClientFactoryForTest(func(_ *runtime.Scheme) (client.Client, error) {
+				return cl, nil
+			})
+			defer restore()
 			require.NoError(t, schedmanager.Initialize(
 				cl,
 				cl.Scheme(),
