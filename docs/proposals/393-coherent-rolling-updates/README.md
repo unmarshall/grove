@@ -157,11 +157,10 @@ An **MVU template** is basis on which a MPG is created and is based on `MinAvail
 
 The update flow will be handled as per the following steps:
 
-* Schedule gate all `Pending` pods across all PCLQs. This ensures that pending pods at the older version do not get scheduled when we start to replace older version scheduled pods by first deleting them and then creating newer versioned pods.
 * Start MVU update loop: *(continue until all the targeted older version pods have been updated)*
   * Based on MVU template, select the set of standalone PCLQ pods and PCSG replica pods to be taken down and are added to a **take-down set**. If the remaining PCLQ pods and PCSG replicas together do not make up a full MVU template, then add the remaining pods to the *take-down set*.
-    * Scheduled pods are selected for the take-down set ahead of pending pods.
-  * Recreate all pods in the take-down set as schedule gated. This will allow Grove to schedule the MPGs ahead of Tail-MPGs.
+    * Pending pods are eagerly included in the take-down set first. Among remaining capacity, scheduled pods are preferred over other pending pods.
+  * Recreate all pods in the take-down set as schedule gated (for pending pods, this delete-and-recreate is the only way to apply a scheduling gate, since gates cannot be added to already-created pods). This will allow Grove to schedule the MPGs ahead of Tail-MPGs.
   * Create the MPG based on MVU template (*note*: there will always be only one MPG to create per update iteration). In case there are remaining pods of a standalone PCLQ within the take-down set, add those pods to the MPG. Remove scheduling gate on pods in the MPG.
   * Further update is blocked until this MPG gets scheduled and becomes available. The MPG is considered available when each of its constituent PodGroups are available. Each PodGroup is considered available when at least `MinReplicas` (as defined on the `PodGroup` within the `PodGang` spec) number of its constituent pods are ready.
   * In case, there are remaining PCSG replicas in the take-down set, create Tail-MPGs out of each PCSG replica and remove the scheduling gates on all of their constituent pods.
