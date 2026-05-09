@@ -41,12 +41,12 @@ Two fixed PodGang types exist today:
 ### New model (this implementation)
 A single unified PodGang type — **MPG** — computed from the MVU template, named:
 ```
-<pcs-name>-<pcs-replica-index>-<short-generationhash>-<iteration>
+<pcs-name>-<pcs-replica-index>-<short-generationhash>-<createdPodGangCount-1>
 ```
 
 Where:
 - `short-generationhash` is a truncated prefix (5 chars) of `pcs.Status.CurrentGenerationHash` — encodes *which update* the MPG belongs to; 5 chars is consistent with Kubernetes ReplicaSet/Pod suffix conventions and sufficient for collision resistance within a single PCS's update history
-- `iteration` is a small integer (0, 1, 2, …) equal to `CreatedPodGangCount` at the time the PodGang is created — stored as `CreatedPodGangCount` in `PodGangReplicaState`, monotonically increasing and never resets
+- `createdPodGangCount-1` is `PodGangState[replicaIndex].CreatedPodGangCount - 1` at the time the PodGang is created — the count is incremented after creation, so the name uses the pre-increment value
 
 This avoids any global monotonic growth. Names are meaningful (you can tell from the name which update event and which MVU iteration created the PodGang), and the iteration count is bounded by `ceil(max(old_standalone_pclq_pods / MinAvailable_pclq, old_pcsg_replicas / MinAvailable_pcsg))` — a small number tied to the PCS replica count, not something that grows over the lifetime of the PCS.
 
@@ -100,9 +100,10 @@ type CoherentReplicaUpdateProgress struct {
     ReplicaIndex    int32        `json:"replicaIndex"`
     UpdateStartedAt metav1.Time  `json:"updateStartedAt"`
     UpdateEndedAt  *metav1.Time `json:"updateEndedAt,omitempty"`
-    // PendingPodGangName is the name of the PodGang whose availability is currently being
-    // waited on before the next update iteration can proceed. Nil when no PodGang is pending.
-    PendingPodGangName *string `json:"pendingPodGangName,omitempty"`
+    // PendingPodGangNames are the names of all PodGangs created in the current iteration
+    // (one non-tail MPG + zero or more tail-MPGs) whose availability is being waited on
+    // before the next iteration can proceed. Empty when no PodGangs are pending.
+    PendingPodGangNames []string `json:"pendingPodGangNames,omitempty"`
 }
 ```
 
@@ -139,9 +140,10 @@ type CoherentReplicaUpdateProgress struct {
     ReplicaIndex    int32        `json:"replicaIndex"`
     UpdateStartedAt metav1.Time  `json:"updateStartedAt"`
     UpdateEndedAt  *metav1.Time `json:"updateEndedAt,omitempty"`
-    // PendingPodGangName is the name of the PodGang whose availability is currently being
-    // waited on before the next update iteration can proceed. Nil when no PodGang is pending.
-    PendingPodGangName *string `json:"pendingPodGangName,omitempty"`
+    // PendingPodGangNames are the names of all PodGangs created in the current iteration
+    // (one non-tail MPG + zero or more tail-MPGs) whose availability is being waited on
+    // before the next iteration can proceed. Empty when no PodGangs are pending.
+    PendingPodGangNames []string `json:"pendingPodGangNames,omitempty"`
 }
 ```
 5. Run `make generate` to regenerate deepcopy.
@@ -153,10 +155,8 @@ type CoherentReplicaUpdateProgress struct {
 ### Step 2 — PodGang naming: add unified MPG naming function (`operator/api/common/namegen.go`)
 
 1. **Keep** `GenerateBasePodGangName()`, `CreatePodGangNameFromPCSGFQN()`, `GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet()`, `GeneratePodGangNameForPodCliqueOwnedByPCSG()` — still used by the PodGang sync flow for existing replicas with BPG/SPG topology (no active update).
-2. **Add** `GeneratePodGangName(pcsName string, replicaIndex int, shortGenerationHash string, iteration int) string` — returns `<pcsName>-<replicaIndex>-<shortGenerationHash>-<iteration>`.
-   - `shortGenerationHash` = first 5 chars of `pcs.Status.CurrentGenerationHash`
-   - Used for: (a) new replicas created via scale-out (regardless of whether an update is in progress), and (b) all PodGangs created during an active Coherent update
-   - `CurrentGenerationHash` must always be set (on creation and every spec change) so this function is always callable
+2. **Add** `GeneratePodGangName(pcsName string, replicaIndex int, shortGenerationHash string, createdPodGangCount int) string` — returns `<pcsName>-<replicaIndex>-<shortGenerationHash>-<createdPodGangCount-1>`.
+   - Caller passes the current `PodGangState[replicaIndex].CreatedPodGangCount` value (pre-increment); function subtracts 1 to form the name suffix, reflecting that the count is incremented after creation
 
 **Files:** `operator/api/common/namegen.go`, `operator/api/common/namegen_test.go`
 
@@ -168,14 +168,24 @@ This is the largest single change. Replace the two-function BPG+SPG computation 
 
 **Remove:** `buildExpectedBasePodGangForPCSReplicas()`, `buildExpectedBasePodGangForPCSReplica()`, `buildExpectedScaledPodGangsForPCSG()`, `doBuildExpectedScaledPodGangForPCSG()`, `buildStandalonePCLQInfosForBasePodGang()`, `buildPCSGPackConstraintsAndPCLQsForBasePodGang()`, `doBuildBasePodGangPCLQsAndPCSGPackConstraints()`.
 
-**Replace with:** `buildExpectedPodGangsForPCSReplica(sc *syncContext, pcsReplica int) ([]*podGangInfo, error)` which computes the expected set of PodGangs for a given PCS replica:
+**Replace with:** `buildExpectedPodGangsForPCSReplica(sc *syncContext, pcsReplica int) ([]*podGangInfo, error)` which computes the expected set of PodGangs for a given PCS replica from two independent inputs:
 
-1. **No update in progress (`CoherentUpdateProgress` is nil):** for existing replicas, return their existing PodGangs as-is — look them up by name in `existingPodGangs`. For new replicas added via scale-out (no existing PodGang), create using `GeneratePodGangName` with `CreatedPodGangCount` from `PodGangState[replicaIndex]`. Scale-in lets excess-detection remove them.
-2. **Update in progress:** compute PodGang composition driven by the update scope (which PCLQs/PCSGs are actually updated), following the rules in the Unification rules section. Names derived from `GeneratePodGangName` using the current generation hash and `CreatedPodGangCount` read from `PodGangState[replicaIndex]`. For PodGangs that already exist in the cluster (found in `existingPodGangs` by name): reuse name as-is.
+#### Input 1 — Spec-driven (always applied)
 
-**No counter writes to PCS status from the sync flow.** The `CreatedPodGangCount` is owned and incremented exclusively by `orchestrateCoherentUpdate` (Step 5). The sync flow is read-only with respect to status.
+Compute the full set of PodGangs implied by `pcs.Spec` for this replica:
+- One PodGang per existing PCS replica: for replicas that already have a PodGang in `existingPodGangs`, return it as-is (preserving BPG/SPG names for old replicas)
+- For new replicas added via scale-out (no existing PodGang in `existingPodGangs`): compute a new MPG-named PodGang using `GeneratePodGangName` with `PodGangState[replicaIndex].CreatedPodGangCount`
+- For each PCSG in `pcs.Spec`: one PodGang per PCSG replica above `MinAvailable`; for existing PCSG replicas return as-is, for new PCSG replicas added via scale-out compute a new MPG-named PodGang
 
-**`getExcessPodGangNames()` is unchanged** — pure name-based comparison. Old BPGs/SPGs appear as excess once they have no pod references and are deleted naturally.
+This input alone is sufficient when no Coherent update is in progress. Scale-in is handled by excess-detection (`getExcessPodGangNames`) which removes any PodGang in `existingPodGangs` not present in the expected set.
+
+#### Input 2 — Update-driven (only when Coherent update is in progress)
+
+Additionally include all PodGangs in `CoherentReplicaUpdateProgress.PendingPodGangNames` for this replica — these are the MPGs created in the current iteration (non-tail + tail-MPGs) that the sync flow must not delete and must ensure exist in the cluster. These are created by `orchestrateCoherentUpdate` (Step 5) and written into `PendingPodGangNames` in status; the sync flow reads them and includes them in `expectedPodGangs` so `createOrUpdatePodGangs` and `getExcessPodGangNames` handle them correctly.
+
+**No counter writes to PCS status from the sync flow.** `PodGangState[replicaIndex].CreatedPodGangCount` is owned and incremented exclusively by `orchestrateCoherentUpdate` (Step 5). The sync flow is read-only with respect to status.
+
+**`getExcessPodGangNames()` is unchanged** — pure name-based comparison. Old BPGs/SPGs appear as excess once they are no longer in the expected set (i.e. their pods have all moved to MPGs) and are deleted naturally.
 
 **Files:** `operator/internal/controller/podcliqueset/components/podgang/syncflow.go`
 
@@ -251,8 +261,8 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
          → produces: replicasDone[], replicasPending[]
 
   2. if currentlyUpdating replica is set in CoherentUpdateProgress:
-       check if PendingPodGangName PodGang is available
-         (each PodGroup in the PodGang has >= MinReplicas ready pods)
+       check if PendingPodGangNames PodGangs are all available
+         (each PodGroup in each PodGang has >= MinReplicas ready pods)
        if not available: requeue
        if available:
          check if all old pods for this replica are gone (iteration complete for this replica)
@@ -285,9 +295,9 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
   - Name is stable across reconciles for the same iteration — idempotent
 - **Patch `grove.io/podgang: <podGangName>` on each pod assigned to this PodGang** (strategic merge patch on `metadata.labels`)
 - Build PodGang: PodGroups per the update scope composition rules
-- Increment `PodGangState[replicaIndex].CreatedPodGangCount` in status and save PodGang name to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangName`
+- Increment `PodGangState[replicaIndex].CreatedPodGangCount` in status and save all created PodGang names to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangNames`
 - The PCLQ pod syncflow sees the label and removes the scheduling gate on the next reconcile
-- For leftover PCSG replicas (tail): patch `grove.io/podgang: <tailPodGangName>` + `grove.io/preceding-podgang: <podGangName>` on tail pods; create tail PodGangs using `CreatedPodGangCount+offset` as the name suffix; keep their gates until the preceding PodGang is available
+- For leftover PCSG replicas (tail): patch `grove.io/podgang: <tailPodGangName>` + `grove.io/preceding-podgang: <podGangName>` on tail pods; create tail PodGangs using `CreatedPodGangCount+offset` as the name suffix; add all tail PodGang names to `PendingPodGangNames`; keep their gates until the preceding PodGang is available
 
 ---
 
@@ -391,7 +401,7 @@ This is part of the `orchestrateCoherentUpdate` algorithm in `coherentupdate.go`
 
 1. For each pod assigned to the PodGang, patch `grove.io/podgang: <podGangName>` directly on the pod (strategic merge patch on `metadata.labels`).
 2. Create (or confirm existence of) the PodGang with those pod references.
-3. Save PodGang name to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangName`.
+3. Save all created PodGang names to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangNames`.
 4. The PCLQ pod syncflow will then see the label and proceed to remove the scheduling gate on the next reconcile.
 
 **Init container note:** The DownwardAPI mounts `metadata.labels['grove.io/podgang']` as a file inside the container. When the orchestrator patches the label, the kernel updates the DownwardAPI volume dynamically — the init container's blocking read sees the name without any restart needed.
