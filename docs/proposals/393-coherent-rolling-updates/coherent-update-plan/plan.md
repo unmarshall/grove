@@ -300,7 +300,12 @@ Replace BPG+SPG computation with `PodGangMap`-driven computation:
 - For each tuple in `PodGangMap.Spec.Tuples`: build a `podGangInfo` with the tuple's name and composition
 - Return the resulting `[]*podGangInfo`
 
-`getExcessPodGangNames()` is unchanged — PodGangs in `existingPodGangs` not present in the expected set are deleted. Old BPGs/SPGs become excess naturally once their tuple is removed from `PodGangMap`.
+`getExcessPodGangNames()` requires explicit consideration for the Coherent update case. Since `PodGangMap` under Coherent represents a progressive desired state (not a complete one), a PodGang that is no longer in the current `PodGangMap` tuples does not immediately mean it is excess — it may still hold pods being drained by the orchestrator. The rule is:
+
+- A PodGang is excess if and only if it is **not present in the current `PodGangMap` tuples AND has no pod references** (i.e. all its pods have been moved to new MPGs or deleted). This prevents premature deletion of old BPGs/SPGs mid-drain.
+- Under RollingRecreate and steady-state reconciles, `PodGangMap` always represents the complete desired state, so the standard excess check (not in expected set) applies directly.
+
+`getExcessPodGangNames()` must be updated to enforce this condition for the Coherent case: check pod references before marking a PodGang as excess.
 
 **Files:** `operator/internal/controller/podcliqueset/components/podgang/syncflow.go`
 
@@ -369,21 +374,41 @@ Per reconcile iteration:
 ```
 orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
   1. computeCoherentPendingWork(pcs, pcsIndicesToTerminate)
+     // pcsIndicesToTerminate carries replica indices being deleted due to scale-in.
+     // These replicas must be skipped — attempting to update a replica that is
+     // simultaneously being terminated is incorrect and will cause spurious errors.
+     // This mirrors the same exclusion in getPCSReplicaInfos for RollingRecreate.
      → for each PCS replica not in pcsIndicesToTerminate:
          fetch PodGangMap for this replica
          check if all pods of standalone PCLQs are at new generation hash AND
                all PCSG-owned PCLQs are at new generation hash
-         → produces: replicasDone[], replicasPending[]
+         → produces:
+             replicasDone[]    // replicas where all PCLQs and PCSG-owned PCLQs already reflect
+                               // the new generation hash — no further update action needed
+             replicasPending[] // replicas that still have pods at the old generation hash
+                               // and need to go through the takedown+MPG creation cycle
 
   2. if currentlyUpdating replica is set in CoherentUpdateProgress:
        check if InFlightPodGangs are all available
          (each PodGroup in each PodGang has >= MinReplicas ready pods)
        if not available: requeue
+         // Scale-in during this wait is safe. PodGangMap recomputes on the next reconcile
+         // and reduces the tuple's pod count; the PCLQ reconciler deletes the excess pod.
+         // The availability check uses MinReplicas from the PodGang spec (set at creation
+         // time from pclq.Spec.MinAvailable, which is immutable), so the threshold is still
+         // correct even if the replica count dropped. The takedown set is always recomputed
+         // from live pod state on each reconcile, so no stale state accumulates.
        if available:
          check if all old pods for this replica are gone (iteration complete for this replica)
          if complete: set UpdateEndedAt on replica progress entry, clear currentlyUpdating
-         else: compute next takedown set, delete old pods
-               update InFlightPodGangs in CoherentUpdateProgress with next MPG names
+         else: compute next takedown set from PodGangMap tuples for the next iteration
+               // Next iteration may produce one normal MPG + zero or more Tail-MPGs.
+               // The take-down set is the union of old pods displaced across ALL those tuples.
+               // InFlightPodGangs captures all PodGang names for this iteration so the
+               // orchestrator waits for every one of them (normal MPG + tail-MPGs) to become
+               // available before advancing to the next iteration.
+               delete old pods in the takedown set
+               update InFlightPodGangs in CoherentUpdateProgress with all MPG names for this iteration
                increment PodGangState[replicaIndex].CreatedPodGangCount, patch status, requeue
 
   3. if no currentlyUpdating: pick next replica from replicasPending (lowest index first)
@@ -394,11 +419,32 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
 ```
 
 #### Take-down set computation
-- Fetch all pods for each standalone PCLQ (via `componentutils.GetPCLQPods`)
-- Separate into `oldPods` (pod template hash != target) and `newPods`
-- For each PCSG: fetch PCSG replicas; separate into old/new
-- Take-down set = `MinAvailable` old pods per standalone PCLQ (pending-first, then scheduled) + `MinAvailable` old PCSG replicas
-- If remaining old pods/replicas < one full MVU: add all remaining → tail case
+The take-down set is derived from the PodGangMap tuples computed for the current iteration,
+not independently re-derived from `MinAvailable`. The PodGangMap component decides the MPG
+composition for this iteration (one normal MPG + zero or more Tail-MPGs), and the orchestrator
+reads those tuples to know exactly how many old pods per PCLQ/PCSG to displace.
+
+- The PodGangMap component computes all PodGang tuples for the current iteration:
+  - One normal MPG tuple (full MVU: `MinAvailable` pods per updated standalone PCLQ + `MinAvailable` PCSG replicas)
+  - Zero or more Tail-MPG tuples if remaining old pods/replicas don't fill a complete MVU
+- Take-down set = union of old pods/PCSG-replicas being displaced across **all** tuples in this iteration (normal MPG + all tail-MPGs)
+- Old pods are selected pending-first, then scheduled, to minimise scheduler disruption
+- The orchestrator reads pod counts directly from the PodGangMap tuples — it does not re-read `MinAvailable` independently
+
+#### Identifying takedown candidates
+A pod is a takedown candidate based on the PodGang it is associated with (via its `grove.io/podgang` label):
+
+1. Look up the pod's `grove.io/podgang` label → PodGang name → find the matching tuple in PodGangMap by `tuple.Name`
+2. If `tuple.PodCliqueSetGenerationHash == newHash` AND `tuple.Name` is NOT in `InFlightPodGangs`
+   → pod is associated with an already-completed MPG (e.g. MPG-0 when MPG-1 is being created) → **exclude**
+3. If `tuple.Name` IS in `InFlightPodGangs`
+   → pod is associated with the current in-flight batch → **exclude**
+4. If `tuple.PodCliqueSetGenerationHash == oldHash`
+   → old pod not yet displaced → **takedown candidate**
+
+This means `InFlightPodGangs` serves a dual purpose: it is observability for the user AND the mechanism
+the orchestrator uses to distinguish "current batch" from "already completed MPGs". The PodGangMap component
+must write the next iteration's tuples before the orchestrator computes the takedown set.
 
 #### Tail-MPG naming
 Tail PodGangs use `GeneratePodGangName` with `CreatedPodGangCount+offset` as the iteration value. Tail PodGang pods carry annotation `grove.io/preceding-podgang: <precedingPodGangName>` — gate removal waits until the preceding PodGang is available.
