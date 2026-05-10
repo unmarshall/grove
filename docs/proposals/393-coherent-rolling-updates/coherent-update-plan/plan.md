@@ -408,8 +408,12 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
                // orchestrator waits for every one of them (normal MPG + tail-MPGs) to become
                // available before advancing to the next iteration.
                delete old pods in the takedown set
-               update InFlightPodGangs in CoherentUpdateProgress with all MPG names for this iteration
-               increment PodGangState[replicaIndex].CreatedPodGangCount, patch status, requeue
+               update InFlightPodGangs in CoherentUpdateProgress with all PodGang names for this iteration
+               // CreatedPodGangCount increments once per PodGang created — not once per iteration.
+               // A normal iteration creates 1 MPG (count +1). The final tail iteration creates
+               // N tail-MPGs simultaneously (count +N). GeneratePodGangName is called once per
+               // PodGang using the pre-increment value, then count is incremented before the next call.
+               increment PodGangState[replicaIndex].CreatedPodGangCount by number of PodGangs created this iteration, patch status, requeue
 
   3. if no currentlyUpdating: pick next replica from replicasPending (lowest index first)
        set CoherentUpdateProgress.CurrentlyUpdating entry, patch status, requeue
@@ -425,9 +429,9 @@ composition for this iteration (one normal MPG + zero or more Tail-MPGs), and th
 reads those tuples to know exactly how many old pods per PCLQ/PCSG to displace.
 
 - The PodGangMap component computes all PodGang tuples for the current iteration:
-  - One normal MPG tuple (full MVU: `MinAvailable` pods per updated standalone PCLQ + `MinAvailable` PCSG replicas)
-  - Zero or more Tail-MPG tuples if remaining old pods/replicas don't fill a complete MVU
-- Take-down set = union of old pods/PCSG-replicas being displaced across **all** tuples in this iteration (normal MPG + all tail-MPGs)
+  - **Normal iteration** (enough old pods remain to fill a complete MVU): one normal MPG tuple only — exactly `MinAvailable` pods per updated standalone PCLQ + `MinAvailable` PCSG replicas. One MPG is created per iteration until a complete MVU can no longer be formed.
+  - **Final tail iteration** (remaining old pods are fewer than a full MVU): all remaining old pods form one or more Tail-MPG tuples, all created simultaneously in a single iteration. There is no gate between tail-MPGs and the preceding normal MPG — they are scheduled independently as their own gangs.
+- Take-down set = union of old pods/PCSG-replicas being displaced across **all** tuples in this iteration
 - Old pods are selected pending-first, then scheduled, to minimise scheduler disruption
 - The orchestrator reads pod counts directly from the PodGangMap tuples — it does not re-read `MinAvailable` independently
 
@@ -446,8 +450,17 @@ This means `InFlightPodGangs` serves a dual purpose: it is observability for the
 the orchestrator uses to distinguish "current batch" from "already completed MPGs". The PodGangMap component
 must write the next iteration's tuples before the orchestrator computes the takedown set.
 
-#### Tail-MPG naming
-Tail PodGangs use `GeneratePodGangName` with `CreatedPodGangCount+offset` as the iteration value. Tail PodGang pods carry annotation `grove.io/preceding-podgang: <precedingPodGangName>` — gate removal waits until the preceding PodGang is available.
+#### Tail-MPG naming and scheduling
+All tail-MPGs in the final iteration are named via `GeneratePodGangName` — `CreatedPodGangCount` is
+incremented once per PodGang created (not once per iteration). For a tail iteration creating N tail-MPGs:
+- tail-MPG-0 name uses pre-increment count value, count incremented to count+1
+- tail-MPG-1 name uses count+1, count incremented to count+2
+- ... and so on
+
+Tail-MPG pods carry no `grove.io/preceding-podgang` annotation and require no special gate-removal
+logic. They are scheduled as independent gangs, their scheduling gates are removed by the standard
+gate-removal path (same as any other PodGang). The orchestrator simply waits for all tail-MPGs in
+`InFlightPodGangs` to become available before marking the replica update complete.
 
 ---
 
@@ -471,7 +484,19 @@ In `prepareSyncFlow`, after fetching the PCLQ, fetch the `PodGangMap` for this P
 
 This replaces the current logic of inheriting `grove.io/podgang` from the PCLQ resource label — pods now get the label directly from the `PodGangMap` tuple at creation time.
 
+**Important:** Under Coherent updates, the tuple quota is a hard ceiling on pod creation — `spec.replicas`
+is not used as the creation driver. Consider this scenario: the orchestrator takes down 2 old pods of PCLQ `F`
+to place them into MPG-1 (tuple count = 2). Before the PCLQ reconciler reacts, a third old pod of `F` is
+evicted due to node failure. The PCLQ reconciler must still only create 2 new pods (matching the MPG-1 tuple
+quota), not 3. The evicted old pod is intentionally not replaced — there is no PodGangMap tuple that
+accommodates a new-spec pod for it, and creating one would leave it without a PodGang association. It will
+be accounted for in a subsequent iteration when the orchestrator advances the takedown set.
+
 `reconcilestatus.go` is untouched — it generically tracks `UpdatedReplicas` and `CurrentPodTemplateHash` as pods come up.
+Under Coherent, `processUpdate()` is skipped but `reconcilestatus.go` still runs on every reconcile and updates
+`currentPodCliqueSetGenerationHash`, `updatedReplicas`, `scheduledReplicas` etc. from live pod state.
+The coherent orchestrator relies on these fields in `computeCoherentPendingWork` to determine whether all pods
+of a PCLQ have converged to the new generation hash — the same fields used by `isPCLQUpdateComplete` for RollingRecreate.
 
 ---
 
@@ -510,36 +535,7 @@ Return `"", nil` when label is absent (instead of error) — label is intentiona
 
 ---
 
-### Step 10 — Tail-MPG gate removal (`operator/internal/controller/podclique/components/pod/syncflow.go`)
-
-For tail PodGang pods, gate removal must wait until the preceding non-tail PodGang is available.
-
-Add `isPodGangAvailable(ctx, logger, podGangName, namespace) (bool, error)`:
-
-```go
-func (r _resource) isPodGangAvailable(ctx context.Context, logger logr.Logger, namespace, podGangName string) (bool, error) {
-    pg, err := componentutils.GetPodGang(ctx, r.client, podGangName, namespace)
-    if err != nil {
-        return false, groveerr.WrapError(err, errCodeGetPodGang, component.OperationSync, "...")
-    }
-    for _, podGroup := range pg.Spec.PodGroups {
-        pclq := &grovecorev1alpha1.PodClique{}
-        if err = r.client.Get(ctx, client.ObjectKey{Name: podGroup.Name, Namespace: namespace}, pclq); err != nil {
-            return false, groveerr.WrapError(err, errCodeGetPodClique, component.OperationSync, "...")
-        }
-        if pclq.Status.ScheduledReplicas < podGroup.MinReplicas {
-            return false, nil
-        }
-    }
-    return true, nil
-}
-```
-
-Tail pods carry annotation `grove.io/preceding-podgang: <precedingPodGangName>` set by the orchestrator. In `shouldSkipPodSchedulingGateRemoval()`, check this annotation: if present, call `isPodGangAvailable` for the named preceding PodGang before allowing gate removal.
-
----
-
-### Step 11 — CRD regeneration and webhook
+### Step 10 — CRD regeneration and webhook
 
 Run `make generate manifests`. Check `operator/internal/webhook` for any strategy-type enum validation that needs updating. Register `PodGangMap` CRD in the scheme and controller setup.
 
@@ -559,7 +555,7 @@ Run `make generate manifests`. Check `operator/internal/webhook` for any strateg
 | `operator/internal/controller/podcliqueset/components/podcliquesetreplica/coherentupdate.go` | **New** — `orchestrateCoherentUpdate`, takedown set computation, status updates |
 | `operator/internal/controller/podcliqueset/components/podgang/syncflow.go` | Replace BPG+SPG computation with `PodGangMap`-driven `buildExpectedPodGangsForPCSReplica` |
 | `operator/internal/controller/podclique/reconcilespec.go` | 3-line Coherent early-exit in `processUpdate` |
-| `operator/internal/controller/podclique/components/pod/syncflow.go` | Read `PodGangMap` for pod count/assignment; `getAssociatedPodGangName()` tolerates absent label; `isPodGangAvailable` for tail gate removal |
+| `operator/internal/controller/podclique/components/pod/syncflow.go` | Read `PodGangMap` for pod count/assignment; `getAssociatedPodGangName()` tolerates absent label |
 | `operator/internal/controller/podcliquescalinggroup/reconcilespec.go` | 3-line Coherent early-exit in `processUpdate` |
 | `operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go` | Guard `LabelPodGang` — skip for Coherent |
 | `operator/internal/controller/podcliqueset/components/podclique/podclique.go` | Guard `LabelPodGang` — skip for Coherent |
