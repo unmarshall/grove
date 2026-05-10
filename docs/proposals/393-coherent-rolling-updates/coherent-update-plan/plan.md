@@ -122,9 +122,9 @@ type PodGangMapSpec struct {
 type PodGangTuple struct {
     // Name is the PodGang name this tuple corresponds to.
     Name string `json:"name"`
-    // GenerationHash is the PCS generation hash of pods that should belong to this tuple.
+    // PodCliqueSetGenerationHash is the PCS generation hash of pods that should belong to this tuple.
     // Used by PCLQ/PCSG reconcilers to create pods with the correct spec version.
-    GenerationHash string `json:"generationHash"`
+    PodCliqueSetGenerationHash string `json:"podCliqueSetGenerationHash"`
     // PodCliques maps standalone PCLQ name to the number of pods that belong to this PodGang.
     PodCliques map[string]int `json:"podCliques,omitempty"`
     // PodCliqueScalingGroups maps PCSG name to the number of PCSG replicas that belong to this PodGang.
@@ -142,8 +142,8 @@ On every reconcile, the `PodGangMap` component computes the desired tuples from:
 #### Case 1: Existing PCS (BPG/SPG topology, no update in progress)
 
 Tuples derived purely from `pcs.Spec` + live PCLQ/PCSG resources matching BPG/SPG convention:
-- One tuple named `<pcs-name>-<replica>` (BPG): `{generationHash: current, all standalone PCLQs at full replica count, all PCSGs at MinAvailable replicas}`
-- One tuple per PCSG replica above `MinAvailable` named `<pcsg-fqn>-<scaled-index>` (SPG): `{generationHash: current, that PCSG: 1}`
+- One tuple named `<pcs-name>-<replica>` (BPG): `{podCliqueSetGenerationHash: current, all standalone PCLQs at full replica count, all PCSGs at MinAvailable replicas}`
+- One tuple per PCSG replica above `MinAvailable` named `<pcsg-fqn>-<scaled-index>` (SPG): `{podCliqueSetGenerationHash: current, that PCSG: 1}`
 
 #### Case 2: New PCS (MPG topology, no update in progress)
 
@@ -153,21 +153,21 @@ Tuples computed from `pcs.Spec` + live PCLQ/PCSG resources using MVU composition
 #### Case 3: Coherent update in progress
 
 Tuples reflect the partially-updated state:
-- Old BPG/SPG tuples with decremented counts (remaining old pods not yet taken down), `generationHash: old`
-- Already-created MPG tuples from previous iterations, `generationHash: new`
-- Current iteration MPG tuple (from `PendingPodGangNames`), `generationHash: new`
+- Old BPG/SPG tuples with decremented counts (remaining old pods not yet taken down), `podCliqueSetGenerationHash: old`
+- Already-created MPG tuples from previous iterations, `podCliqueSetGenerationHash: new`
+- Current iteration MPG tuple (from `PendingPodGangNames`), `podCliqueSetGenerationHash: new`
 - Tail-MPG tuples if applicable
 
 On each reconcile, counts are recomputed from live PCLQ/PCSG resources + `CoherentUpdateProgress` — a concurrent scale-out/in is automatically reflected on the next reconcile.
 
 #### Case 4: RollingRecreate update in progress
 
-Tuples remain structurally identical to steady-state (same PodGang names, same counts). Only `GenerationHash` is updated to the new PCS generation hash when the update is initiated. PCLQ/PCSG reconcilers see the hash change and replace pods in-place within the same PodGang.
+Tuples remain structurally identical to steady-state (same PodGang names, same counts). Only `PodCliqueSetGenerationHash` is updated to the new PCS generation hash when the update is initiated. PCLQ/PCSG reconcilers see the hash change and replace pods in-place within the same PodGang.
 
 ### How PCLQ reconciler uses PodGangMap
 
 For each tuple referencing this PCLQ:
-1. Count existing pods that have matching `GenerationHash` AND `grove.io/podgang` label matching this tuple's `Name`
+1. Count existing pods that have matching `PodCliqueSetGenerationHash` AND `grove.io/podgang` label matching this tuple's `Name`
 2. Create delta pods (up to the tuple's count) with `grove.io/podgang: <tupleName>` and scheduling gate set at creation time — no post-creation patching needed
 3. If a pod is evicted and the tuple's quota is already satisfied by surviving pods → do not create a replacement
 
@@ -233,7 +233,7 @@ type PodGangMapSpec struct {
 
 type PodGangTuple struct {
     Name                   string         `json:"name"`
-    GenerationHash         string         `json:"generationHash"`
+    PodCliqueSetGenerationHash string         `json:"podCliqueSetGenerationHash"`
     PodCliques             map[string]int `json:"podCliques,omitempty"`
     PodCliqueScalingGroups map[string]int `json:"podCliqueScalingGroups,omitempty"`
 }
@@ -267,7 +267,7 @@ Computes desired tuples based on PCS state:
 - **Case 1 (existing BPG/SPG, no update):** derive BPG/SPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts
 - **Case 2 (MPG topology, no update):** derive MPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts using MVU composition rules
 - **Case 3 (Coherent update in progress):** old tuples with decremented counts + new MPG tuples from `PendingPodGangNames` + current iteration MPG tuple
-- **Case 4 (RollingRecreate update):** same structure as steady-state, `GenerationHash` updated to new PCS generation hash
+- **Case 4 (RollingRecreate update):** same structure as steady-state, `PodCliqueSetGenerationHash` updated to new PCS generation hash
 
 The component creates/updates the `PodGangMap` resource for each PCS replica. On scale-out, a new `PodGangMap` is created for the new replica. On scale-in, the `PodGangMap` for the removed replica is deleted.
 
@@ -405,7 +405,7 @@ if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1
 #### 7b — Pod sync: read PodGangMap to determine pod count and PodGang assignment (`components/pod/syncflow.go`)
 
 In `prepareSyncFlow`, after fetching the PCLQ, fetch the `PodGangMap` for this PCS replica. For each tuple referencing this PCLQ:
-1. Count existing pods with matching `GenerationHash` AND `grove.io/podgang == tuple.Name`
+1. Count existing pods with matching `PodCliqueSetGenerationHash` AND `grove.io/podgang == tuple.Name`
 2. Create delta pods (up to tuple count) with `grove.io/podgang: <tuple.Name>` set at creation time and scheduling gate set
 3. Do not create replacement pods if the tuple's quota is already satisfied
 
