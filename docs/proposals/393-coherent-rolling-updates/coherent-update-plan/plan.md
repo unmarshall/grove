@@ -477,20 +477,30 @@ if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1
 
 #### 7b — Pod sync: read PodGangMap to determine pod count and PodGang assignment (`components/pod/syncflow.go`)
 
-In `prepareSyncFlow`, after fetching the PCLQ, fetch the `PodGangMap` for this PCS replica. For each tuple referencing this PCLQ:
-1. Count existing pods with matching `PodCliqueSetGenerationHash` AND `grove.io/podgang == tuple.Name`
-2. Create delta pods (up to tuple count) with `grove.io/podgang: <tuple.Name>` set at creation time and scheduling gate set
-3. Do not create replacement pods if the tuple's quota is already satisfied
+In `prepareSyncFlow`, after fetching the PCLQ, fetch the `PodGangMap` for this PCS replica. The pod creation
+logic differs based on whether the PCLQ is standalone or owned by a PCSG:
 
-This replaces the current logic of inheriting `grove.io/podgang` from the PCLQ resource label — pods now get the label directly from the `PodGangMap` tuple at creation time.
+**Standalone PCLQ** — look up by PCLQ name in `tuple.PodCliques`:
+1. Find the tuple where `tuple.PodCliques` contains this PCLQ's name
+2. Count existing pods with `grove.io/podgang == tuple.Name` AND `PodCliqueSetGenerationHash == tuple.PodCliqueSetGenerationHash` (idempotency guard — handles requeues where some pods were already created)
+3. Create delta pods up to `tuple.PodCliques[pclqName]` with `grove.io/podgang: <tuple.Name>` set at creation time and scheduling gate set
+4. Tuple quota is a hard ceiling — do not use `spec.replicas` as the creation driver (see eviction note below)
 
-**Important:** Under Coherent updates, the tuple quota is a hard ceiling on pod creation — `spec.replicas`
-is not used as the creation driver. Consider this scenario: the orchestrator takes down 2 old pods of PCLQ `F`
-to place them into MPG-1 (tuple count = 2). Before the PCLQ reconciler reacts, a third old pod of `F` is
-evicted due to node failure. The PCLQ reconciler must still only create 2 new pods (matching the MPG-1 tuple
-quota), not 3. The evicted old pod is intentionally not replaced — there is no PodGangMap tuple that
-accommodates a new-spec pod for it, and creating one would leave it without a PodGang association. It will
-be accounted for in a subsequent iteration when the orchestrator advances the takedown set.
+**PCSG-owned PCLQ** — look up by owning PCSG name in `tuple.PodCliqueScalingGroups`:
+1. Find the tuple where `tuple.PodCliqueScalingGroups` contains the owning PCSG's name
+2. Count existing pods with `grove.io/podgang == tuple.Name` AND `PodCliqueSetGenerationHash == tuple.PodCliqueSetGenerationHash` (same idempotency guard)
+3. Create delta pods up to `spec.replicas` (always all pods — the PCSG decides replica granularity, not the PCLQ) with `grove.io/podgang: <tuple.Name>` set at creation time and scheduling gate set
+4. No tuple quota ceiling here — `spec.replicas` is always the target for PCSG-owned PCLQs
+
+This replaces the current logic of inheriting `grove.io/podgang` from the PCLQ resource label — pods now get the label directly from the `PodGangMap` tuple at creation time. The `PodCliqueScalingGroups` map in the tuple is sufficient for PCSG-owned PCLQ association — there is no need to enumerate PCSG-owned PCLQs explicitly in `PodCliques`.
+
+**Important (standalone PCLQs only):** Under Coherent updates, the tuple quota is a hard ceiling on pod
+creation. Consider this scenario: the orchestrator takes down 2 old pods of PCLQ `F` to place them into
+MPG-1 (tuple count = 2). Before the PCLQ reconciler reacts, a third old pod of `F` is evicted due to node
+failure. The PCLQ reconciler must still only create 2 new pods (matching the MPG-1 tuple quota), not 3.
+The evicted old pod is intentionally not replaced — there is no PodGangMap tuple that accommodates a
+new-spec pod for it, and creating one would leave it without a PodGang association. It will be accounted
+for in a subsequent iteration when the orchestrator advances the takedown set.
 
 `reconcilestatus.go` is untouched — it generically tracks `UpdatedReplicas` and `CurrentPodTemplateHash` as pods come up.
 Under Coherent, `processUpdate()` is skipped but `reconcilestatus.go` still runs on every reconcile and updates
