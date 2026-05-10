@@ -277,6 +277,14 @@ Computes desired tuples based on PCS state:
 
 The component creates/updates the `PodGangMap` resource for each PCS replica. On scale-out, a new `PodGangMap` is created for the new replica. On scale-in, the `PodGangMap` for the removed replica is deleted.
 
+#### Desired state semantics per scenario
+
+- **RollingRecreate update:** `PodGangMap` always reflects the **complete desired state** — the full set of PodGangs that should exist with the new `PodCliqueSetGenerationHash`. PCLQ/PCSG reconcilers replace pods in-place within the same PodGangs.
+- **Regular reconcile (no update, includes scale-out/in):** `PodGangMap` reflects the **complete desired state** — adjusts pod counts per PCLQ/PCSG in each existing tuple to reflect current replica counts, and adds/removes tuples for new/removed replicas. Always self-consistent.
+- **Coherent update:** `PodGangMap` reflects only the **desired state for the current iteration** — one MVU at a time. It is not a complete desired end-state but a stepwise approximation that advances each time the orchestrator moves to the next iteration. Old tuples are decremented as pods are taken down; new MPG tuples are added one round at a time.
+
+This distinction is important: consumers of `PodGangMap` (PodGang, PCLQ, PCSG components) always treat it as the authoritative desired state, but under Coherent updates they should expect it to change each iteration rather than converging in a single reconcile.
+
 **Files:** `operator/internal/controller/podcliqueset/components/podgangmap/podgangmap.go` (new)
 
 ---
