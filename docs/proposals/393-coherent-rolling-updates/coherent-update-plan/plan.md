@@ -68,10 +68,6 @@ MPG composition depends on which PCLQs/PCSGs are actually updated (the "update s
 
 - **New PCS (initial deployment under Coherent):** creates MPGs directly using the above composition rules. No BPGs/SPGs ever created.
 - **Existing PCS migrating to Coherent:** old BPGs/SPGs lose pod references as pods move into new MPGs during the update. Once empty, they are deleted by the existing excess-detection logic in `getExcessPodGangNames()` — no forced deletion, no scheduler disruption.
-- **Regular reconcile with no update in progress (`CoherentUpdateProgress` is nil):** `computeExpectedPodGangs()` must return existing PodGangs for each replica as-is — no name recomputation, no renaming. This covers two cases:
-  1. *Existing PCS with BPGs/SPGs:* preserves them until a coherent update is triggered.
-  2. *New PCS already deployed with MPGs:* preserves the existing MPGs unchanged.
-  In both cases, scale-out creates new PodGangs for the added replicas (using MPG-based naming with an incremented `CreatedPodGangCount`), and scale-in removes excess PodGangs via the existing excess-detection logic. No renaming ever happens outside of an active update.
 
 ### Counter storage
 
@@ -111,15 +107,89 @@ The counter never resets — it increments monotonically across updates and scal
 
 ---
 
+## PodGangMap CRD
+
+`PodGangMap` is a new desired-state CRD that serves as the **single source of truth** for the mapping between PodGangs and PCLQ/PCSG pod counts for a given PCS replica. It is created and reconciled by the `PodGangMap` component in the PCS reconciler before any PG, PCLQ, or PCSG components run. All other components (PodGang, PCLQ, PCSG) read it and act on it — no component writes to it except the `PodGangMap` component itself.
+
+One `PodGangMap` resource per PCS replica, named `<pcs-name>-<pcs-replica-index>`.
+
+```go
+type PodGangMapSpec struct {
+    PodCliqueSetReplicaIndex int32          `json:"podCliqueSetReplicaIndex"`
+    Tuples                   []PodGangTuple `json:"tuples"`
+}
+
+type PodGangTuple struct {
+    // Name is the PodGang name this tuple corresponds to.
+    Name string `json:"name"`
+    // GenerationHash is the PCS generation hash of pods that should belong to this tuple.
+    // Used by PCLQ/PCSG reconcilers to create pods with the correct spec version.
+    GenerationHash string `json:"generationHash"`
+    // PodCliques maps standalone PCLQ name to the number of pods that belong to this PodGang.
+    PodCliques map[string]int `json:"podCliques,omitempty"`
+    // PodCliqueScalingGroups maps PCSG name to the number of PCSG replicas that belong to this PodGang.
+    PodCliqueScalingGroups map[string]int `json:"podCliqueScalingGroups,omitempty"`
+}
+```
+
+### PodGangMap computation
+
+On every reconcile, the `PodGangMap` component computes the desired tuples from:
+- `pcs.Spec` — structural template (which PCLQs, which PCSGs, `MinAvailable` values)
+- Live PCLQ/PCSG resources — actual current replica counts (reflecting any scale-out/in)
+- `pcs.Status.CoherentUpdateProgress` — which replica is being updated, which MPGs exist so far
+
+#### Case 1: Existing PCS (BPG/SPG topology, no update in progress)
+
+Tuples derived purely from `pcs.Spec` + live PCLQ/PCSG resources matching BPG/SPG convention:
+- One tuple named `<pcs-name>-<replica>` (BPG): `{generationHash: current, all standalone PCLQs at full replica count, all PCSGs at MinAvailable replicas}`
+- One tuple per PCSG replica above `MinAvailable` named `<pcsg-fqn>-<scaled-index>` (SPG): `{generationHash: current, that PCSG: 1}`
+
+#### Case 2: New PCS (MPG topology, no update in progress)
+
+Tuples computed from `pcs.Spec` + live PCLQ/PCSG resources using MVU composition rules:
+- One tuple per MPG named via `GeneratePodGangName`, composition per the Unification rules section
+
+#### Case 3: Coherent update in progress
+
+Tuples reflect the partially-updated state:
+- Old BPG/SPG tuples with decremented counts (remaining old pods not yet taken down), `generationHash: old`
+- Already-created MPG tuples from previous iterations, `generationHash: new`
+- Current iteration MPG tuple (from `PendingPodGangNames`), `generationHash: new`
+- Tail-MPG tuples if applicable
+
+On each reconcile, counts are recomputed from live PCLQ/PCSG resources + `CoherentUpdateProgress` — a concurrent scale-out/in is automatically reflected on the next reconcile.
+
+#### Case 4: RollingRecreate update in progress
+
+Tuples remain structurally identical to steady-state (same PodGang names, same counts). Only `GenerationHash` is updated to the new PCS generation hash when the update is initiated. PCLQ/PCSG reconcilers see the hash change and replace pods in-place within the same PodGang.
+
+### How PCLQ reconciler uses PodGangMap
+
+For each tuple referencing this PCLQ:
+1. Count existing pods that have matching `GenerationHash` AND `grove.io/podgang` label matching this tuple's `Name`
+2. Create delta pods (up to the tuple's count) with `grove.io/podgang: <tupleName>` and scheduling gate set at creation time — no post-creation patching needed
+3. If a pod is evicted and the tuple's quota is already satisfied by surviving pods → do not create a replacement
+
+This eliminates the 1:N label-patching problem: `grove.io/podgang` is set correctly at pod creation time, not patched afterwards.
+
+### How PodGang component uses PodGangMap
+
+`computeExpectedPodGangs` reads `PodGangMap` tuples directly — one PodGang per tuple name. No name derivation logic needed in the sync flow itself. `getExcessPodGangNames()` is unchanged — old BPGs/SPGs become excess once their tuple is removed from `PodGangMap` (i.e. all their pods have moved to MPG tuples).
+
+---
+
 ## Implementation Steps
 
-### Step 1 — API changes (`operator/api/core/v1alpha1/podcliqueset.go`)
+### Step 1 — API changes
+
+#### 1a — PCS API (`operator/api/core/v1alpha1/podcliqueset.go`)
 
 1. Add `CoherentStrategy UpdateStrategyType = "Coherent"` constant.
 2. Update kubebuilder enum validation: `+kubebuilder:validation:Enum={RollingRecreate,Coherent,OnDelete}`.
 3. Add to `PodCliqueSetStatus`:
    - `CoherentUpdateProgress *CoherentUpdateProgress`
-   - `PodGangState []PodGangReplicaState` — always-present per-replica PodGang counter (see Counter storage section)
+   - `PodGangState []PodGangReplicaState` — always-present per-replica PodGang counter
 4. Define new types:
 ```go
 // PodGangReplicaState tracks the persistent PodGang creation counter for a single PCS replica.
@@ -131,8 +201,8 @@ type PodGangReplicaState struct {
 }
 
 type CoherentUpdateProgress struct {
-    UpdateStartedAt   metav1.Time     `json:"updateStartedAt"`
-    UpdateEndedAt    *metav1.Time    `json:"updateEndedAt,omitempty"`
+    UpdateStartedAt   metav1.Time                     `json:"updateStartedAt"`
+    UpdateEndedAt    *metav1.Time                    `json:"updateEndedAt,omitempty"`
     CurrentlyUpdating []CoherentReplicaUpdateProgress `json:"currentlyUpdating,omitempty"`
 }
 
@@ -146,52 +216,83 @@ type CoherentReplicaUpdateProgress struct {
     PendingPodGangNames []string `json:"pendingPodGangNames,omitempty"`
 }
 ```
-5. Run `make generate` to regenerate deepcopy.
 
-**Files:** `operator/api/core/v1alpha1/podcliqueset.go`
+#### 1b — PodGangMap CRD (`operator/api/core/v1alpha1/podgangmap.go`) — new file
+
+```go
+type PodGangMap struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec   PodGangMapSpec   `json:"spec,omitempty"`
+}
+
+type PodGangMapSpec struct {
+    PodCliqueSetReplicaIndex int32          `json:"podCliqueSetReplicaIndex"`
+    Tuples                   []PodGangTuple `json:"tuples"`
+}
+
+type PodGangTuple struct {
+    Name                   string         `json:"name"`
+    GenerationHash         string         `json:"generationHash"`
+    PodCliques             map[string]int `json:"podCliques,omitempty"`
+    PodCliqueScalingGroups map[string]int `json:"podCliqueScalingGroups,omitempty"`
+}
+```
+
+5. Run `make generate` to regenerate deepcopy and CRD manifests.
+
+**Files:** `operator/api/core/v1alpha1/podcliqueset.go`, `operator/api/core/v1alpha1/podgangmap.go`
 
 ---
 
 ### Step 2 — PodGang naming: add unified MPG naming function (`operator/api/common/namegen.go`)
 
-1. **Keep** `GenerateBasePodGangName()`, `CreatePodGangNameFromPCSGFQN()`, `GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet()`, `GeneratePodGangNameForPodCliqueOwnedByPCSG()` — still used by the PodGang sync flow for existing replicas with BPG/SPG topology (no active update).
+1. **Keep** `GenerateBasePodGangName()`, `CreatePodGangNameFromPCSGFQN()`, `GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet()`, `GeneratePodGangNameForPodCliqueOwnedByPCSG()` — still used for BPG/SPG topology (existing PCS, no active update).
 2. **Add** `GeneratePodGangName(pcsName string, replicaIndex int, shortGenerationHash string, createdPodGangCount int) string` — returns `<pcsName>-<replicaIndex>-<shortGenerationHash>-<createdPodGangCount-1>`.
-   - Caller passes the current `PodGangState[replicaIndex].CreatedPodGangCount` value (pre-increment); function subtracts 1 to form the name suffix, reflecting that the count is incremented after creation
+   - Caller passes the current `PodGangState[replicaIndex].CreatedPodGangCount` value (pre-increment); function subtracts 1 to form the name suffix
+   - `CurrentGenerationHash` must always be set (on creation and every spec change) so this function is always callable
 
 **Files:** `operator/api/common/namegen.go`, `operator/api/common/namegen_test.go`
 
 ---
 
-### Step 3 — Rewrite PodGang sync flow: unified MPG-based computation (`operator/internal/controller/podcliqueset/components/podgang/syncflow.go`)
+### Step 3 — New PodGangMap component (`operator/internal/controller/podcliqueset/components/podgangmap/`)
 
-This is the largest single change. Replace the two-function BPG+SPG computation with one unified function:
+New component responsible for computing and reconciling `PodGangMap` resources. Runs **before** PodGang, PCLQ, and PCSG components in the PCS reconcile loop.
+
+#### `computeTuples(pcs, existingPCLQs, existingPCSGs) []PodGangTuple`
+
+Computes desired tuples based on PCS state:
+
+- **Case 1 (existing BPG/SPG, no update):** derive BPG/SPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts
+- **Case 2 (MPG topology, no update):** derive MPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts using MVU composition rules
+- **Case 3 (Coherent update in progress):** old tuples with decremented counts + new MPG tuples from `PendingPodGangNames` + current iteration MPG tuple
+- **Case 4 (RollingRecreate update):** same structure as steady-state, `GenerationHash` updated to new PCS generation hash
+
+The component creates/updates the `PodGangMap` resource for each PCS replica. On scale-out, a new `PodGangMap` is created for the new replica. On scale-in, the `PodGangMap` for the removed replica is deleted.
+
+**Files:** `operator/internal/controller/podcliqueset/components/podgangmap/podgangmap.go` (new)
+
+---
+
+### Step 4 — Rewrite PodGang sync flow (`operator/internal/controller/podcliqueset/components/podgang/syncflow.go`)
+
+Replace BPG+SPG computation with `PodGangMap`-driven computation:
 
 **Remove:** `buildExpectedBasePodGangForPCSReplicas()`, `buildExpectedBasePodGangForPCSReplica()`, `buildExpectedScaledPodGangsForPCSG()`, `doBuildExpectedScaledPodGangForPCSG()`, `buildStandalonePCLQInfosForBasePodGang()`, `buildPCSGPackConstraintsAndPCLQsForBasePodGang()`, `doBuildBasePodGangPCLQsAndPCSGPackConstraints()`.
 
-**Replace with:** `buildExpectedPodGangsForPCSReplica(sc *syncContext, pcsReplica int) ([]*podGangInfo, error)` which computes the expected set of PodGangs for a given PCS replica from two independent inputs:
+**Replace with:** `buildExpectedPodGangsForPCSReplica(sc *syncContext, pcsReplica int) ([]*podGangInfo, error)`:
+- Fetch `PodGangMap` for this replica (named `<pcs-name>-<pcsReplica>`)
+- For each tuple in `PodGangMap.Spec.Tuples`: build a `podGangInfo` with the tuple's name and composition
+- Return the resulting `[]*podGangInfo`
 
-#### Input 1 — Spec-driven (always applied)
-
-Compute the full set of PodGangs implied by `pcs.Spec` for this replica:
-- One PodGang per existing PCS replica: for replicas that already have a PodGang in `existingPodGangs`, return it as-is (preserving BPG/SPG names for old replicas)
-- For new replicas added via scale-out (no existing PodGang in `existingPodGangs`): compute a new MPG-named PodGang using `GeneratePodGangName` with `PodGangState[replicaIndex].CreatedPodGangCount`
-- For each PCSG in `pcs.Spec`: one PodGang per PCSG replica above `MinAvailable`; for existing PCSG replicas return as-is, for new PCSG replicas added via scale-out compute a new MPG-named PodGang
-
-This input alone is sufficient when no Coherent update is in progress. Scale-in is handled by excess-detection (`getExcessPodGangNames`) which removes any PodGang in `existingPodGangs` not present in the expected set.
-
-#### Input 2 — Update-driven (only when Coherent update is in progress)
-
-Additionally include all PodGangs in `CoherentReplicaUpdateProgress.PendingPodGangNames` for this replica — these are the MPGs created in the current iteration (non-tail + tail-MPGs) that the sync flow must not delete and must ensure exist in the cluster. These are created by `orchestrateCoherentUpdate` (Step 5) and written into `PendingPodGangNames` in status; the sync flow reads them and includes them in `expectedPodGangs` so `createOrUpdatePodGangs` and `getExcessPodGangNames` handle them correctly.
-
-**No counter writes to PCS status from the sync flow.** `PodGangState[replicaIndex].CreatedPodGangCount` is owned and incremented exclusively by `orchestrateCoherentUpdate` (Step 5). The sync flow is read-only with respect to status.
-
-**`getExcessPodGangNames()` is unchanged** — pure name-based comparison. Old BPGs/SPGs appear as excess once they are no longer in the expected set (i.e. their pods have all moved to MPGs) and are deleted naturally.
+`getExcessPodGangNames()` is unchanged — PodGangs in `existingPodGangs` not present in the expected set are deleted. Old BPGs/SPGs become excess naturally once their tuple is removed from `PodGangMap`.
 
 **Files:** `operator/internal/controller/podcliqueset/components/podgang/syncflow.go`
 
 ---
 
-### Step 4 — PCS reconcilespec: init Coherent update (`operator/internal/controller/podcliqueset/reconcilespec.go`)
+### Step 5 — PCS reconcilespec: init Coherent update (`operator/internal/controller/podcliqueset/reconcilespec.go`)
 
 In `initUpdateProgress()` (line 138), add a Coherent branch:
 ```go
@@ -210,7 +311,7 @@ if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1
 
 ---
 
-### Step 5 — PodCliqueSetReplica: strategy dispatch + Coherent orchestration
+### Step 6 — PodCliqueSetReplica: strategy dispatch + Coherent orchestration
 
 **Files:** `operator/internal/controller/podcliqueset/components/podcliquesetreplica/podcliquesetreplica.go` (modified) + `coherentupdate.go` (new)
 
@@ -248,14 +349,14 @@ func isRollingRecreateUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool
 
 #### `orchestrateCoherentUpdate` algorithm (`coherentupdate.go`)
 
-**Scale-out/in during update:** The update scope (which PCLQs/PCSGs are being updated) is derived fresh from `pcs.Spec` on every reconcile via `computeMVUScope(pcs)` — no caching in status. A scale-out creates new-spec pods that become "pending association" (scheduling gate + no podgang label) and are picked up for PodGang assignment in the same pass. A scale-in reduces the old pods to process. Both are handled correctly with no stale pre-computed state to invalidate.
+The orchestrator's sole responsibility is state machine progression — it computes the takedown set and updates `CoherentUpdateProgress` in status. Pod creation and PodGang creation are driven by PCLQ/PCSG reconcilers and the PodGang component reading `PodGangMap`. The `PodGangMap` component recomputes tuples on every reconcile reflecting the orchestrator's current progress.
 
 Per reconcile iteration:
 ```
 orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
   1. computeCoherentPendingWork(pcs, pcsIndicesToTerminate)
      → for each PCS replica not in pcsIndicesToTerminate:
-         fetch standalone PCLQs + PCSGs for this replica (live, not cached)
+         fetch PodGangMap for this replica
          check if all pods of standalone PCLQs are at new generation hash AND
                all PCSG-owned PCLQs are at new generation hash
          → produces: replicasDone[], replicasPending[]
@@ -267,8 +368,9 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
        if available:
          check if all old pods for this replica are gone (iteration complete for this replica)
          if complete: set UpdateEndedAt on replica progress entry, clear currentlyUpdating
-         else: compute next takedown set, delete old pods, requeue
-               (CreatedPodGangCount is incremented when the next PodGang is created, not here)
+         else: compute next takedown set, delete old pods
+               update PendingPodGangNames in CoherentUpdateProgress with next MPG names
+               increment PodGangState[replicaIndex].CreatedPodGangCount, patch status, requeue
 
   3. if no currentlyUpdating: pick next replica from replicasPending (lowest index first)
        set CoherentUpdateProgress.CurrentlyUpdating entry, patch status, requeue
@@ -278,141 +380,81 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
 ```
 
 #### Take-down set computation
-- Fetch all pods for each standalone PCLQ in the MVU template (via `componentutils.GetPCLQPods`)
+- Fetch all pods for each standalone PCLQ (via `componentutils.GetPCLQPods`)
 - Separate into `oldPods` (pod template hash != target) and `newPods`
-- For each PCSG in MVU template: fetch PCSG replicas; separate into old/new PCSG replicas
+- For each PCSG: fetch PCSG replicas; separate into old/new
 - Take-down set = `MinAvailable` old pods per standalone PCLQ (pending-first, then scheduled) + `MinAvailable` old PCSG replicas
 - If remaining old pods/replicas < one full MVU: add all remaining → tail case
 
-#### Takedown execution
-- Delete each pod in the take-down set
-- PCLQ controller recreates them with new spec; new pods automatically get the `grove.io/podgang-pending-creation` scheduling gate via the existing pod sync flow
-
-#### PodGang creation (next reconcile after deletion)
-- Detect new schedule-gated pods (no `grove.io/podgang` label) for target PCLQ replicas
-- Derive PodGang name deterministically: `GeneratePodGangName(pcs.Name, replicaIndex, shortGenerationHash, createdPodGangCount)`
-  - `createdPodGangCount` read from `PodGangState[replicaIndex].CreatedPodGangCount`
-  - Name is stable across reconciles for the same iteration — idempotent
-- **Patch `grove.io/podgang: <podGangName>` on each pod assigned to this PodGang** (strategic merge patch on `metadata.labels`)
-- Build PodGang: PodGroups per the update scope composition rules
-- Increment `PodGangState[replicaIndex].CreatedPodGangCount` in status and save all created PodGang names to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangNames`
-- The PCLQ pod syncflow sees the label and removes the scheduling gate on the next reconcile
-- For leftover PCSG replicas (tail): patch `grove.io/podgang: <tailPodGangName>` + `grove.io/preceding-podgang: <podGangName>` on tail pods; create tail PodGangs using `CreatedPodGangCount+offset` as the name suffix; add all tail PodGang names to `PendingPodGangNames`; keep their gates until the preceding PodGang is available
+#### Tail-MPG naming
+Tail PodGangs use `GeneratePodGangName` with `CreatedPodGangCount+offset` as the iteration value. Tail PodGang pods carry annotation `grove.io/preceding-podgang: <precedingPodGangName>` — gate removal waits until the preceding PodGang is available.
 
 ---
 
-### Step 6 — PCLQ controller: early-exit for Coherent (`operator/internal/controller/podclique/reconcilespec.go`)
+### Step 7 — PCLQ controller: use PodGangMap for pod creation (`operator/internal/controller/podclique/`)
 
-In `processUpdate()` (line 72), add immediately after fetching pcs:
+#### 7a — `processUpdate()` early-exit for Coherent (`reconcilespec.go` line 72)
 
 ```go
 if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy {
-    // PCS controller drives all pod replacement for Coherent; PCLQ controller is a no-op.
+    // PodGangMap drives pod replacement for Coherent; PCLQ controller skips its own update orchestration.
     return ctrlcommon.ContinueReconcile()
 }
 ```
 
-`reconcilestatus.go` is untouched — it generically tracks `UpdatedReplicas` and `CurrentPodTemplateHash` as pods come up with new spec.
+#### 7b — Pod sync: read PodGangMap to determine pod count and PodGang assignment (`components/pod/syncflow.go`)
+
+In `prepareSyncFlow`, after fetching the PCLQ, fetch the `PodGangMap` for this PCS replica. For each tuple referencing this PCLQ:
+1. Count existing pods with matching `GenerationHash` AND `grove.io/podgang == tuple.Name`
+2. Create delta pods (up to tuple count) with `grove.io/podgang: <tuple.Name>` set at creation time and scheduling gate set
+3. Do not create replacement pods if the tuple's quota is already satisfied
+
+This replaces the current logic of inheriting `grove.io/podgang` from the PCLQ resource label — pods now get the label directly from the `PodGangMap` tuple at creation time.
+
+`reconcilestatus.go` is untouched — it generically tracks `UpdatedReplicas` and `CurrentPodTemplateHash` as pods come up.
 
 ---
 
-### Step 7 — PCSG controller: early-exit for Coherent (`operator/internal/controller/podcliquescalinggroup/reconcilespec.go`)
+### Step 8 — PCSG controller: use PodGangMap for pod creation (`operator/internal/controller/podcliquescalinggroup/`)
 
-In `processUpdate()` (line 71), same 3-line guard as Step 6.
+#### 8a — `processUpdate()` early-exit for Coherent (`reconcilespec.go` line 71)
+
+Same 3-line guard as Step 7a.
+
+#### 8b — Pod sync: read PodGangMap
+
+Same pattern as Step 7b — PCSG reconciler reads `PodGangMap` tuples to determine how many PCSG replicas belong to each PodGang and creates them with correct `grove.io/podgang` label at creation time.
 
 ---
 
-### Step 8 — 1:N pod-label architecture: guard PCLQ label-setting
+### Step 9 — Guard PCLQ resource label-setting (no podgang label on PCLQ resource itself)
 
-**Background:** Today there is a 1:1 PCLQ-to-PodGang mapping. The PCLQ resource gets `grove.io/podgang` set at creation time (via `getLabels()` in the PCLQ component), and all pods of that PCLQ inherit the label. Under Coherent, different pods within the same PCLQ can belong to different PodGangs — so the PCLQ-level label is meaningless and must not be set.
+Under Coherent, `grove.io/podgang` must not be set on the PCLQ resource — only on individual pods via `PodGangMap`. The PCLQ resource label would incorrectly propagate a single PodGang name to all pods.
 
-**Rule:** When strategy is Coherent:
-- The PCLQ resource does NOT get `grove.io/podgang`
-- Pods are created without `grove.io/podgang`
-- The orchestrator patches `grove.io/podgang` directly on each pod when assigning it to a PodGang
-- The scheduling gate is removed from a pod **only after** the label is patched onto it
+#### 9a — PCS-managed PCLQ (`operator/internal/controller/podcliqueset/components/podclique/podclique.go` line 390)
 
-#### 8a — Guard PCLQ component `getLabels()` in PCS-managed PCLQ
-
-**File:** `operator/internal/controller/podcliqueset/components/podclique/podclique.go`
-
-At line 310, the PCLQ resource is labeled via `getLabels(pcs, pcsReplica, pclqObjectKey, pclqTemplateSpec, podGangName)`. The `podGangName` argument is generated by `GeneratePodGangNameForPodCliqueOwnedByPodCliqueSet(pcs, pcsReplica)`.
-
-Change: pass an empty string as `podGangName` when `pcs.Spec.UpdateStrategy.Type == CoherentStrategy`. In `getLabels()` (line 390), guard the `LabelPodGang` entry:
 ```go
 if podGangName != "" {
     labels[apicommon.LabelPodGang] = podGangName
 }
 ```
+Pass empty `podGangName` when `pcs.Spec.UpdateStrategy.Type == CoherentStrategy`.
 
-#### 8b — Guard PCLQ component `getLabels()` in PCSG-managed PCLQ
+#### 9b — PCSG-managed PCLQ (`operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go` line 476)
 
-**File:** `operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go`
+Same guard.
 
-Same guard at line 476 — pass empty `podGangName` when strategy is Coherent.
+#### 9c — `getAssociatedPodGangName()` (`operator/internal/controller/podclique/components/pod/syncflow.go` line 109)
 
-#### 8c — Pod creation: handle absent podgang label
-
-**File:** `operator/internal/controller/podclique/components/pod/pod.go`
-
-At line 306, `getLabels()` always writes `apicommon.LabelPodGang: podGangName`. Since `sc.associatedPodGangName` will be empty for Coherent PCLQs, guard it:
-```go
-if podGangName != "" {
-    labels[apicommon.LabelPodGang] = podGangName
-}
-```
-No change to the call site — `podGangName` will naturally be empty when PCLQ has no `grove.io/podgang` label.
-
-#### 8d — `getAssociatedPodGangName()`: tolerate absent label for Coherent
-
-**File:** `operator/internal/controller/podclique/components/pod/syncflow.go` (line 109)
-
-Currently returns `errCodeMissingPodGangLabelOnPCLQ` if label is absent. For Coherent PCLQs the label is intentionally missing. Change: return `""`, `nil` when the label is absent — the caller (`prepareSyncFlow`, line 79) already stores the result in `sc.associatedPodGangName`; downstream paths that need a name (gate removal, PodGang sync) will check for empty string.
-
-```go
-func (r _resource) getAssociatedPodGangName(pclqObjectMeta metav1.ObjectMeta) (string, error) {
-    podGangName, ok := pclqObjectMeta.GetLabels()[apicommon.LabelPodGang]
-    if !ok {
-        return "", nil  // Coherent: label absent until orchestrator assigns pod to a PodGang
-    }
-    return podGangName, nil
-}
-```
-
-#### 8e — Gate removal: skip pods without `grove.io/podgang` label
-
-**File:** `operator/internal/controller/podclique/components/pod/syncflow.go` (line 272 in `checkAndRemovePodSchedulingGates`)
-
-Add a guard at the top of the per-pod loop, **before** the existing `slices.Contains(sc.podNamesUpdatedInPCLQPodGangs, p.Name)` check:
-
-```go
-if _, hasLabel := p.GetLabels()[apicommon.LabelPodGang]; !hasLabel {
-    // Orchestrator has not yet assigned this pod to a PodGang; do not remove gate.
-    skippedScheduleGatedPods = append(skippedScheduleGatedPods, p.Name)
-    continue
-}
-```
-
-This ensures the gate is never removed before the orchestrator patches `grove.io/podgang` on the pod.
-
-#### 8f — Orchestrator PodGang assignment: patch pod label then remove gate
-
-This is part of the `orchestrateCoherentUpdate` algorithm in `coherentupdate.go` (Step 5). After computing the PodGang pod composition for a given iteration:
-
-1. For each pod assigned to the PodGang, patch `grove.io/podgang: <podGangName>` directly on the pod (strategic merge patch on `metadata.labels`).
-2. Create (or confirm existence of) the PodGang with those pod references.
-3. Save all created PodGang names to `CoherentUpdateProgress.CurrentlyUpdating[i].PendingPodGangNames`.
-4. The PCLQ pod syncflow will then see the label and proceed to remove the scheduling gate on the next reconcile.
-
-**Init container note:** The DownwardAPI mounts `metadata.labels['grove.io/podgang']` as a file inside the container. When the orchestrator patches the label, the kernel updates the DownwardAPI volume dynamically — the init container's blocking read sees the name without any restart needed.
+Return `"", nil` when label is absent (instead of error) — label is intentionally absent for Coherent PCLQs since `grove.io/podgang` is now set per-pod via `PodGangMap`, not inherited from PCLQ resource.
 
 ---
 
-### Step 9 — Tail-MPG gate removal (`operator/internal/controller/podclique/components/pod/syncflow.go`)
+### Step 10 — Tail-MPG gate removal (`operator/internal/controller/podclique/components/pod/syncflow.go`)
 
-For tail-MPG pods (PCSG replicas above `MinAvailable` that don't fill a full MVU), the gate removal must wait until the preceding non-tail MPG is available (all PodGroups have `>= MinReplicas` ready pods), not just labeled.
+For tail PodGang pods, gate removal must wait until the preceding non-tail PodGang is available.
 
-Add `isPodGangAvailable(ctx, logger, podGangName, namespace) (bool, error)` — modelled on the existing `isBasePodGangScheduled()` pattern (line 319):
+Add `isPodGangAvailable(ctx, logger, podGangName, namespace) (bool, error)`:
 
 ```go
 func (r _resource) isPodGangAvailable(ctx context.Context, logger logr.Logger, namespace, podGangName string) (bool, error) {
@@ -433,13 +475,13 @@ func (r _resource) isPodGangAvailable(ctx context.Context, logger logr.Logger, n
 }
 ```
 
-Tail PodGang pods carry an annotation `grove.io/preceding-podgang: <precedingPodGangName>` set by the orchestrator when assigning them. In `shouldSkipPodSchedulingGateRemoval()`, check this annotation: if present, call `isPodGangAvailable` for the named preceding PodGang before allowing gate removal.
+Tail pods carry annotation `grove.io/preceding-podgang: <precedingPodGangName>` set by the orchestrator. In `shouldSkipPodSchedulingGateRemoval()`, check this annotation: if present, call `isPodGangAvailable` for the named preceding PodGang before allowing gate removal.
 
 ---
 
-### Step 10 — CRD regeneration and webhook
+### Step 11 — CRD regeneration and webhook
 
-Run `make generate manifests`. Check `operator/internal/webhook` for any strategy-type enum validation that needs updating.
+Run `make generate manifests`. Check `operator/internal/webhook` for any strategy-type enum validation that needs updating. Register `PodGangMap` CRD in the scheme and controller setup.
 
 ---
 
@@ -447,19 +489,20 @@ Run `make generate manifests`. Check `operator/internal/webhook` for any strateg
 
 | File | Change |
 |---|---|
-| `operator/api/core/v1alpha1/podcliqueset.go` | Add `CoherentStrategy`, `CoherentUpdateProgress`, `CoherentReplicaUpdateProgress`, `PodGangReplicaState` types; add `PodGangState` and `CoherentUpdateProgress` fields to `PodCliqueSetStatus` |
+| `operator/api/core/v1alpha1/podcliqueset.go` | Add `CoherentStrategy`, `CoherentUpdateProgress`, `CoherentReplicaUpdateProgress`, `PodGangReplicaState` types; add `PodGangState` and `CoherentUpdateProgress` to `PodCliqueSetStatus` |
+| `operator/api/core/v1alpha1/podgangmap.go` | **New** — `PodGangMap`, `PodGangMapSpec`, `PodGangTuple` CRD types |
 | `operator/api/common/namegen.go` | Keep old BPG/SPG name functions; add `GeneratePodGangName` |
-| `operator/api/common/namegen_test.go` | Update tests for removed/added functions |
+| `operator/api/common/namegen_test.go` | Add tests for `GeneratePodGangName` |
+| `operator/internal/controller/podcliqueset/components/podgangmap/podgangmap.go` | **New** — `PodGangMap` component; computes and reconciles `PodGangMap` resources |
 | `operator/internal/controller/podcliqueset/reconcilespec.go` | Coherent branch in `initUpdateProgress` |
 | `operator/internal/controller/podcliqueset/components/podcliquesetreplica/podcliquesetreplica.go` | Strategy-specific dispatch in `Sync()` |
-| `operator/internal/controller/podcliqueset/components/podcliquesetreplica/coherentupdate.go` | **New** — `orchestrateCoherentUpdate`, takedown set, MPG creation, per-pod label patching |
-| `operator/internal/controller/podcliqueset/components/podgang/syncflow.go` | Rewrite PodGang computation to unified MPG-based |
+| `operator/internal/controller/podcliqueset/components/podcliquesetreplica/coherentupdate.go` | **New** — `orchestrateCoherentUpdate`, takedown set computation, status updates |
+| `operator/internal/controller/podcliqueset/components/podgang/syncflow.go` | Replace BPG+SPG computation with `PodGangMap`-driven `buildExpectedPodGangsForPCSReplica` |
 | `operator/internal/controller/podclique/reconcilespec.go` | 3-line Coherent early-exit in `processUpdate` |
+| `operator/internal/controller/podclique/components/pod/syncflow.go` | Read `PodGangMap` for pod count/assignment; `getAssociatedPodGangName()` tolerates absent label; `isPodGangAvailable` for tail gate removal |
 | `operator/internal/controller/podcliquescalinggroup/reconcilespec.go` | 3-line Coherent early-exit in `processUpdate` |
-| `operator/internal/controller/podcliqueset/components/podclique/podclique.go` | Guard `LabelPodGang` in `getLabels()` — skip for Coherent |
-| `operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go` | Guard `LabelPodGang` in `getLabels()` — skip for Coherent |
-| `operator/internal/controller/podclique/components/pod/pod.go` | Guard `LabelPodGang` in `getLabels()` — omit if empty |
-| `operator/internal/controller/podclique/components/pod/syncflow.go` | `getAssociatedPodGangName()` tolerates absent label; gate removal skips unlabeled pods; `isPodGangAvailable` for tail PodGang gate removal |
+| `operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go` | Guard `LabelPodGang` — skip for Coherent |
+| `operator/internal/controller/podcliqueset/components/podclique/podclique.go` | Guard `LabelPodGang` — skip for Coherent |
 
 ## What is NOT changing
 
@@ -467,14 +510,14 @@ Run `make generate manifests`. Check `operator/internal/webhook` for any strateg
 - `gangterminate.go` — untouched
 - All `reconcilestatus.go` files (PCLQ, PCSG, PCS) — untouched; fully generic
 - `IsAutoUpdateStrategy` utility — no change needed (Coherent is not OnDelete)
-- e2e test helpers that reference old naming functions — updated as a consequence of Step 2
 
 ---
 
 ## Verification
 
-1. Unit tests for `orchestrateCoherentUpdate`: first takedown, MPG creation, MPG availability wait, tail-MPG, update completion.
-2. Existing `podcliquesetreplica_test.go` must still pass (RollingRecreate regression).
-3. Manual smoke test: 2-replica PCS (1 standalone PCLQ + 1 PCSG), trigger image update under Coherent strategy — verify MPGs created in order, old PodGangs emptied and deleted, pods come up with new image.
-4. New PCS deployed under Coherent: verify initial deployment creates MPGs directly with counter-based names, no BPGs/SPGs.
-5. `make test` and `make lint`.
+1. Unit tests for `orchestrateCoherentUpdate`: first takedown, MPG creation via PodGangMap, MPG availability wait, tail-MPG, update completion.
+2. Unit tests for `PodGangMap` component: all 4 cases (BPG/SPG, MPG, Coherent update, RollingRecreate).
+3. Existing `podcliquesetreplica_test.go` must still pass (RollingRecreate regression).
+4. Manual smoke test: 2-replica PCS (1 standalone PCLQ + 1 PCSG), trigger image update under Coherent strategy — verify PodGangMap updated each iteration, MPGs created in order, old PodGangs emptied and deleted, pods come up with new image.
+5. New PCS deployed under Coherent: verify PodGangMap created before any pods, initial deployment creates MPGs directly.
+6. `make test` and `make lint`.
