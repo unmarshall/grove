@@ -101,6 +101,8 @@ type CoherentReplicaUpdateProgress struct {
     // proceeding to the next round. They may not yet exist or may exist but not yet be available.
     // Purely observability — PodGangMap is the source of truth for pod/PodGang assignment.
     InFlightPodGangs []string `json:"inFlightPodGangs,omitempty"`
+    // ErrorMessage captures the reason the update of this replica is failing or stalled, if any.
+    ErrorMessage *string `json:"errorMessage,omitempty"`
 }
 ```
 
@@ -216,6 +218,8 @@ type CoherentReplicaUpdateProgress struct {
     // proceeding to the next round. They may not yet exist or may exist but not yet be available.
     // Purely observability — PodGangMap is the source of truth for pod/PodGang assignment.
     InFlightPodGangs []string `json:"inFlightPodGangs,omitempty"`
+    // ErrorMessage captures the reason the update of this replica is failing or stalled, if any.
+    ErrorMessage *string `json:"errorMessage,omitempty"`
 }
 ```
 
