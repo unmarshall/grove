@@ -518,20 +518,22 @@ Under Coherent, `grove.io/podgang` must not be set on the PCLQ resource — only
 
 #### 9a — PCS-managed PCLQ (`operator/internal/controller/podcliqueset/components/podclique/podclique.go` line 390)
 
+Do not set `grove.io/podgang` on the PCLQ resource at all when the strategy is Coherent:
 ```go
-if podGangName != "" {
+if pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovecorev1alpha1.CoherentStrategy {
     labels[apicommon.LabelPodGang] = podGangName
 }
 ```
-Pass empty `podGangName` when `pcs.Spec.UpdateStrategy.Type == CoherentStrategy`.
 
 #### 9b — PCSG-managed PCLQ (`operator/internal/controller/podcliquescalinggroup/components/podclique/podclique.go` line 476)
 
-Same guard.
+Same guard — do not set `grove.io/podgang` on the PCLQ resource when the strategy is Coherent.
 
 #### 9c — `getAssociatedPodGangName()` (`operator/internal/controller/podclique/components/pod/syncflow.go` line 109)
 
-Return `"", nil` when label is absent (instead of error) — label is intentionally absent for Coherent PCLQs since `grove.io/podgang` is now set per-pod via `PodGangMap`, not inherited from PCLQ resource.
+When the label is absent, check the strategy before deciding whether to error:
+- If strategy is Coherent → return `"", nil` — label is intentionally absent; `grove.io/podgang` is set per-pod via `PodGangMap` at creation time, not inherited from the PCLQ resource
+- Otherwise → return error as before — label is always expected to be present for RollingRecreate
 
 ---
 
