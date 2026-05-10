@@ -96,10 +96,11 @@ type CoherentReplicaUpdateProgress struct {
     ReplicaIndex    int32        `json:"replicaIndex"`
     UpdateStartedAt metav1.Time  `json:"updateStartedAt"`
     UpdateEndedAt  *metav1.Time `json:"updateEndedAt,omitempty"`
-    // PendingPodGangNames are the names of all PodGangs created in the current iteration
-    // (one non-tail MPG + zero or more tail-MPGs) whose availability is being waited on
-    // before the next iteration can proceed. Empty when no PodGangs are pending.
-    PendingPodGangNames []string `json:"pendingPodGangNames,omitempty"`
+    // InFlightPodGangs are the names of all PodGangs for the current round (one non-tail MPG +
+    // zero or more tail-MPGs). The orchestrator waits for all of them to become available before
+    // proceeding to the next round. They may not yet exist or may exist but not yet be available.
+    // Purely observability — PodGangMap is the source of truth for pod/PodGang assignment.
+    InFlightPodGangs []string `json:"inFlightPodGangs,omitempty"`
 }
 ```
 
@@ -155,7 +156,7 @@ Tuples computed from `pcs.Spec` + live PCLQ/PCSG resources using MVU composition
 Tuples reflect the partially-updated state:
 - Old BPG/SPG tuples with decremented counts (remaining old pods not yet taken down), `podCliqueSetGenerationHash: old`
 - Already-created MPG tuples from previous iterations, `podCliqueSetGenerationHash: new`
-- Current iteration MPG tuple (from `PendingPodGangNames`), `podCliqueSetGenerationHash: new`
+- Current iteration MPG tuple (from `InFlightPodGangs`), `podCliqueSetGenerationHash: new`
 - Tail-MPG tuples if applicable
 
 On each reconcile, counts are recomputed from live PCLQ/PCSG resources + `CoherentUpdateProgress` — a concurrent scale-out/in is automatically reflected on the next reconcile.
@@ -210,10 +211,11 @@ type CoherentReplicaUpdateProgress struct {
     ReplicaIndex    int32        `json:"replicaIndex"`
     UpdateStartedAt metav1.Time  `json:"updateStartedAt"`
     UpdateEndedAt  *metav1.Time `json:"updateEndedAt,omitempty"`
-    // PendingPodGangNames are the names of all PodGangs created in the current iteration
-    // (one non-tail MPG + zero or more tail-MPGs) whose availability is being waited on
-    // before the next iteration can proceed. Empty when no PodGangs are pending.
-    PendingPodGangNames []string `json:"pendingPodGangNames,omitempty"`
+    // InFlightPodGangs are the names of all PodGangs for the current round (one non-tail MPG +
+    // zero or more tail-MPGs). The orchestrator waits for all of them to become available before
+    // proceeding to the next round. They may not yet exist or may exist but not yet be available.
+    // Purely observability — PodGangMap is the source of truth for pod/PodGang assignment.
+    InFlightPodGangs []string `json:"inFlightPodGangs,omitempty"`
 }
 ```
 
@@ -266,7 +268,7 @@ Computes desired tuples based on PCS state:
 
 - **Case 1 (existing BPG/SPG, no update):** derive BPG/SPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts
 - **Case 2 (MPG topology, no update):** derive MPG-convention tuples from `pcs.Spec` + live PCLQ/PCSG replica counts using MVU composition rules
-- **Case 3 (Coherent update in progress):** old tuples with decremented counts + new MPG tuples from `PendingPodGangNames` + current iteration MPG tuple
+- **Case 3 (Coherent update in progress):** old tuples with decremented counts + new MPG tuples from `InFlightPodGangs` + current iteration MPG tuple
 - **Case 4 (RollingRecreate update):** same structure as steady-state, `PodCliqueSetGenerationHash` updated to new PCS generation hash
 
 The component creates/updates the `PodGangMap` resource for each PCS replica. On scale-out, a new `PodGangMap` is created for the new replica. On scale-in, the `PodGangMap` for the removed replica is deleted.
@@ -362,14 +364,14 @@ orchestrateCoherentUpdate(pcs, pcsIndicesToTerminate):
          → produces: replicasDone[], replicasPending[]
 
   2. if currentlyUpdating replica is set in CoherentUpdateProgress:
-       check if PendingPodGangNames PodGangs are all available
+       check if InFlightPodGangs are all available
          (each PodGroup in each PodGang has >= MinReplicas ready pods)
        if not available: requeue
        if available:
          check if all old pods for this replica are gone (iteration complete for this replica)
          if complete: set UpdateEndedAt on replica progress entry, clear currentlyUpdating
          else: compute next takedown set, delete old pods
-               update PendingPodGangNames in CoherentUpdateProgress with next MPG names
+               update InFlightPodGangs in CoherentUpdateProgress with next MPG names
                increment PodGangState[replicaIndex].CreatedPodGangCount, patch status, requeue
 
   3. if no currentlyUpdating: pick next replica from replicasPending (lowest index first)
