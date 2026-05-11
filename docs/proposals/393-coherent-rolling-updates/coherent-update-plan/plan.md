@@ -45,7 +45,7 @@ A single unified PodGang type — **MPG** — computed from the MVU template, na
 ```
 
 Where:
-- `short-generationhash` is a truncated prefix (5 chars) of `pcs.Status.CurrentGenerationHash` — encodes *which update* the MPG belongs to; 5 chars is consistent with Kubernetes ReplicaSet/Pod suffix conventions and sufficient for collision resistance within a single PCS's update history
+- `short-generationhash` is a truncated prefix (5 chars) of `pcs.Status.CurrentGenerationHash` — encodes *which update* the MPG belongs to; 5 chars provides sufficient collision resistance within a single PCS's update history (27^5 ≈ 14.3M possible values)
 - `createdPodGangCount-1` is `PodGangState[replicaIndex].CreatedPodGangCount - 1` at the time the PodGang is created — the count is incremented after creation, so the name uses the pre-increment value
 
 This avoids any global monotonic growth. Names are meaningful (you can tell from the name which update event and which MVU iteration created the PodGang), and the iteration count is bounded by `ceil(max(old_standalone_pclq_pods / MinAvailable_pclq, old_pcsg_replicas / MinAvailable_pcsg))` — a small number tied to the PCS replica count, not something that grows over the lifetime of the PCS.
