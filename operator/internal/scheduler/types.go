@@ -57,11 +57,11 @@ type Backend interface {
 	ValidatePodCliqueSet(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) error
 }
 
-// TopologyAwareSchedBackend is an optional interface that Backend
+// TopologyAwareBackend is an optional interface that Backend
 // implementations may satisfy if they manage a scheduler-specific topology CRD.
 // The ClusterTopology controller type-asserts each registered backend to this
 // interface at startup and calls these methods during reconciliation.
-type TopologyAwareSchedBackend interface {
+type TopologyAwareBackend interface {
 	// TopologyGVR returns the GroupVersionResource of the topology CRD
 	// managed by this backend (e.g. KAI's "topologies.kai.scheduler").
 	// The CT controller uses this to register dynamic watches at startup.
@@ -93,4 +93,27 @@ type TopologyAwareSchedBackend interface {
 		ct *grovecorev1alpha1.ClusterTopology,
 		ref grovecorev1alpha1.SchedulerTopologyReference,
 	) (bool, string, int64, error)
+}
+
+// Registry provides access to initialized scheduler backends.
+// Use Get to look up a backend by its registered name; use GetDefault
+// for the backend designated as default in OperatorConfiguration.
+type Registry interface {
+	// Get returns the backend registered under name, or nil if not found.
+	// An empty name returns nil; use GetOrDefault for empty-falls-back-to-default behaviour.
+	Get(name string) Backend
+
+	// GetDefault returns the backend marked as default in
+	// OperatorConfiguration (scheduler.defaultProfileName).
+	GetDefault() Backend
+
+	// GetOrDefault returns the backend registered under name, or the default
+	// backend if name is empty.
+	GetOrDefault(name string) Backend
+
+	// All returns all registered scheduler backends keyed by name.
+	All() map[string]Backend
+
+	// AllTopologyAware returns the subset of registered backends that implement TopologyAwareBackend, keyed by name.
+	AllTopologyAware() map[string]TopologyAwareBackend
 }
