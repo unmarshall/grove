@@ -282,7 +282,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 
 // TestMutateTopologyLevelUnavailableConditions tests the mutateTopologyLevelUnavailableConditions function.
 // It covers TAS-disabled paths, backward-compat paths (missing topologyName), and fully-specified
-// ClusterTopology paths (not found, unavailable domains, all available).
+// ClusterTopologyBinding paths (not found, unavailable domains, all available).
 func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 	// basePCS returns a PodCliqueSet with a PCS-level TopologyConstraint pointing at "my-topology".
 	basePCS := func(topologyName string) *grovecorev1alpha1.PodCliqueSet {
@@ -317,11 +317,11 @@ func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 		}
 	}
 
-	// clusterTopology builds a ClusterTopology with the given levels.
-	clusterTopology := func(name string, levels []grovecorev1alpha1.TopologyLevel) *grovecorev1alpha1.ClusterTopology {
-		return &grovecorev1alpha1.ClusterTopology{
+	// clusterTopology builds a ClusterTopologyBinding with the given levels.
+	clusterTopology := func(name string, levels []grovecorev1alpha1.TopologyLevel) *grovecorev1alpha1.ClusterTopologyBinding {
+		return &grovecorev1alpha1.ClusterTopologyBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: grovecorev1alpha1.ClusterTopologySpec{
+			Spec: grovecorev1alpha1.ClusterTopologyBindingSpec{
 				Levels: levels,
 			},
 		}
@@ -378,7 +378,7 @@ func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 			wantMsgContain: "available",
 		},
 		{
-			name:       "TAS enabled, named ClusterTopology is used instead of another available topology",
+			name:       "TAS enabled, named ClusterTopologyBinding is used instead of another available topology",
 			tasEnabled: true,
 			setupPCS:   func() *grovecorev1alpha1.PodCliqueSet { return basePCS("selected-topology") },
 			extraObjects: []client.Object{
@@ -432,7 +432,7 @@ func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 			},
 			wantStatus:     metav1.ConditionUnknown,
 			wantReason:     apicommonconstants.ConditionReasonTopologyNameMissing,
-			wantMsgContain: "both topologyName and packDomain",
+			wantMsgContain: "include topologyName",
 		},
 		{
 			name:           "TAS enabled, no constraints at all — False/AllClusterTopologyLevelsAvailable with no-constraints message",
@@ -444,7 +444,7 @@ func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 			wantMsgContain: "No topology constraints defined",
 		},
 		{
-			name:       "TAS enabled, incomplete PCS topology constraint with valid PCSG constraint — Unknown/TopologyNameMissing",
+			name:       "TAS enabled, incomplete PCS topology constraint with valid PCSG constraint — False/AllClusterTopologyLevelsAvailable",
 			tasEnabled: true,
 			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
 				pcs := basePCS("")
@@ -466,9 +466,9 @@ func TestMutateTopologyLevelUnavailableConditions(t *testing.T) {
 			extraObjects: []client.Object{
 				clusterTopology("my-topology", standardLevels),
 			},
-			wantStatus:     metav1.ConditionUnknown,
-			wantReason:     apicommonconstants.ConditionReasonTopologyNameMissing,
-			wantMsgContain: "both topologyName and packDomain",
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     apicommonconstants.ConditionReasonAllTopologyLevelsAvailable,
+			wantMsgContain: "All topology levels are available",
 		},
 	}
 

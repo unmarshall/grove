@@ -74,7 +74,7 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pcs 
 
 	sc.tasEnabled = r.tasConfig.Enabled
 	if r.tasConfig.Enabled && componentutils.HasAnyTopologyConstraint(pcs) {
-		topologyName, resolveErr := componentutils.ResolveTopologyNameForPodCliqueSet(pcs)
+		topologyName, resolveErr := componentutils.FindExplicitTopologyNameForPodCliqueSet(pcs)
 		if resolveErr == nil && topologyName != "" {
 			sc.topologyLevels, err = clustertopology.GetClusterTopologyLevels(ctx, r.client, topologyName)
 			if err != nil {
@@ -85,14 +85,14 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pcs 
 						fmt.Sprintf("failed to get cluster topology levels for %q", topologyName))
 				}
 				sc.logger.Info(
-					"ClusterTopology not found while preparing PodGang sync; continuing without translated topology constraints",
+					"ClusterTopologyBinding not found while preparing PodGang sync; continuing without translated topology constraints",
 					"pcs", pcsObjectKey,
 					"topologyName", topologyName,
 				)
 				sc.topologyLevels = nil
 			}
 		}
-		// If topologyName resolution fails, sc.topologyLevels stays nil — the PCS reconciler
+		// If explicit topologyName lookup fails, sc.topologyLevels stays nil — the PCS reconciler
 		// handles this via the TopologyNameMissing condition.
 	}
 
@@ -361,7 +361,7 @@ func createTopologyPackConstraint(sc *syncContext, nsName types.NamespacedName, 
 		return topologyLevel.Domain == requiredTopologyConstraint.PackDomain
 	})
 	if !found {
-		// This can only happen if the ClusterTopology CR has been updated and no longer contains a topology level
+		// This can only happen if the ClusterTopologyBinding CR has been updated and no longer contains a topology level
 		// that is being referenced by the resource's TopologyConstraint.
 		// In the current version it's been decided to log this occurrence and skip setting the required constraint which is equivalent
 		// to nullifying the required constraint.
@@ -727,7 +727,7 @@ func (sc *syncContext) determinePCSGReplicas(pcsgFQN string, pcsgConfig grovecor
 // podGangInfo is package-private; the public PodCliqueByName/PCSGByName/PodGangByName helpers
 // in componentutils cover the cross-package equivalents.
 func podGangInfoByName(podGangs []*podGangInfo) map[string]*podGangInfo {
-	return componentutils.MapBy(podGangs, func(podGang *podGangInfo) (string, *podGangInfo) {
+	return lo.SliceToMap(podGangs, func(podGang *podGangInfo) (string, *podGangInfo) {
 		return podGang.fqn, podGang
 	})
 }

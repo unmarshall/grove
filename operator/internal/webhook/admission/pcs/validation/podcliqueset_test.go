@@ -1865,6 +1865,32 @@ func TestValidateTopologyConstraintsPCSTopologyName(t *testing.T) {
 			clusterObjs: []client.Object{createTestClusterTopology()},
 		},
 		{
+			name:      "update repairs legacy child topologyName through PCS inheritance",
+			operation: admissionv1.Update,
+			setupOldPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := createTestPodCliqueSet("pcs-repair-inherited-child")
+				pcs.Spec.Template.TopologyConstraint = &grovecorev1alpha1.TopologyConstraint{
+					PackDomain: grovecorev1alpha1.TopologyDomainZone,
+				}
+				pcs.Spec.Template.Cliques[0].TopologyConstraint = &grovecorev1alpha1.TopologyConstraint{
+					PackDomain: grovecorev1alpha1.TopologyDomainHost,
+				}
+				return pcs
+			},
+			setupNewPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := createTestPodCliqueSet("pcs-repair-inherited-child")
+				pcs.Spec.Template.TopologyConstraint = &grovecorev1alpha1.TopologyConstraint{
+					TopologyName: "topo-a",
+					PackDomain:   grovecorev1alpha1.TopologyDomainZone,
+				}
+				pcs.Spec.Template.Cliques[0].TopologyConstraint = &grovecorev1alpha1.TopologyConstraint{
+					PackDomain: grovecorev1alpha1.TopologyDomainHost,
+				}
+				return pcs
+			},
+			clusterObjs: []client.Object{createTestClusterTopology()},
+		},
+		{
 			name:      "update does not treat topologyName-only PCS constraint as repairable legacy shape",
 			operation: admissionv1.Update,
 			setupOldPCS: func() *grovecorev1alpha1.PodCliqueSet {
@@ -2017,10 +2043,10 @@ func createScalingGroupConfig(name string, cliqueNames []string) grovecorev1alph
 	}
 }
 
-func createTestClusterTopology() *grovecorev1alpha1.ClusterTopology {
-	return &grovecorev1alpha1.ClusterTopology{
+func createTestClusterTopology() *grovecorev1alpha1.ClusterTopologyBinding {
+	return &grovecorev1alpha1.ClusterTopologyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "topo-a"},
-		Spec: grovecorev1alpha1.ClusterTopologySpec{
+		Spec: grovecorev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovecorev1alpha1.TopologyLevel{
 				{Domain: grovecorev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
 				{Domain: grovecorev1alpha1.TopologyDomainRack, Key: "topology.grove.io/rack"},
