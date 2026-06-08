@@ -19,6 +19,7 @@ package volcano
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
@@ -31,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -186,7 +188,7 @@ func (b *schedulerBackend) PreparePod(pod *corev1.Pod) {
 	pod.Annotations[volcanov1beta1.KubeGroupNameAnnotationKey] = podGangName
 }
 
-func (b *schedulerBackend) ValidatePodCliqueSet(_ context.Context, pcs *grovecorev1alpha1.PodCliqueSet) error {
+func (b *schedulerBackend) ValidatePodCliqueSet(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) error {
 	if pcs.Spec.Template.TopologyConstraint != nil {
 		return fmt.Errorf("volcano scheduler backend does not support topologyConstraint on PodCliqueSet")
 	}
@@ -200,7 +202,52 @@ func (b *schedulerBackend) ValidatePodCliqueSet(_ context.Context, pcs *grovecor
 			return fmt.Errorf("volcano scheduler backend does not support topologyConstraint on PodCliqueScalingGroup %q", pcsg.Name)
 		}
 	}
-	return nil
+	return b.validateQueueAnnotations(ctx, pcs)
+}
+
+func (b *schedulerBackend) validateQueueAnnotations(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) error {
+	var errs []error
+	globalQueueValue := strings.TrimSpace(pcs.Annotations[QueueAnnotationKey])
+	if globalQueueValue != "" {
+		if msgs := ValidateQueueName(globalQueueValue); len(msgs) > 0 {
+			errs = append(errs, fmt.Errorf("metadata.annotations[%s]: %s", QueueAnnotationKey, strings.Join(msgs, "; ")))
+		}
+	}
+
+	var resolvedQueue string
+	for i, cliqueTemplateSpec := range pcs.Spec.Template.Cliques {
+		if cliqueTemplateSpec == nil {
+			continue
+		}
+		cliqueQueueValue := strings.TrimSpace(cliqueTemplateSpec.Annotations[QueueAnnotationKey])
+		if cliqueQueueValue != "" {
+			if msgs := ValidateQueueName(cliqueQueueValue); len(msgs) > 0 {
+				errs = append(errs, fmt.Errorf("spec.template.cliques[%d].annotations[%s]: %s", i, QueueAnnotationKey, strings.Join(msgs, "; ")))
+			}
+		}
+
+		queue, err := ResolvePodCliqueQueue(pcs.Annotations, cliqueTemplateSpec.Annotations)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("spec.template.cliques[%d].annotations[%s]: must match metadata.annotations[%s] when both are specified", i, QueueAnnotationKey, QueueAnnotationKey))
+			continue
+		}
+		if resolvedQueue == "" {
+			resolvedQueue = queue
+			continue
+		}
+		if resolvedQueue != queue {
+			errs = append(errs, fmt.Errorf("spec.template.cliques[%d].annotations[%s]: all PodCliques in a PodCliqueSet using volcano scheduler must resolve to the same queue", i, QueueAnnotationKey))
+		}
+	}
+
+	if len(pcs.Spec.Template.Cliques) == 0 {
+		resolvedQueue = EffectiveQueueFromAnnotations(pcs.Annotations)
+	}
+
+	if len(errs) > 0 {
+		return utilerrors.NewAggregate(errs)
+	}
+	return ValidateQueueExistsAndIsOpen(ctx, b.client, resolvedQueue)
 }
 
 func minMemberForPodGang(podGang *groveschedulerv1alpha1.PodGang) int32 {

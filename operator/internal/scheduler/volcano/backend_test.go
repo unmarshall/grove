@@ -195,3 +195,127 @@ func TestBackend_ValidatePodCliqueSet(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not support topologyConstraint")
 }
+
+func TestBackend_ValidatePodCliqueSetQueues(t *testing.T) {
+	makePCS := func() *grovecorev1alpha1.PodCliqueSet {
+		return testutils.NewPodCliqueSetBuilder("volcano", "default", "test-uid").
+			WithReplicas(1).
+			WithPodCliqueTemplateSpec(
+				testutils.NewPodCliqueTemplateSpecBuilder("worker").
+					WithReplicas(1).
+					WithRoleName("worker-role").
+					WithMinAvailable(1).
+					WithPodSpec(corev1.PodSpec{
+						SchedulerName: string(configv1alpha1.SchedulerNameVolcano),
+						Containers:    []corev1.Container{{Name: "worker", Image: "test:latest"}},
+					}).
+					Build(),
+			).
+			WithPodCliqueTemplateSpec(
+				testutils.NewPodCliqueTemplateSpecBuilder("ps").
+					WithReplicas(1).
+					WithRoleName("ps-role").
+					WithMinAvailable(1).
+					WithPodSpec(corev1.PodSpec{
+						SchedulerName: string(configv1alpha1.SchedulerNameVolcano),
+						Containers:    []corev1.Container{{Name: "ps", Image: "test:latest"}},
+					}).
+					Build(),
+			).
+			Build()
+	}
+
+	makeQueue := func(name string, state volcanov1beta1.QueueState) *volcanov1beta1.Queue {
+		return &volcanov1beta1.Queue{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status:     volcanov1beta1.QueueStatus{State: state},
+		}
+	}
+
+	testCases := []struct {
+		description   string
+		mutate        func(*grovecorev1alpha1.PodCliqueSet)
+		existingObjs  []client.Object
+		errorContains string
+	}{
+		{
+			description: "global queue is used when cliques do not override",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
+			},
+			existingObjs: []client.Object{makeQueue("gpu-training", volcanov1beta1.QueueStateOpen)},
+		},
+		{
+			description: "cliques can repeat the same queue as metadata",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
+				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
+			},
+			existingObjs: []client.Object{makeQueue("gpu-training", volcanov1beta1.QueueStateOpen)},
+		},
+		{
+			description: "conflicting metadata and clique queues are rejected",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
+				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{QueueAnnotationKey: "high-priority"}
+			},
+			errorContains: "must match metadata.annotations",
+		},
+		{
+			description: "all cliques must resolve to the same queue",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
+				pcs.Spec.Template.Cliques[1].Annotations = map[string]string{QueueAnnotationKey: "high-priority"}
+			},
+			errorContains: "all PodCliques in a PodCliqueSet using volcano scheduler must resolve to the same queue",
+		},
+		{
+			description: "missing queue defaults to default",
+			mutate:      func(_ *grovecorev1alpha1.PodCliqueSet) {},
+			existingObjs: []client.Object{
+				makeQueue(DefaultQueue, volcanov1beta1.QueueStateOpen),
+			},
+		},
+		{
+			description: "queue name must be valid",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "Invalid_Queue"}
+			},
+			errorContains: "metadata.annotations[scheduling.grove.io/volcano-queue]",
+		},
+		{
+			description: "queue must exist",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "missing"}
+			},
+			errorContains: `volcano queue "missing" does not exist`,
+		},
+		{
+			description: "queue must be open",
+			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
+				pcs.Annotations = map[string]string{QueueAnnotationKey: "closed"}
+			},
+			existingObjs:  []client.Object{makeQueue("closed", "Closed")},
+			errorContains: `volcano queue "closed" is not Open`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pcs := makePCS()
+			tc.mutate(pcs)
+			cl := testutils.CreateDefaultFakeClient(tc.existingObjs)
+			recorder := record.NewFakeRecorder(10)
+			profile := configv1alpha1.SchedulerProfile{Name: configv1alpha1.SchedulerNameVolcano}
+			b := New(cl, cl.Scheme(), recorder, profile)
+
+			err := b.ValidatePodCliqueSet(context.Background(), pcs)
+			if tc.errorContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errorContains)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

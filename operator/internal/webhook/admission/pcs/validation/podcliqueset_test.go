@@ -27,7 +27,6 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler/kai"
-	volcanoscheduler "github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/samber/lo"
@@ -41,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 func TestResourceNamingValidation(t *testing.T) {
@@ -160,145 +158,6 @@ func TestResourceNamingValidation(t *testing.T) {
 			}
 
 			assert.Empty(t, warnings, "No warnings expected for these test cases")
-		})
-	}
-}
-
-func TestValidateVolcanoQueues(t *testing.T) {
-	makePCS := func() *grovecorev1alpha1.PodCliqueSet {
-		return testutils.NewPodCliqueSetBuilder("volcano", "default", uuid.NewUUID()).
-			WithReplicas(1).
-			WithTerminationDelay(4 * time.Hour).
-			WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
-			WithPodCliqueTemplateSpec(
-				testutils.NewPodCliqueTemplateSpecBuilder("worker").
-					WithReplicas(1).
-					WithRoleName("worker-role").
-					WithMinAvailable(1).
-					WithPodSpec(corev1.PodSpec{
-						SchedulerName: string(groveconfigv1alpha1.SchedulerNameVolcano),
-						Containers:    []corev1.Container{{Name: "worker", Image: "test:latest"}},
-					}).
-					Build(),
-			).
-			WithPodCliqueTemplateSpec(
-				testutils.NewPodCliqueTemplateSpecBuilder("ps").
-					WithReplicas(1).
-					WithRoleName("ps-role").
-					WithMinAvailable(1).
-					WithPodSpec(corev1.PodSpec{
-						SchedulerName: string(groveconfigv1alpha1.SchedulerNameVolcano),
-						Containers:    []corev1.Container{{Name: "ps", Image: "test:latest"}},
-					}).
-					Build(),
-			).
-			Build()
-	}
-
-	makeQueue := func(name string, state volcanov1beta1.QueueState) *volcanov1beta1.Queue {
-		return &volcanov1beta1.Queue{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Status:     volcanov1beta1.QueueStatus{State: state},
-		}
-	}
-
-	testCases := []struct {
-		description   string
-		mutate        func(*grovecorev1alpha1.PodCliqueSet)
-		existingObjs  []client.Object
-		errorMatchers []testutils.ErrorMatcher
-	}{
-		{
-			description: "global queue is used when cliques do not override",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "gpu-training"}
-			},
-			existingObjs: []client.Object{makeQueue("gpu-training", volcanov1beta1.QueueStateOpen)},
-		},
-		{
-			description: "cliques can repeat the same queue as metadata",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "gpu-training"}
-				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "gpu-training"}
-			},
-			existingObjs: []client.Object{makeQueue("gpu-training", volcanov1beta1.QueueStateOpen)},
-		},
-		{
-			description: "conflicting metadata and clique queues are rejected",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "gpu-training"}
-				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "high-priority"}
-			},
-			errorMatchers: []testutils.ErrorMatcher{
-				{ErrorType: field.ErrorTypeInvalid, Field: "spec.template.cliques[0].annotations[scheduling.grove.io/volcano-queue]"},
-			},
-		},
-		{
-			description: "all cliques must resolve to the same queue",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Spec.Template.Cliques[0].Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "gpu-training"}
-				pcs.Spec.Template.Cliques[1].Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "high-priority"}
-			},
-			errorMatchers: []testutils.ErrorMatcher{
-				{ErrorType: field.ErrorTypeInvalid, Field: "spec.template.cliques[1].annotations[scheduling.grove.io/volcano-queue]"},
-			},
-		},
-		{
-			description: "missing queue defaults to default",
-			mutate:      func(_ *grovecorev1alpha1.PodCliqueSet) {},
-			existingObjs: []client.Object{
-				makeQueue(volcanoscheduler.DefaultQueue, volcanov1beta1.QueueStateOpen),
-			},
-		},
-		{
-			description: "queue must exist",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "missing"}
-			},
-			errorMatchers: []testutils.ErrorMatcher{
-				{ErrorType: field.ErrorTypeInvalid, Field: "metadata.annotations[scheduling.grove.io/volcano-queue]"},
-			},
-		},
-		{
-			description: "queue must be open",
-			mutate: func(pcs *grovecorev1alpha1.PodCliqueSet) {
-				pcs.Annotations = map[string]string{volcanoscheduler.QueueAnnotationKey: "closed"}
-			},
-			existingObjs: []client.Object{makeQueue("closed", "Closed")},
-			errorMatchers: []testutils.ErrorMatcher{
-				{ErrorType: field.ErrorTypeInvalid, Field: "metadata.annotations[scheduling.grove.io/volcano-queue]"},
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
-			pcs := makePCS()
-			tc.mutate(pcs)
-			cl := testutils.CreateDefaultFakeClient(tc.existingObjs)
-			reg := &testutils.FakeSchedulerRegistry{
-				Backends: map[string]scheduler.Backend{
-					string(groveconfigv1alpha1.SchedulerNameVolcano): testutils.NewFakeSchedulerBackend(string(groveconfigv1alpha1.SchedulerNameVolcano)),
-				},
-				DefaultBackend: string(groveconfigv1alpha1.SchedulerNameVolcano),
-			}
-			validator := newPCSValidator(
-				pcs,
-				admissionv1.Create,
-				defaultTASConfig(),
-				groveconfigv1alpha1.SchedulerConfiguration{
-					Profiles:           []groveconfigv1alpha1.SchedulerProfile{{Name: groveconfigv1alpha1.SchedulerNameVolcano}},
-					DefaultProfileName: string(groveconfigv1alpha1.SchedulerNameVolcano),
-				},
-				cl,
-				reg,
-			)
-			_, errs := validator.validate()
-			if tc.errorMatchers != nil {
-				testutils.AssertErrorMatches(t, errs, tc.errorMatchers)
-				return
-			}
-			assert.NoError(t, errs.ToAggregate())
 		})
 	}
 }

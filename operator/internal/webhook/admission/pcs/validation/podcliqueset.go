@@ -28,7 +28,6 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/clustertopology"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
-	volcanoscheduler "github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 
 	"github.com/samber/lo"
@@ -268,9 +267,6 @@ func (v *pcsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string
 
 	schedulerErrs := v.validateSchedulerNames(schedulerNames, fldPath)
 	allErrs = append(allErrs, schedulerErrs...)
-	if len(schedulerErrs) == 0 && v.resolveSchedulerName(schedulerNames) == string(groveconfigv1alpha1.SchedulerNameVolcano) {
-		allErrs = append(allErrs, v.validateVolcanoQueueAnnotations()...)
-	}
 
 	if v.isStartupTypeExplicit() {
 		allErrs = append(allErrs, validateCliqueDependencies(cliqueTemplateSpecs, fldPath)...)
@@ -293,57 +289,6 @@ func (v *pcsValidator) resolveSchedulerName(schedulerNames []string) string {
 		return defaultSchedulerName
 	}
 	return schedulerNames[0]
-}
-
-func (v *pcsValidator) validateVolcanoQueueAnnotations() field.ErrorList {
-	allErrs := field.ErrorList{}
-	globalPath := field.NewPath("metadata").Child("annotations").Key(volcanoscheduler.QueueAnnotationKey)
-	globalQueueValue := strings.TrimSpace(v.pcs.Annotations[volcanoscheduler.QueueAnnotationKey])
-	queueFieldPath := globalPath
-	if globalQueueValue != "" {
-		if msgs := volcanoscheduler.ValidateQueueName(globalQueueValue); len(msgs) > 0 {
-			allErrs = append(allErrs, field.Invalid(globalPath, globalQueueValue, strings.Join(msgs, "; ")))
-		}
-	}
-
-	var resolvedQueue string
-	for i, cliqueTemplateSpec := range v.pcs.Spec.Template.Cliques {
-		cliquePath := field.NewPath("spec").Child("template").Child("cliques").Index(i).Child("annotations").Key(volcanoscheduler.QueueAnnotationKey)
-		cliqueQueueValue := strings.TrimSpace(cliqueTemplateSpec.Annotations[volcanoscheduler.QueueAnnotationKey])
-		if cliqueQueueValue != "" {
-			if globalQueueValue == "" && queueFieldPath == globalPath {
-				queueFieldPath = cliquePath
-			}
-			if msgs := volcanoscheduler.ValidateQueueName(cliqueQueueValue); len(msgs) > 0 {
-				allErrs = append(allErrs, field.Invalid(cliquePath, cliqueQueueValue, strings.Join(msgs, "; ")))
-			}
-		}
-
-		queue, err := volcanoscheduler.ResolvePodCliqueQueue(v.pcs.Annotations, cliqueTemplateSpec.Annotations)
-		if err != nil {
-			allErrs = append(allErrs, field.Invalid(cliquePath, cliqueQueueValue, fmt.Sprintf("must match %s when both are specified", globalPath.String())))
-			continue
-		}
-		if resolvedQueue == "" {
-			resolvedQueue = queue
-			continue
-		}
-		if resolvedQueue != queue {
-			allErrs = append(allErrs, field.Invalid(cliquePath, queue, "all PodCliques in a PodCliqueSet using volcano scheduler must resolve to the same queue"))
-		}
-	}
-
-	if len(v.pcs.Spec.Template.Cliques) == 0 {
-		resolvedQueue = volcanoscheduler.EffectiveQueueFromAnnotations(v.pcs.Annotations)
-	}
-
-	if len(allErrs) > 0 {
-		return allErrs
-	}
-	if err := volcanoscheduler.ValidateQueueExistsAndIsOpen(context.Background(), v.client, resolvedQueue); err != nil {
-		allErrs = append(allErrs, field.Invalid(queueFieldPath, resolvedQueue, err.Error()))
-	}
-	return allErrs
 }
 
 // validateSchedulerNames ensures all pod scheduler names resolve to the same scheduler and that scheduler is enabled.
