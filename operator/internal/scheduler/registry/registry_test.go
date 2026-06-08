@@ -21,7 +21,6 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
-	volcanoscheduler "github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +62,8 @@ func TestNewRegistry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := testutils.CreateDefaultFakeClient(nil)
+			restore := setDirectClientFactoryForTest(cl)
+			defer restore()
 			recorder := record.NewFakeRecorder(10)
 
 			cfg := configv1alpha1.SchedulerConfiguration{
@@ -91,6 +92,8 @@ func TestNewRegistry(t *testing.T) {
 
 	t.Run("multiple profiles with default set to kai", func(t *testing.T) {
 		cl := testutils.CreateDefaultFakeClient(nil)
+		restore := setDirectClientFactoryForTest(cl)
+		defer restore()
 		recorder := record.NewFakeRecorder(10)
 		cfg := configv1alpha1.SchedulerConfiguration{
 			Profiles: []configv1alpha1.SchedulerProfile{
@@ -108,9 +111,7 @@ func TestNewRegistry(t *testing.T) {
 
 	t.Run("volcano scheduler initialization", func(t *testing.T) {
 		cl := testutils.CreateDefaultFakeClient([]client.Object{testutils.NewVolcanoPodGroupCRD(true)})
-		restore := volcanoscheduler.SetCapabilityClientFactoryForTest(func(_ *runtime.Scheme) (client.Client, error) {
-			return cl, nil
-		})
+		restore := setDirectClientFactoryForTest(cl)
 		defer restore()
 
 		recorder := record.NewFakeRecorder(10)
@@ -125,6 +126,16 @@ func TestNewRegistry(t *testing.T) {
 		require.NotNil(t, reg.GetDefault())
 		assert.Equal(t, string(configv1alpha1.SchedulerNameVolcano), reg.GetDefault().Name())
 	})
+}
+
+func setDirectClientFactoryForTest(cl client.Client) func() {
+	old := newDirectClient
+	newDirectClient = func(_ *runtime.Scheme) (client.Client, error) {
+		return cl, nil
+	}
+	return func() {
+		newDirectClient = old
+	}
 }
 
 // TestGet tests the Get method of registry in isolation using stub backends.

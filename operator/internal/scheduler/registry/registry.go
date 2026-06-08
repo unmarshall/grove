@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -38,6 +39,21 @@ var _ scheduler.Registry = (*registry)(nil)
 type registry struct {
 	backends       map[string]scheduler.Backend
 	defaultBackend scheduler.Backend
+}
+
+// newDirectClient returns a non-cached client for backend initialization.
+// Backend Init runs before the manager cache starts, so backends that read
+// cluster state during Init must not use the manager's cached client.
+var newDirectClient = func(scheme *runtime.Scheme) (client.Client, error) {
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cluster config to initialize scheduler backend direct client: %w", err)
+	}
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scheduler backend direct client: %w", err)
+	}
+	return directClient, nil
 }
 
 // New creates a scheduler.Registry by initializing backend instances for each
@@ -78,28 +94,25 @@ func (r *registry) GetOrDefault(name string) scheduler.Backend {
 // newSchedulerBackend creates and initializes a Backend for the given profile.
 // NOTE: For any newly supported backend, add a case for it in the switch statement.
 func newSchedulerBackend(cl client.Client, scheme *runtime.Scheme, rec record.EventRecorder, p configv1alpha1.SchedulerProfile) (scheduler.Backend, error) {
+	var b scheduler.Backend
 	switch p.Name {
 	case configv1alpha1.SchedulerNameKube:
-		b := kube.New(cl, scheme, rec, p)
-		if err := b.Init(); err != nil {
-			return nil, err
-		}
-		return b, nil
+		b = kube.New(cl, scheme, rec, p)
 	case configv1alpha1.SchedulerNameKai:
-		b := kai.New(cl, scheme, rec, p)
-		if err := b.Init(); err != nil {
-			return nil, err
-		}
-		return b, nil
+		b = kai.New(cl, scheme, rec, p)
 	case configv1alpha1.SchedulerNameVolcano:
-		b := volcano.New(cl, scheme, rec, p)
-		if err := b.Init(); err != nil {
-			return nil, err
-		}
-		return b, nil
+		b = volcano.New(cl, scheme, rec, p)
 	default:
 		return nil, fmt.Errorf("scheduler profile %q is not supported", p.Name)
 	}
+	directClient, err := newDirectClient(scheme)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.Init(directClient); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // All returns all registered scheduler backends keyed by name.

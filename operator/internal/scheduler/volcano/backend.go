@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -51,32 +50,6 @@ type schedulerBackend struct {
 
 var _ scheduler.Backend = (*schedulerBackend)(nil)
 
-// newCapabilityClient creates a direct API client for the startup capability
-// check. The check reads the Volcano PodGroup CRD before the manager cache is
-// started, and using the cached client here would register a CRD informer that
-// requires cluster-wide list/watch permissions on CustomResourceDefinitions.
-var newCapabilityClient = func(scheme *runtime.Scheme) (client.Client, error) {
-	cfg, err := ctrl.GetConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster config for Volcano capability check: %w", err)
-	}
-	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create direct API client for Volcano capability check: %w", err)
-	}
-	return directClient, nil
-}
-
-// SetCapabilityClientFactoryForTest replaces the client factory used by Init.
-// It is intended for unit tests that should not talk to a real cluster.
-func SetCapabilityClientFactoryForTest(factory func(*runtime.Scheme) (client.Client, error)) func() {
-	old := newCapabilityClient
-	newCapabilityClient = factory
-	return func() {
-		newCapabilityClient = old
-	}
-}
-
 // New creates a Volcano scheduler backend from the given scheduler profile.
 func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, profile configv1alpha1.SchedulerProfile) scheduler.Backend {
 	return &schedulerBackend{
@@ -92,11 +65,7 @@ func (b *schedulerBackend) Name() string {
 	return b.name
 }
 
-func (b *schedulerBackend) Init() error {
-	directClient, err := newCapabilityClient(b.scheme)
-	if err != nil {
-		return err
-	}
+func (b *schedulerBackend) Init(directClient client.Client) error {
 	return CheckCapability(directClient, b.eventRecorder)
 }
 
