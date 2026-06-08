@@ -275,22 +275,6 @@ func (v *pcsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string
 	return warnings, allErrs
 }
 
-func (v *pcsValidator) resolveSchedulerName(schedulerNames []string) string {
-	defaultSchedulerName := string(groveconfigv1alpha1.SchedulerNameKube)
-	if v.schedRegistry != nil {
-		if def := v.schedRegistry.GetDefault(); def != nil {
-			defaultSchedulerName = def.Name()
-		}
-	}
-	if len(schedulerNames) == 0 {
-		return defaultSchedulerName
-	}
-	if schedulerNames[0] == "" {
-		return defaultSchedulerName
-	}
-	return schedulerNames[0]
-}
-
 // validateSchedulerNames ensures all pod scheduler names resolve to the same scheduler and that scheduler is enabled.
 // Empty schedulerName is resolved to the default backend name from the injected registry.
 func (v *pcsValidator) validateSchedulerNames(schedulerNames []string, fldPath *field.Path) field.ErrorList {
