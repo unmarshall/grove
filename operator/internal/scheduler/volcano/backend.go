@@ -118,7 +118,7 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 			podGroup.Spec.MinMember = minMemberForPodGang(podGang)
 			podGroup.Spec.SubGroupPolicy = subGroupPoliciesForPodGang(podGang)
 		}
-		podGroup.Spec.Queue = EffectiveQueueFromAnnotations(podGang.Annotations)
+		podGroup.Spec.Queue = effectiveQueueFromAnnotations(podGang.Annotations)
 		podGroup.Spec.PriorityClassName = podGang.Spec.PriorityClassName
 		return nil
 	})
@@ -174,7 +174,7 @@ func (b *schedulerBackend) validateQueueAnnotations(ctx context.Context, pcs *gr
 	var errs []error
 	globalQueueValue := strings.TrimSpace(pcs.Annotations[QueueAnnotationKey])
 	if globalQueueValue != "" {
-		if msgs := ValidateQueueName(globalQueueValue); len(msgs) > 0 {
+		if msgs := validateQueueName(globalQueueValue); len(msgs) > 0 {
 			errs = append(errs, fmt.Errorf("metadata.annotations[%s]: %s", QueueAnnotationKey, strings.Join(msgs, "; ")))
 		}
 	}
@@ -186,12 +186,12 @@ func (b *schedulerBackend) validateQueueAnnotations(ctx context.Context, pcs *gr
 		}
 		cliqueQueueValue := strings.TrimSpace(cliqueTemplateSpec.Annotations[QueueAnnotationKey])
 		if cliqueQueueValue != "" {
-			if msgs := ValidateQueueName(cliqueQueueValue); len(msgs) > 0 {
+			if msgs := validateQueueName(cliqueQueueValue); len(msgs) > 0 {
 				errs = append(errs, fmt.Errorf("spec.template.cliques[%d].annotations[%s]: %s", i, QueueAnnotationKey, strings.Join(msgs, "; ")))
 			}
 		}
 
-		queue, err := ResolvePodCliqueQueue(pcs.Annotations, cliqueTemplateSpec.Annotations)
+		queue, err := resolvePodCliqueQueue(pcs.Annotations, cliqueTemplateSpec.Annotations)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("spec.template.cliques[%d].annotations[%s]: must match metadata.annotations[%s] when both are specified", i, QueueAnnotationKey, QueueAnnotationKey))
 			continue
@@ -206,13 +206,13 @@ func (b *schedulerBackend) validateQueueAnnotations(ctx context.Context, pcs *gr
 	}
 
 	if len(pcs.Spec.Template.Cliques) == 0 {
-		resolvedQueue = EffectiveQueueFromAnnotations(pcs.Annotations)
+		resolvedQueue = effectiveQueueFromAnnotations(pcs.Annotations)
 	}
 
 	if len(errs) > 0 {
 		return utilerrors.NewAggregate(errs)
 	}
-	return ValidateQueueExistsAndIsOpen(ctx, b.client, resolvedQueue)
+	return validateQueueExistsAndIsOpen(ctx, b.client, resolvedQueue)
 }
 
 func shouldSyncSchedulingConstraints(podGang *groveschedulerv1alpha1.PodGang, podGroup *volcanov1beta1.PodGroup) bool {

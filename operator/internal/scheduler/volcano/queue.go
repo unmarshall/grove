@@ -36,12 +36,12 @@ const (
 	DefaultQueue = "default"
 )
 
-// ErrConflictingQueueAnnotations indicates that global and clique-level queue annotations disagree.
-var ErrConflictingQueueAnnotations = errors.New("conflicting volcano queue annotations")
+// errConflictingQueueAnnotations indicates that global and clique-level queue annotations disagree.
+var errConflictingQueueAnnotations = errors.New("conflicting volcano queue annotations")
 
-// EffectiveQueueFromAnnotations returns the effective Volcano queue for the given annotations.
+// effectiveQueueFromAnnotations returns the effective Volcano queue for the given annotations.
 // If the queue annotation is missing or empty, it defaults to "default".
-func EffectiveQueueFromAnnotations(annotations map[string]string) string {
+func effectiveQueueFromAnnotations(annotations map[string]string) string {
 	if annotations == nil {
 		return DefaultQueue
 	}
@@ -52,10 +52,10 @@ func EffectiveQueueFromAnnotations(annotations map[string]string) string {
 	return queue
 }
 
-// ResolvePodCliqueQueue returns the effective queue for a PodClique template/object after
+// resolvePodCliqueQueue returns the effective queue for a PodClique template/object after
 // applying the global object annotations and the clique-local annotations.
 // If both define the queue annotation, they must match.
-func ResolvePodCliqueQueue(globalAnnotations, cliqueAnnotations map[string]string) (string, error) {
+func resolvePodCliqueQueue(globalAnnotations, cliqueAnnotations map[string]string) (string, error) {
 	globalQueue := strings.TrimSpace(globalAnnotations[QueueAnnotationKey])
 	cliqueQueue := strings.TrimSpace(cliqueAnnotations[QueueAnnotationKey])
 
@@ -67,20 +67,20 @@ func ResolvePodCliqueQueue(globalAnnotations, cliqueAnnotations map[string]strin
 	case cliqueQueue == "":
 		return globalQueue, nil
 	case globalQueue != cliqueQueue:
-		return "", ErrConflictingQueueAnnotations
+		return "", errConflictingQueueAnnotations
 	default:
 		return globalQueue, nil
 	}
 }
 
-// ValidateQueueName validates the effective Volcano queue name.
-func ValidateQueueName(queue string) []string {
+// validateQueueName validates the effective Volcano queue name.
+func validateQueueName(queue string) []string {
 	return validation.IsDNS1123Subdomain(strings.TrimSpace(queue))
 }
 
-// ValidateQueueExistsAndIsOpen verifies that the resolved Volcano queue exists
+// validateQueueExistsAndIsOpen verifies that the resolved Volcano queue exists
 // in the cluster and that its status is Open before admitting the workload.
-func ValidateQueueExistsAndIsOpen(ctx context.Context, k8sClient client.Reader, queue string) error {
+func validateQueueExistsAndIsOpen(ctx context.Context, k8sClient client.Reader, queue string) error {
 	if k8sClient == nil {
 		return nil
 	}
