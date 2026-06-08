@@ -145,10 +145,12 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 			return err
 		}
 
-		podGroup.Spec.MinMember = minMemberForPodGang(podGang)
+		if shouldSyncSchedulingConstraints(podGang, podGroup) {
+			podGroup.Spec.MinMember = minMemberForPodGang(podGang)
+			podGroup.Spec.SubGroupPolicy = subGroupPoliciesForPodGang(podGang)
+		}
 		podGroup.Spec.Queue = EffectiveQueueFromAnnotations(podGang.Annotations)
 		podGroup.Spec.PriorityClassName = podGang.Spec.PriorityClassName
-		podGroup.Spec.SubGroupPolicy = subGroupPoliciesForPodGang(podGang)
 		return nil
 	})
 	if err != nil {
@@ -242,6 +244,17 @@ func (b *schedulerBackend) validateQueueAnnotations(ctx context.Context, pcs *gr
 		return utilerrors.NewAggregate(errs)
 	}
 	return ValidateQueueExistsAndIsOpen(ctx, b.client, resolvedQueue)
+}
+
+func shouldSyncSchedulingConstraints(podGang *groveschedulerv1alpha1.PodGang, podGroup *volcanov1beta1.PodGroup) bool {
+	for _, group := range podGang.Spec.PodGroups {
+		if group.MinReplicas > 0 {
+			return true
+		}
+	}
+	// Coherent updates release Grove scheduling constraints by setting all
+	// MinReplicas to 0. Keep existing Volcano gang constraints in that phase.
+	return podGroup.Spec.MinMember == 0 && len(podGroup.Spec.SubGroupPolicy) == 0
 }
 
 func minMemberForPodGang(podGang *groveschedulerv1alpha1.PodGang) int32 {

@@ -138,6 +138,55 @@ func TestBackend_SyncPodGang(t *testing.T) {
 	assert.Equal(t, int32(1), *podGroup.Spec.SubGroupPolicy[1].MinSubGroups)
 }
 
+func TestBackend_SyncPodGangPreservesSchedulingConstraintsAfterRelease(t *testing.T) {
+	podGang := &groveschedulerv1alpha1.PodGang{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pg-1",
+			Namespace: "default",
+			UID:       "uid-1",
+			Annotations: map[string]string{
+				QueueAnnotationKey: "gpu-training",
+			},
+		},
+		Spec: groveschedulerv1alpha1.PodGangSpec{
+			PriorityClassName: "high-priority",
+			PodGroups: []groveschedulerv1alpha1.PodGroup{
+				{Name: "worker", MinReplicas: 2},
+				{Name: "ps", MinReplicas: 3},
+			},
+		},
+	}
+	cl := testutils.CreateDefaultFakeClient([]client.Object{podGang})
+	recorder := record.NewFakeRecorder(10)
+	profile := configv1alpha1.SchedulerProfile{Name: configv1alpha1.SchedulerNameVolcano}
+	b := New(cl, cl.Scheme(), recorder, profile)
+
+	err := b.SyncPodGang(context.Background(), podGang)
+	require.NoError(t, err)
+
+	podGang.Spec.PriorityClassName = "released-priority"
+	podGang.Spec.PodGroups = []groveschedulerv1alpha1.PodGroup{
+		{Name: "worker", MinReplicas: 0},
+		{Name: "ps", MinReplicas: 0},
+	}
+
+	err = b.SyncPodGang(context.Background(), podGang)
+	require.NoError(t, err)
+
+	podGroup := &volcanov1beta1.PodGroup{}
+	err = cl.Get(context.Background(), client.ObjectKey{Name: "pg-1", Namespace: "default"}, podGroup)
+	require.NoError(t, err)
+	assert.Equal(t, int32(5), podGroup.Spec.MinMember)
+	assert.Equal(t, "released-priority", podGroup.Spec.PriorityClassName)
+	require.Len(t, podGroup.Spec.SubGroupPolicy, 2)
+	assert.Equal(t, "worker", podGroup.Spec.SubGroupPolicy[0].Name)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
+	assert.Equal(t, int32(2), *podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
+	assert.Equal(t, "ps", podGroup.Spec.SubGroupPolicy[1].Name)
+	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
+	assert.Equal(t, int32(3), *podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
+}
+
 func TestBackend_SyncPodGangDefaultQueue(t *testing.T) {
 	podGang := &groveschedulerv1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
