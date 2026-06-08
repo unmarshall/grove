@@ -75,31 +75,26 @@ func resolvePodCliqueQueue(globalAnnotations, cliqueAnnotations map[string]strin
 
 // validateQueueName validates the effective Volcano queue name.
 func validateQueueName(queue string) []string {
-	return validation.IsDNS1123Subdomain(strings.TrimSpace(queue))
+	return validation.IsDNS1123Subdomain(queue)
 }
 
 // validateQueueExistsAndIsOpen verifies that the resolved Volcano queue exists
 // in the cluster and that its status is Open before admitting the workload.
 func validateQueueExistsAndIsOpen(ctx context.Context, k8sClient client.Reader, queue string) error {
-	if k8sClient == nil {
-		return nil
-	}
-
-	queueName := strings.TrimSpace(queue)
-	if queueName == "" {
-		queueName = DefaultQueue
+	if queue == "" {
+		queue = DefaultQueue
 	}
 
 	volcanoQueue := &volcanov1beta1.Queue{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: queueName}, volcanoQueue); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: queue}, volcanoQueue); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("volcano queue %q does not exist", queueName)
+			return fmt.Errorf("volcano queue %q does not exist", queue)
 		}
-		return fmt.Errorf("failed to get volcano queue %q: %w", queueName, err)
+		return fmt.Errorf("failed to get volcano queue %q: %w", queue, err)
 	}
 
 	if volcanoQueue.Status.State != volcanov1beta1.QueueStateOpen {
-		return fmt.Errorf("volcano queue %q is not Open", queueName)
+		return fmt.Errorf("volcano queue %q is not Open", queue)
 	}
 
 	return nil
