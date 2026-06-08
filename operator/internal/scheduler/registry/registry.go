@@ -41,10 +41,12 @@ type registry struct {
 	defaultBackend scheduler.Backend
 }
 
+type directClientFactory func(*runtime.Scheme) (client.Client, error)
+
 // newDirectClient returns a non-cached client for backend initialization.
 // Backend Init runs before the manager cache starts, so backends that read
 // cluster state during Init must not use the manager's cached client.
-var newDirectClient = func(scheme *runtime.Scheme) (client.Client, error) {
+func newDirectClient(scheme *runtime.Scheme) (client.Client, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cluster config to initialize scheduler backend direct client: %w", err)
@@ -60,9 +62,13 @@ var newDirectClient = func(scheme *runtime.Scheme) (client.Client, error) {
 // profile in cfg.Profiles.
 // NOTE: This function should be called once during the lifecycle of the Grove operator.
 func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, cfg configv1alpha1.SchedulerConfiguration) (scheduler.Registry, error) {
+	return newRegistry(cl, scheme, eventRecorder, cfg, newDirectClient)
+}
+
+func newRegistry(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, cfg configv1alpha1.SchedulerConfiguration, createDirectClient directClientFactory) (scheduler.Registry, error) {
 	reg := &registry{backends: make(map[string]scheduler.Backend)}
 	for _, p := range cfg.Profiles {
-		backend, err := newSchedulerBackend(cl, scheme, eventRecorder, p)
+		backend, err := newSchedulerBackend(cl, scheme, eventRecorder, p, createDirectClient)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize %s backend: %w", p.Name, err)
 		}
@@ -93,7 +99,7 @@ func (r *registry) GetOrDefault(name string) scheduler.Backend {
 
 // newSchedulerBackend creates and initializes a Backend for the given profile.
 // NOTE: For any newly supported backend, add a case for it in the switch statement.
-func newSchedulerBackend(cl client.Client, scheme *runtime.Scheme, rec record.EventRecorder, p configv1alpha1.SchedulerProfile) (scheduler.Backend, error) {
+func newSchedulerBackend(cl client.Client, scheme *runtime.Scheme, rec record.EventRecorder, p configv1alpha1.SchedulerProfile, createDirectClient directClientFactory) (scheduler.Backend, error) {
 	var b scheduler.Backend
 	switch p.Name {
 	case configv1alpha1.SchedulerNameKube:
@@ -105,7 +111,7 @@ func newSchedulerBackend(cl client.Client, scheme *runtime.Scheme, rec record.Ev
 	default:
 		return nil, fmt.Errorf("scheduler profile %q is not supported", p.Name)
 	}
-	directClient, err := newDirectClient(scheme)
+	directClient, err := createDirectClient(scheme)
 	if err != nil {
 		return nil, err
 	}

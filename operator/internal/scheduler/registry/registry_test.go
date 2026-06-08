@@ -62,8 +62,6 @@ func TestNewRegistry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := testutils.CreateDefaultFakeClient(nil)
-			restore := setDirectClientFactoryForTest(cl)
-			defer restore()
 			recorder := record.NewFakeRecorder(10)
 
 			cfg := configv1alpha1.SchedulerConfiguration{
@@ -72,7 +70,7 @@ func TestNewRegistry(t *testing.T) {
 				},
 				DefaultProfileName: string(tt.schedulerName),
 			}
-			reg, err := New(cl, cl.Scheme(), recorder, cfg)
+			reg, err := newRegistry(cl, cl.Scheme(), recorder, cfg, fakeDirectClientFactory(cl))
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -92,8 +90,6 @@ func TestNewRegistry(t *testing.T) {
 
 	t.Run("multiple profiles with default set to kai", func(t *testing.T) {
 		cl := testutils.CreateDefaultFakeClient(nil)
-		restore := setDirectClientFactoryForTest(cl)
-		defer restore()
 		recorder := record.NewFakeRecorder(10)
 		cfg := configv1alpha1.SchedulerConfiguration{
 			Profiles: []configv1alpha1.SchedulerProfile{
@@ -102,7 +98,7 @@ func TestNewRegistry(t *testing.T) {
 			},
 			DefaultProfileName: string(configv1alpha1.SchedulerNameKai),
 		}
-		reg, err := New(cl, cl.Scheme(), recorder, cfg)
+		reg, err := newRegistry(cl, cl.Scheme(), recorder, cfg, fakeDirectClientFactory(cl))
 		require.NoError(t, err)
 		require.NotNil(t, reg.Get(string(configv1alpha1.SchedulerNameKai)))
 		require.NotNil(t, reg.Get(string(configv1alpha1.SchedulerNameKube)))
@@ -111,8 +107,6 @@ func TestNewRegistry(t *testing.T) {
 
 	t.Run("volcano scheduler initialization", func(t *testing.T) {
 		cl := testutils.CreateDefaultFakeClient([]client.Object{testutils.NewVolcanoPodGroupCRD(true)})
-		restore := setDirectClientFactoryForTest(cl)
-		defer restore()
 
 		recorder := record.NewFakeRecorder(10)
 		cfg := configv1alpha1.SchedulerConfiguration{
@@ -121,20 +115,16 @@ func TestNewRegistry(t *testing.T) {
 			},
 			DefaultProfileName: string(configv1alpha1.SchedulerNameVolcano),
 		}
-		reg, err := New(cl, cl.Scheme(), recorder, cfg)
+		reg, err := newRegistry(cl, cl.Scheme(), recorder, cfg, fakeDirectClientFactory(cl))
 		require.NoError(t, err)
 		require.NotNil(t, reg.GetDefault())
 		assert.Equal(t, string(configv1alpha1.SchedulerNameVolcano), reg.GetDefault().Name())
 	})
 }
 
-func setDirectClientFactoryForTest(cl client.Client) func() {
-	old := newDirectClient
-	newDirectClient = func(_ *runtime.Scheme) (client.Client, error) {
+func fakeDirectClientFactory(cl client.Client) directClientFactory {
+	return func(_ *runtime.Scheme) (client.Client, error) {
 		return cl, nil
-	}
-	return func() {
-		newDirectClient = old
 	}
 }
 
