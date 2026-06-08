@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,24 +50,6 @@ func EffectiveQueueFromAnnotations(annotations map[string]string) string {
 		return DefaultQueue
 	}
 	return queue
-}
-
-// MergePodCliqueAnnotations preserves PodClique-local annotations and only
-// backfills the Volcano queue annotation from the PodCliqueSet when the
-// PodClique template does not specify its own queue.
-func MergePodCliqueAnnotations(pcsAnnotations, cliqueAnnotations map[string]string) map[string]string {
-	annotations := maps.Clone(cliqueAnnotations)
-	queue := strings.TrimSpace(annotations[QueueAnnotationKey])
-	if queue == "" {
-		queue = strings.TrimSpace(pcsAnnotations[QueueAnnotationKey])
-	}
-	if queue != "" {
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-		annotations[QueueAnnotationKey] = queue
-	}
-	return annotations
 }
 
 // ResolvePodCliqueQueue returns the effective queue for a PodClique template/object after

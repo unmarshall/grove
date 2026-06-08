@@ -29,7 +29,6 @@ import (
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -146,13 +145,8 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 			return err
 		}
 
-		queue, err := b.resolveQueueForPodGang(ctx, podGang)
-		if err != nil {
-			return err
-		}
-
 		podGroup.Spec.MinMember = minMemberForPodGang(podGang)
-		podGroup.Spec.Queue = queue
+		podGroup.Spec.Queue = EffectiveQueueFromAnnotations(podGang.Annotations)
 		podGroup.Spec.PriorityClassName = podGang.Spec.PriorityClassName
 		podGroup.Spec.SubGroupPolicy = subGroupPoliciesForPodGang(podGang)
 		return nil
@@ -299,31 +293,4 @@ func podGroupCRDHasSubGroupPolicy(crd *apiextensionsv1.CustomResourceDefinition)
 		return ok
 	}
 	return false
-}
-
-func (b *schedulerBackend) resolveQueueForPodGang(ctx context.Context, podGang *groveschedulerv1alpha1.PodGang) (string, error) {
-	resolvedQueue := ""
-	for _, group := range podGang.Spec.PodGroups {
-		pclq := &grovecorev1alpha1.PodClique{}
-		if err := b.client.Get(ctx, client.ObjectKey{Name: group.Name, Namespace: podGang.Namespace}, pclq); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", fmt.Errorf("failed to resolve volcano queue for PodGang %s/%s: PodClique %q not found", podGang.Namespace, podGang.Name, group.Name)
-			}
-			return "", fmt.Errorf("failed to get PodClique %q for PodGang %s/%s: %w", group.Name, podGang.Namespace, podGang.Name, err)
-		}
-
-		queue := EffectiveQueueFromAnnotations(pclq.Annotations)
-		if resolvedQueue == "" {
-			resolvedQueue = queue
-			continue
-		}
-		if resolvedQueue != queue {
-			return "", fmt.Errorf("failed to resolve volcano queue for PodGang %s/%s: found multiple queues", podGang.Namespace, podGang.Name)
-		}
-	}
-
-	if resolvedQueue == "" {
-		return DefaultQueue, nil
-	}
-	return resolvedQueue, nil
 }

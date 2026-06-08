@@ -89,10 +89,6 @@ func TestCheckCapability(t *testing.T) {
 }
 
 func TestBackend_SyncPodGang(t *testing.T) {
-	pclqWorker := testutils.NewPodCliqueBuilder("pcs", "uid-1", "worker", "default", 0).Build()
-	pclqWorker.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
-	pclqPS := testutils.NewPodCliqueBuilder("pcs", "uid-1", "ps", "default", 0).Build()
-	pclqPS.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
 	podGang := &groveschedulerv1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pg-1",
@@ -101,16 +97,19 @@ func TestBackend_SyncPodGang(t *testing.T) {
 			Labels: map[string]string{
 				apicommon.LabelManagedByKey: apicommon.LabelManagedByValue,
 			},
+			Annotations: map[string]string{
+				QueueAnnotationKey: "gpu-training",
+			},
 		},
 		Spec: groveschedulerv1alpha1.PodGangSpec{
 			PriorityClassName: "high-priority",
 			PodGroups: []groveschedulerv1alpha1.PodGroup{
-				{Name: pclqWorker.Name, MinReplicas: 2},
-				{Name: pclqPS.Name, MinReplicas: 3},
+				{Name: "worker", MinReplicas: 2},
+				{Name: "ps", MinReplicas: 3},
 			},
 		},
 	}
-	cl := testutils.CreateDefaultFakeClient([]client.Object{podGang, pclqWorker, pclqPS})
+	cl := testutils.CreateDefaultFakeClient([]client.Object{podGang})
 	recorder := record.NewFakeRecorder(10)
 	profile := configv1alpha1.SchedulerProfile{Name: configv1alpha1.SchedulerNameVolcano}
 	b := New(cl, cl.Scheme(), recorder, profile)
@@ -125,25 +124,21 @@ func TestBackend_SyncPodGang(t *testing.T) {
 	assert.Equal(t, "gpu-training", podGroup.Spec.Queue)
 	assert.Equal(t, "high-priority", podGroup.Spec.PriorityClassName)
 	require.Len(t, podGroup.Spec.SubGroupPolicy, 2)
-	assert.Equal(t, pclqWorker.Name, podGroup.Spec.SubGroupPolicy[0].Name)
-	assert.Equal(t, map[string]string{apicommon.LabelPodClique: pclqWorker.Name}, podGroup.Spec.SubGroupPolicy[0].LabelSelector.MatchLabels)
+	assert.Equal(t, "worker", podGroup.Spec.SubGroupPolicy[0].Name)
+	assert.Equal(t, map[string]string{apicommon.LabelPodClique: "worker"}, podGroup.Spec.SubGroupPolicy[0].LabelSelector.MatchLabels)
 	assert.Equal(t, []string{apicommon.LabelPodClique}, podGroup.Spec.SubGroupPolicy[0].MatchLabelKeys)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
 	assert.Equal(t, int32(2), *podGroup.Spec.SubGroupPolicy[0].SubGroupSize)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[0].MinSubGroups)
 	assert.Equal(t, int32(1), *podGroup.Spec.SubGroupPolicy[0].MinSubGroups)
-	assert.Equal(t, pclqPS.Name, podGroup.Spec.SubGroupPolicy[1].Name)
+	assert.Equal(t, "ps", podGroup.Spec.SubGroupPolicy[1].Name)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
 	assert.Equal(t, int32(3), *podGroup.Spec.SubGroupPolicy[1].SubGroupSize)
 	require.NotNil(t, podGroup.Spec.SubGroupPolicy[1].MinSubGroups)
 	assert.Equal(t, int32(1), *podGroup.Spec.SubGroupPolicy[1].MinSubGroups)
 }
 
-func TestBackend_SyncPodGangQueueConflict(t *testing.T) {
-	pclqWorker := testutils.NewPodCliqueBuilder("pcs", "uid-1", "worker", "default", 0).Build()
-	pclqWorker.Annotations = map[string]string{QueueAnnotationKey: "gpu-training"}
-	pclqPS := testutils.NewPodCliqueBuilder("pcs", "uid-1", "ps", "default", 0).Build()
-	pclqPS.Annotations = map[string]string{QueueAnnotationKey: "high-priority"}
+func TestBackend_SyncPodGangDefaultQueue(t *testing.T) {
 	podGang := &groveschedulerv1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pg-1",
@@ -152,19 +147,22 @@ func TestBackend_SyncPodGangQueueConflict(t *testing.T) {
 		},
 		Spec: groveschedulerv1alpha1.PodGangSpec{
 			PodGroups: []groveschedulerv1alpha1.PodGroup{
-				{Name: pclqWorker.Name, MinReplicas: 2},
-				{Name: pclqPS.Name, MinReplicas: 3},
+				{Name: "worker", MinReplicas: 2},
 			},
 		},
 	}
-	cl := testutils.CreateDefaultFakeClient([]client.Object{podGang, pclqWorker, pclqPS})
+	cl := testutils.CreateDefaultFakeClient([]client.Object{podGang})
 	recorder := record.NewFakeRecorder(10)
 	profile := configv1alpha1.SchedulerProfile{Name: configv1alpha1.SchedulerNameVolcano}
 	b := New(cl, cl.Scheme(), recorder, profile)
 
 	err := b.SyncPodGang(context.Background(), podGang)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "found multiple queues")
+	require.NoError(t, err)
+
+	podGroup := &volcanov1beta1.PodGroup{}
+	err = cl.Get(context.Background(), client.ObjectKey{Name: "pg-1", Namespace: "default"}, podGroup)
+	require.NoError(t, err)
+	assert.Equal(t, DefaultQueue, podGroup.Spec.Queue)
 }
 
 func TestBackend_ValidatePodCliqueSet(t *testing.T) {

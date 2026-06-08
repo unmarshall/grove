@@ -27,7 +27,6 @@ import (
 	groveclientscheme "github.com/ai-dynamo/grove/operator/internal/client"
 	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
-	volcanoscheduler "github.com/ai-dynamo/grove/operator/internal/scheduler/volcano"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -1114,95 +1113,6 @@ func TestBuildResource_StripsTopologyAnnotation(t *testing.T) {
 	assert.Equal(t, "yes", pclq.Annotations["example.com/keep"])
 	_, hasTopologyAnnotation := pclq.Annotations[apiconstants.AnnotationTopologyName]
 	assert.False(t, hasTopologyAnnotation)
-}
-
-func TestBuildResource_MergesVolcanoQueueAnnotation(t *testing.T) {
-	tests := []struct {
-		name              string
-		pcsAnnotations    map[string]string
-		cliqueAnnotations map[string]string
-		expectedQueue     string
-	}{
-		{
-			name: "inherits PCS queue when clique queue is empty",
-			pcsAnnotations: map[string]string{
-				volcanoscheduler.QueueAnnotationKey: "qa-volcano-e2e",
-			},
-			expectedQueue: "qa-volcano-e2e",
-		},
-		{
-			name: "keeps clique queue when explicitly set",
-			pcsAnnotations: map[string]string{
-				volcanoscheduler.QueueAnnotationKey: "qa-volcano-e2e",
-			},
-			cliqueAnnotations: map[string]string{
-				volcanoscheduler.QueueAnnotationKey: "high-priority",
-			},
-			expectedQueue: "high-priority",
-		},
-		{
-			name: "trims blank clique queue before inheriting PCS queue",
-			pcsAnnotations: map[string]string{
-				volcanoscheduler.QueueAnnotationKey: "qa-volcano-e2e",
-			},
-			cliqueAnnotations: map[string]string{
-				volcanoscheduler.QueueAnnotationKey: "   ",
-			},
-			expectedQueue: "qa-volcano-e2e",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pcs := &grovecorev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "test-pcs",
-					Namespace:   "default",
-					Annotations: tc.pcsAnnotations,
-				},
-				Spec: grovecorev1alpha1.PodCliqueSetSpec{
-					Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
-						StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder),
-						Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
-							{
-								Name:        "worker",
-								Annotations: tc.cliqueAnnotations,
-								Spec: grovecorev1alpha1.PodCliqueSpec{
-									Replicas:     1,
-									MinAvailable: ptr.To(int32(1)),
-								},
-							},
-						},
-					},
-				},
-			}
-			pcsg := &grovecorev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pcs-0-sg",
-					Namespace: "default",
-					Labels: map[string]string{
-						apicommon.LabelPodCliqueSetReplicaIndex: "0",
-					},
-				},
-				Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{
-					MinAvailable: ptr.To(int32(1)),
-					CliqueNames:  []string{"worker"},
-				},
-			}
-			pclq := &grovecorev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pcs-0-sg-0-worker",
-					Namespace: "default",
-				},
-			}
-
-			operator := &_resource{scheme: groveclientscheme.Scheme}
-			err := operator.buildResource(logr.Discard(), pcs, pcsg, 0, pclq, false)
-			require.NoError(t, err)
-			require.NotNil(t, pclq.Annotations)
-			assert.Equal(t, tc.expectedQueue, pclq.Annotations[volcanoscheduler.QueueAnnotationKey])
-		})
-	}
 }
 
 // triageContainersByMNNVLClaim separates containers into those with MNNVL claim and those without.
