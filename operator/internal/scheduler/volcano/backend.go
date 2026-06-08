@@ -159,7 +159,7 @@ func (b *schedulerBackend) SyncPodGang(ctx context.Context, podGang *groveschedu
 }
 
 func recordCapabilityEvent(eventRecorder record.EventRecorder, obj runtime.Object, err error) {
-	if eventRecorder == nil || obj == nil {
+	if obj == nil {
 		return
 	}
 	eventRecorder.Eventf(obj, corev1.EventTypeWarning, "VolcanoCapabilityUnavailable", "%v", err)
