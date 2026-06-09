@@ -190,3 +190,12 @@ release: "{{ .Release.Name }}"
 {{ $key }}: {{ $val }}
 {{- end }}
 {{- end -}}
+
+{{/* Returns "true" if the named scheduler profile is configured, empty string otherwise. Usage: {{- if include "grove.scheduler.hasProfile" (list . "volcano") }} */}}
+{{- define "grove.scheduler.hasProfile" -}}
+{{- $root := index . 0 -}}
+{{- $profile := index . 1 -}}
+{{- range $root.Values.config.scheduler.profiles -}}
+{{- if eq .name $profile -}}true{{- end -}}
+{{- end -}}
+{{- end -}}

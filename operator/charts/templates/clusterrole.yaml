@@ -65,18 +65,6 @@ rules:
   - patch
   - update
 - apiGroups:
-    - ""
-  resources:
-    - secrets
-  verbs:
-    - create
-    - get
-    - list
-    - patch
-    - delete
-    - watch
-    - update
-- apiGroups:
   - admissionregistration.k8s.io
   resources:
   - validatingwebhookconfigurations
@@ -96,17 +84,6 @@ rules:
   - list
   - watch
   - patch
-- apiGroups:
-    - ""
-  resources:
-    - secrets
-  verbs:
-    - create
-    - get
-    - list
-    - patch
-    - delete
-    - watch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
@@ -131,6 +108,7 @@ rules:
   - patch
   - update
   - watch
+{{- if include "grove.scheduler.hasProfile" (list . "kai-scheduler") }}
 - apiGroups:
   - kai.scheduler
   resources:
@@ -143,6 +121,7 @@ rules:
   - patch
   - update
   - delete
+{{- end }}
 # DRA (Dynamic Resource Allocation) integration for resource sharing
 - apiGroups:
   - resource.k8s.io
@@ -165,41 +144,35 @@ rules:
   - get
   - list
   - watch
-{{- $volcanoEnabled := false -}}
-{{- range .Values.config.scheduler.profiles }}
-{{- if eq .name "volcano" }}
-{{- $volcanoEnabled = true -}}
-{{- end }}
-{{- end }}
-{{- if $volcanoEnabled }}
+{{- if include "grove.scheduler.hasProfile" (list . "volcano") }}
 - apiGroups:
-  - scheduling.volcano.sh
+    - scheduling.volcano.sh
   resources:
-  - podgroups
+    - podgroups
   verbs:
-  - create
-  - get
-  - list
-  - watch
-  - patch
-  - update
-  - delete
+    - create
+    - get
+    - list
+    - watch
+    - patch
+    - update
+    - delete
 - apiGroups:
-  - scheduling.volcano.sh
+    - scheduling.volcano.sh
   resources:
-  - queues
+    - queues
   verbs:
-  - get
-  - list
-  - watch
+    - get
+    - list
+    - watch
 - apiGroups:
-  - apiextensions.k8s.io
+    - apiextensions.k8s.io
   resources:
-  - customresourcedefinitions
+    - customresourcedefinitions
   resourceNames:
-  - podgroups.scheduling.volcano.sh
+    - podgroups.scheduling.volcano.sh
   verbs:
-  - get
+    - get
 {{- end }}
 {{- if .Values.config.network.autoMNNVLEnabled }}
 # MNNVL (Multi-Node NVLink) support requires permissions for ComputeDomain and ResourceClaimTemplate resources.
