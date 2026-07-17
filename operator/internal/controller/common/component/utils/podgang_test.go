@@ -171,7 +171,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(managed).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		require.Len(t, result, 1)
@@ -198,7 +198,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(pg1, pg2).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		assert.Len(t, result, 2)
@@ -225,7 +225,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(ownedPG, otherPG).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		require.Len(t, result, 1)
@@ -248,7 +248,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(unmanagedPG).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		assert.Empty(t, result)
@@ -271,7 +271,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(wrongComponentPG).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		assert.Empty(t, result)
@@ -290,7 +290,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithObjects(pgOtherNS).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		assert.Empty(t, result)
@@ -301,7 +301,7 @@ func TestGetExistingPodGangs(t *testing.T) {
 			WithScheme(scheme).
 			Build()
 
-		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+		result, err := ListExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
 
 		require.NoError(t, err)
 		assert.Empty(t, result)

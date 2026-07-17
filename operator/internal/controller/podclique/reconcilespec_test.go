@@ -296,7 +296,7 @@ func TestInitOrResetUpdate(t *testing.T) {
 					WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{
 						Type: grovecorev1alpha1.RollingRecreateStrategy,
 					}).
-					WithPodCliqueSetGenerationHash(ptr.To("current-hash")).
+					WithStatusCurrentGenerationHash(ptr.To("current-hash")).
 					Build()
 			},
 			setupPCLQ: func(pcsUID types.UID) *grovecorev1alpha1.PodClique {
@@ -312,7 +312,7 @@ func TestInitOrResetUpdate(t *testing.T) {
 				return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, pcsUID).
 					WithReplicas(2).
 					WithPodCliqueParameters("worker", 1, nil).
-					WithPodCliqueSetGenerationHash(ptr.To("current-hash")).
+					WithStatusCurrentGenerationHash(ptr.To("current-hash")).
 					Build()
 			},
 			setupPCLQ: func(pcsUID types.UID) *grovecorev1alpha1.PodClique {
@@ -331,7 +331,7 @@ func TestInitOrResetUpdate(t *testing.T) {
 					WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{
 						Type: grovecorev1alpha1.OnDeleteStrategy,
 					}).
-					WithPodCliqueSetGenerationHash(ptr.To("current-hash")).
+					WithStatusCurrentGenerationHash(ptr.To("current-hash")).
 					Build()
 			},
 			setupPCLQ: func(pcsUID types.UID) *grovecorev1alpha1.PodClique {
@@ -350,7 +350,7 @@ func TestInitOrResetUpdate(t *testing.T) {
 					WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{
 						Type: grovecorev1alpha1.RollingRecreateStrategy,
 					}).
-					WithPodCliqueSetGenerationHash(ptr.To("new-hash")).
+					WithStatusCurrentGenerationHash(ptr.To("new-hash")).
 					Build()
 			},
 			setupPCLQ: func(pcsUID types.UID) *grovecorev1alpha1.PodClique {
@@ -377,7 +377,7 @@ func TestInitOrResetUpdate(t *testing.T) {
 					WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{
 						Type: grovecorev1alpha1.OnDeleteStrategy,
 					}).
-					WithPodCliqueSetGenerationHash(ptr.To("new-hash")).
+					WithStatusCurrentGenerationHash(ptr.To("new-hash")).
 					Build()
 			},
 			setupPCLQ: func(pcsUID types.UID) *grovecorev1alpha1.PodClique {
