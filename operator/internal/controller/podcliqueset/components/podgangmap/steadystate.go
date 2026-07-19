@@ -1,4 +1,20 @@
-package podgangmap_new
+// /*
+// Copyright 2026 The Grove Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// */
+
+package podgangmap
 
 import (
 	"fmt"
@@ -159,7 +175,11 @@ func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
 
 	// sync PGM entries from PCSG.Status.PodGangMapping
 	for i := range existingPCSGs {
-		pcsgConfigName := apicommon.ExtractScalingGroupNameFromPCSGFQN(existingPCSGs[i].Name, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex})
+		pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(existingPCSGs[i].Name, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex})
+		if err != nil {
+			return nil, groveerr.WrapError(err, errCodeExtractPodCliqueName, component.OperationSync,
+				fmt.Sprintf("Error extracting scaling group name from FQN %s", existingPCSGs[i].Name))
+		}
 		for pgName, replicaIndices := range existingPCSGs[i].Status.PodGangMapping {
 			entry := getOrCreateEntry(pgName)
 			if entry.PCSGReplicaIndices == nil {
