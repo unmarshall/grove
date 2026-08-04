@@ -198,10 +198,10 @@ func TestCheckAndAdvanceCoherentUpdate(t *testing.T) {
 	pgmWithEntries := func(entries ...grovecorev1alpha1.PodGangEntry) *grovecorev1alpha1.PodGangMap {
 		return testutils.NewPodGangMapBuilder(pcsName, ns, "uid", 0).WithEntries(entries...).Build()
 	}
-	// newHashAnchorEntry builds a current-hash anchor entry for the given epoch. Its name matches the
+	// newHashMPGEntry builds a current-hash MPG entry for the given epoch. Its name matches the
 	// PodGang podGangForEpoch creates for the same epoch.
-	newHashAnchorEntry := func(epoch string) grovecorev1alpha1.PodGangEntry {
-		return testutils.NewPodGangEntryBuilder(podGangNameForEpoch(epoch), newHash, epoch).WithEpochAnchor(true).
+	newHashMPGEntry := func(epoch string) grovecorev1alpha1.PodGangEntry {
+		return testutils.NewPodGangEntryBuilder(podGangNameForEpoch(epoch), newHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"worker": 2}).Build()
 	}
 
@@ -224,13 +224,13 @@ func TestCheckAndAdvanceCoherentUpdate(t *testing.T) {
 		},
 		{
 			name:                  "PGM has no current-hash epoch requeues",
-			podGangMap:            pgmWithEntries(testutils.NewPodGangEntryBuilder("pg-old", "old-hash", "50").WithEpochAnchor(true).Build()),
+			podGangMap:            pgmWithEntries(testutils.NewPodGangEntryBuilder("pg-old", "old-hash", "50").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()),
 			expectRequeue:         true,
 			expectMessageNonEmpty: true,
 		},
 		{
 			name:                  "latest epoch not ready sets InFlightEpochs, records message, requeues",
-			podGangMap:            pgmWithEntries(newHashAnchorEntry("100")),
+			podGangMap:            pgmWithEntries(newHashMPGEntry("100")),
 			podGangs:              []*groveschedulerv1alpha1.PodGang{podGangForEpoch("100", false)},
 			expectRequeue:         true,
 			expectInFlightEpochs:  []string{"100"},
@@ -238,7 +238,7 @@ func TestCheckAndAdvanceCoherentUpdate(t *testing.T) {
 		},
 		{
 			name:                  "latest epoch ready but replica not done requeues for next sub-step, InFlightEpochs kept",
-			podGangMap:            pgmWithEntries(newHashAnchorEntry("100")),
+			podGangMap:            pgmWithEntries(newHashMPGEntry("100")),
 			podGangs:              []*groveschedulerv1alpha1.PodGang{podGangForEpoch("100", true)},
 			expectRequeue:         true,
 			expectInFlightEpochs:  []string{"100"},

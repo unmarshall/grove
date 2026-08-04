@@ -108,7 +108,7 @@ func buildCoherentUpdateEntries(ctx context.Context, cl client.Client, pcsReplic
 	if ss == nil {
 		return entries, nil
 	}
-	return planner.entriesAfterSubStep(*ss), nil
+	return planner.entriesAfterSubStep(*ss)
 }
 
 // updateProgress is the in-memory view of how far the coherent update has progressed. It is derived
@@ -119,84 +119,84 @@ type updateProgress struct {
 	// It is computed only after the readiness gate passed, so every current-hash entry is
 	// rolled-and-ready and contributes unconditionally.
 	rolledCounts map[string]int32
-	// anchorBearingStepsDone is the number of anchor-bearing steps whose per-component target is met.
-	anchorBearingStepsDone int32
-	// currentAnchorBearingStepRolled is how much the currently-open anchor-bearing step has rolled per
-	// component (rolled in the anchor-bearing region beyond the completed steps).
-	currentAnchorBearingStepRolled map[string]int32
+	// mpgBearingStepsDone is the number of mpg-bearing steps whose per-component target is met.
+	mpgBearingStepsDone int32
+	// currentMPGBearingStepRolled is how much the currently-open mpg-bearing step has rolled per
+	// component (rolled in the mpg-bearing region beyond the completed steps).
+	currentMPGBearingStepRolled map[string]int32
 	// leftoverRolled is how much of each component's leftover has been rolled.
 	leftoverRolled map[string]int32
-	// mostRecentAnchorEpoch is the epoch of the most recent anchor entry, the anchor that tail and
-	// leftover sub-steps subsume their standalone pods into. Empty when there is no anchor entry yet.
-	mostRecentAnchorEpoch string
+	// mostRecentMPGEpoch is the epoch of the most recent MPG entry, the MPG that tail and
+	// leftover sub-steps subsume their standalone pods into. Empty when there is no MPG entry yet.
+	mostRecentMPGEpoch string
 }
 
 // ascertainUpdateProgress derives the update position from the current-hash entries and the plan. It
-// sums the rolled count per component, splits each component's total into the anchor-bearing region
-// ([0, numAnchorBearingSteps*anchorBearingStepTarget)) and the leftover region (the rest), and counts
-// fully-complete anchor-bearing steps as the min over components of
-// floor(anchorRegionRolled / anchorBearingStepTarget) — a step is complete only when every component
+// sums the rolled count per component, splits each component's total into the mpg-bearing region
+// ([0, numMPGBearingSteps*mpgBearingStepTarget)) and the leftover region (the rest), and counts
+// fully-complete mpg-bearing steps as the min over components of
+// floor(mpgRegionRolled / mpgBearingStepTarget) — a step is complete only when every component
 // has met that step's target, matching how steps are emitted. What remains in the current
-// anchor-bearing step and how much leftover is rolled follow directly. Only the most recent anchor
+// mpg-bearing step and how much leftover is rolled follow directly. Only the most recent MPG
 // epoch is read from the entries (for the subsume target); everything else is arithmetic.
 func (p *subStepPlanner) ascertainUpdateProgress() (updateProgress, error) {
 	currentHash := *p.pcs.Status.CurrentGenerationHash
 
 	rolled := map[string]int32{}
 	var (
-		mostRecentAnchorEpoch string
-		mostRecentAnchorValue int64
+		mostRecentMPGEpoch string
+		mostRecentMPGValue int64
 	)
 	for i := range p.entries {
 		if p.entries[i].PodCliqueSetGenerationHash != currentHash {
 			continue
 		}
 		addEntryCounts(rolled, p.entries[i], p.mvu)
-		if p.entries[i].IsEpochAnchor {
+		if p.entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
 			v, err := parseEpoch(p.entries[i])
 			if err != nil {
 				return updateProgress{}, err
 			}
-			if mostRecentAnchorEpoch == "" || v > mostRecentAnchorValue {
-				mostRecentAnchorEpoch, mostRecentAnchorValue = p.entries[i].Labels[apicommon.LabelEpoch], v
+			if mostRecentMPGEpoch == "" || v > mostRecentMPGValue {
+				mostRecentMPGEpoch, mostRecentMPGValue = p.entries[i].Epoch, v
 			}
 		}
 	}
 
-	// Split each component's rolled total into the anchor-bearing region and the leftover region.
-	anchorRegionRolled := map[string]int32{}
+	// Split each component's rolled total into the mpg-bearing region and the leftover region.
+	mpgRegionRolled := map[string]int32{}
 	leftoverRolled := map[string]int32{}
 	for c := range p.replicas {
-		anchorRegionCap := p.numAnchorBearingSteps * p.anchorBearingStepTarget[c]
-		if rolled[c] > anchorRegionCap {
-			anchorRegionRolled[c] = anchorRegionCap
-			leftoverRolled[c] = rolled[c] - anchorRegionCap
+		mpgRegionCap := p.numMPGBearingSteps * p.mpgBearingStepTarget[c]
+		if rolled[c] > mpgRegionCap {
+			mpgRegionRolled[c] = mpgRegionCap
+			leftoverRolled[c] = rolled[c] - mpgRegionCap
 		} else {
-			anchorRegionRolled[c] = rolled[c]
+			mpgRegionRolled[c] = rolled[c]
 		}
 	}
 
 	// A step counts as done only when every component has met that step's target, so the number of
-	// fully-complete anchor-bearing steps is the min over components of floor(rolled/target).
-	stepsDone := p.numAnchorBearingSteps
+	// fully-complete mpg-bearing steps is the min over components of floor(rolled/target).
+	stepsDone := p.numMPGBearingSteps
 	for c := range p.replicas {
-		if done := anchorRegionRolled[c] / p.anchorBearingStepTarget[c]; done < stepsDone {
+		if done := mpgRegionRolled[c] / p.mpgBearingStepTarget[c]; done < stepsDone {
 			stepsDone = done
 		}
 	}
 
-	// What the current anchor-bearing step has rolled is the anchor-region rolled beyond the completed steps.
+	// What the current mpg-bearing step has rolled is the mpg-region rolled beyond the completed steps.
 	currentStepRolled := map[string]int32{}
 	for c := range p.replicas {
-		currentStepRolled[c] = anchorRegionRolled[c] - stepsDone*p.anchorBearingStepTarget[c]
+		currentStepRolled[c] = mpgRegionRolled[c] - stepsDone*p.mpgBearingStepTarget[c]
 	}
 
 	return updateProgress{
-		rolledCounts:                   rolled,
-		anchorBearingStepsDone:         stepsDone,
-		currentAnchorBearingStepRolled: currentStepRolled,
-		leftoverRolled:                 leftoverRolled,
-		mostRecentAnchorEpoch:          mostRecentAnchorEpoch,
+		rolledCounts:                rolled,
+		mpgBearingStepsDone:         stepsDone,
+		currentMPGBearingStepRolled: currentStepRolled,
+		leftoverRolled:              leftoverRolled,
+		mostRecentMPGEpoch:          mostRecentMPGEpoch,
 	}, nil
 }
 
@@ -215,18 +215,13 @@ func addEntryCounts(counts map[string]int32, e grovecorev1alpha1.PodGangEntry, m
 	}
 }
 
-// parseEpoch parses an entry's grove.io/epoch label to int64. A missing or non-numeric label is a
-// contract violation (Grove is the sole writer of these labels).
+// parseEpoch parses an entry's epoch to int64. A non-numeric epoch is a contract violation (Grove is
+// the sole writer of these values).
 func parseEpoch(e grovecorev1alpha1.PodGangEntry) (int64, error) {
-	label, ok := e.Labels[apicommon.LabelEpoch]
-	if !ok {
-		return 0, groveerr.New(errCodeMissingEpochLabel, component.OperationSync,
-			fmt.Sprintf("PodGangMap entry %s is missing the %s label", e.Name, apicommon.LabelEpoch))
-	}
-	value, err := strconv.ParseInt(label, 10, 64)
+	value, err := strconv.ParseInt(e.Epoch, 10, 64)
 	if err != nil {
 		return 0, groveerr.WrapError(err, errCodeInvalidEpochLabel, component.OperationSync,
-			fmt.Sprintf("PodGangMap entry %s has a non-numeric %s label %q", e.Name, apicommon.LabelEpoch, label))
+			fmt.Sprintf("PodGangMap entry with epoch %q has a non-numeric epoch", e.Epoch))
 	}
 	return value, nil
 }
@@ -252,18 +247,18 @@ type subStep struct {
 	// recent epoch across existing entries at plan time). It is empty only for the very first batch
 	// of the update.
 	dependsOn []string
-	// anchorPCSGReplicaIndices are the PCSG floor replica indices the anchor entry carries, keyed by
-	// PCSG name. Non-empty only when this sub-step opens an anchor-bearing step. The anchor's
+	// mpgPCSGReplicaIndices are the PCSG floor replica indices the MPG entry carries, keyed by
+	// PCSG name. Non-empty only when this sub-step opens an mpg-bearing step. The MPG's
 	// standalone PodClique floor is not carried here; it is minAvailable per PodClique, read from
 	// mvuTemplate at materialisation.
-	anchorPCSGReplicaIndices map[string][]int32
-	// subsumeStandalonePCLQCounts is the standalone PodClique pod count added to an existing anchor
+	mpgPCSGReplicaIndices map[string][]int32
+	// subsumeStandalonePCLQCounts is the standalone PodClique pod count added to an existing MPG
 	// this sub-step, keyed by PodClique name.
 	subsumeStandalonePCLQCounts map[string]int32
-	// subsumeAnchorEpoch is the epoch of the existing anchor that subsumeStandalonePCLQCounts grow.
-	subsumeAnchorEpoch string
+	// subsumeMPGEpoch is the epoch of the existing MPG that subsumeStandalonePCLQCounts grow.
+	subsumeMPGEpoch string
 	// tailPCSGReplicaIndices are the PCSG replica indices this sub-step rolls to the new hash, keyed
-	// by PCSG name. All indices of one PCSG collapse into a single non-anchor entry that the PodGang
+	// by PCSG name. All indices of one PCSG collapse into a single non-mpg entry that the PodGang
 	// materializer later expands into one PodGang per index.
 	tailPCSGReplicaIndices map[string][]int32
 	// drainStandalonePCLQCounts is the old-hash standalone PodClique pod count to take down this
@@ -296,19 +291,19 @@ type subStepPlanner struct {
 	minAvailable map[string]int32
 	// maxUnavailable bounds how many of a component a single sub-step may take down (current template).
 	maxUnavailable map[string]int32
-	// numAnchorBearingSteps is min over components of floor(replicas/minAvailable).
-	numAnchorBearingSteps int32
-	// anchorBearingStepTarget is how many of each component one anchor-bearing step rolls
+	// numMPGBearingSteps is min over components of floor(replicas/minAvailable).
+	numMPGBearingSteps int32
+	// mpgBearingStepTarget is how many of each component one mpg-bearing step rolls
 	// (minAvailable plus an even share of the tail).
-	anchorBearingStepTarget map[string]int32
-	// leftover is what remains of each component after all anchor-bearing steps, drained by the
+	mpgBearingStepTarget map[string]int32
+	// leftover is what remains of each component after all mpg-bearing steps, drained by the
 	// single leftover step.
 	leftover map[string]int32
 }
 
 // newSubStepPlanner builds the planner for one PCS replica: live child replica counts, the frozen
 // minAvailable from mvuTemplate, the current-template maxUnavailable, and the derived step-plan
-// values (numAnchorBearingSteps, anchorBearingStepTarget, leftover).
+// values (numMPGBearingSteps, mpgBearingStepTarget, leftover).
 func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock) (*subStepPlanner, error) {
 	mvu := syncSnap.mvuTemplate.clone()
 	components := mvu.componentNames()
@@ -319,38 +314,38 @@ func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []gr
 		return nil, err
 	}
 
-	// numAnchorBearingSteps is the min over components of floor(replicas/minAvailable): the largest
-	// step count for which every component can supply a full minAvailable to each step's anchor. The
+	// numMPGBearingSteps is the min over components of floor(replicas/minAvailable): the largest
+	// step count for which every component can supply a full minAvailable to each step's MPG. The
 	// webhook guarantees replicas >= minAvailable >= 1, so this is always >= 1.
-	numAnchorBearingSteps := replicas[components[0]] / minAvailable[components[0]]
+	numMPGBearingSteps := replicas[components[0]] / minAvailable[components[0]]
 	for _, c := range components[1:] {
-		if steps := replicas[c] / minAvailable[c]; steps < numAnchorBearingSteps {
-			numAnchorBearingSteps = steps
+		if steps := replicas[c] / minAvailable[c]; steps < numMPGBearingSteps {
+			numMPGBearingSteps = steps
 		}
 	}
 
-	// Each anchor-bearing step rolls minAvailable plus an even share of the tail; leftover is what
-	// remains after all anchor-bearing steps, drained by the single leftover step.
-	anchorBearingStepTarget := make(map[string]int32, len(components))
+	// Each mpg-bearing step rolls minAvailable plus an even share of the tail; leftover is what
+	// remains after all mpg-bearing steps, drained by the single leftover step.
+	mpgBearingStepTarget := make(map[string]int32, len(components))
 	leftover := make(map[string]int32, len(components))
 	for _, c := range components {
-		tailPerStep := (replicas[c] - numAnchorBearingSteps*minAvailable[c]) / numAnchorBearingSteps
-		anchorBearingStepTarget[c] = minAvailable[c] + tailPerStep
-		leftover[c] = replicas[c] - numAnchorBearingSteps*anchorBearingStepTarget[c]
+		tailPerStep := (replicas[c] - numMPGBearingSteps*minAvailable[c]) / numMPGBearingSteps
+		mpgBearingStepTarget[c] = minAvailable[c] + tailPerStep
+		leftover[c] = replicas[c] - numMPGBearingSteps*mpgBearingStepTarget[c]
 	}
 
 	return &subStepPlanner{
-		pcs:                     syncSnap.pcs,
-		mvu:                     mvu,
-		pcsReplicaIndex:         pcsReplicaIndex,
-		entries:                 entries,
-		clk:                     clk,
-		replicas:                replicas,
-		minAvailable:            minAvailable,
-		maxUnavailable:          maxUnavailable,
-		numAnchorBearingSteps:   numAnchorBearingSteps,
-		anchorBearingStepTarget: anchorBearingStepTarget,
-		leftover:                leftover,
+		pcs:                  syncSnap.pcs,
+		mvu:                  mvu,
+		pcsReplicaIndex:      pcsReplicaIndex,
+		entries:              entries,
+		clk:                  clk,
+		replicas:             replicas,
+		minAvailable:         minAvailable,
+		maxUnavailable:       maxUnavailable,
+		numMPGBearingSteps:   numMPGBearingSteps,
+		mpgBearingStepTarget: mpgBearingStepTarget,
+		leftover:             leftover,
 	}, nil
 }
 
@@ -403,13 +398,13 @@ func (p *subStepPlanner) maxUnavailabilityBudgetViolated(syncSnap *syncSnapshot,
 // in-scope component is fully rolled. It is called only after the readiness gate passed (nothing
 // emitted yet, or the latest batch is ready).
 func (p *subStepPlanner) next(prog updateProgress) (*subStep, error) {
-	// An anchor-bearing step is partially rolled (not yet at target) => continue it with a tail sub-step.
-	if p.currentAnchorBearingStepInProgress(prog) {
+	// An mpg-bearing step is partially rolled (not yet at target) => continue it with a tail sub-step.
+	if p.currentMPGBearingStepInProgress(prog) {
 		return p.buildTailSubStep(prog)
 	}
-	// Otherwise open the next anchor-bearing step while any remain, then the single leftover step.
-	if prog.anchorBearingStepsDone < p.numAnchorBearingSteps {
-		return p.buildAnchorBearingSubStep(prog)
+	// Otherwise open the next mpg-bearing step while any remain, then the single leftover step.
+	if prog.mpgBearingStepsDone < p.numMPGBearingSteps {
+		return p.buildMPGBearingSubStep(prog)
 	}
 	if p.anyLeftoverRemaining(prog.rolledCounts) {
 		return p.buildLeftoverSubStep(prog)
@@ -417,27 +412,27 @@ func (p *subStepPlanner) next(prog updateProgress) (*subStep, error) {
 	return nil, nil
 }
 
-// currentAnchorBearingStepInProgress reports whether an anchor-bearing step is open but not yet at its
-// target: some component has rolled part of the current step but not the full anchorBearingStepTarget.
-func (p *subStepPlanner) currentAnchorBearingStepInProgress(prog updateProgress) bool {
-	if prog.anchorBearingStepsDone >= p.numAnchorBearingSteps {
+// currentMPGBearingStepInProgress reports whether an mpg-bearing step is open but not yet at its
+// target: some component has rolled part of the current step but not the full mpgBearingStepTarget.
+func (p *subStepPlanner) currentMPGBearingStepInProgress(prog updateProgress) bool {
+	if prog.mpgBearingStepsDone >= p.numMPGBearingSteps {
 		return false
 	}
 	for c := range p.replicas {
-		if prog.currentAnchorBearingStepRolled[c] > 0 && prog.currentAnchorBearingStepRolled[c] < p.anchorBearingStepTarget[c] {
+		if prog.currentMPGBearingStepRolled[c] > 0 && prog.currentMPGBearingStepRolled[c] < p.mpgBearingStepTarget[c] {
 			return true
 		}
 	}
 	return false
 }
 
-// buildTailSubStep builds the next sub-step of the current anchor-bearing step: the next
-// rollBudget-bounded tail slice, subsuming standalone PodClique pods into the current step's anchor
+// buildTailSubStep builds the next sub-step of the current mpg-bearing step: the next
+// rollBudget-bounded tail slice, subsuming standalone PodClique pods into the current step's MPG
 // and rolling tail PCSG replica indices.
 //
 // Worked example. A PodCliqueScalingGroup has replicas 80, minAvailable 3, maxUnavailable 4, so
-// anchorBearingStepTarget = 8 across 10 anchor-bearing steps. Take the current step k = 0, whose
-// contiguous index block is [0, 8). The anchor sub-step already rolled the first minAvailable, indices
+// mpgBearingStepTarget = 8 across 10 mpg-bearing steps. Take the current step k = 0, whose
+// contiguous index block is [0, 8). The MPG sub-step already rolled the first minAvailable, indices
 // [0, 3), leaving 5 to roll.
 //   - This sub-step: remaining = 5, rollBudget = min(4, 5) = 4. Indices start at (k+1)*8 - 5 = 3, so
 //     it rolls indices [3, 7).
@@ -445,30 +440,30 @@ func (p *subStepPlanner) currentAnchorBearingStepInProgress(prog updateProgress)
 //     it rolls index [7, 8). The block is now fully rolled and the next call opens step k = 1.
 func (p *subStepPlanner) buildTailSubStep(prog updateProgress) (*subStep, error) {
 	epoch := strconv.FormatInt(p.clk.Now().UnixNano(), 10)
-	k := prog.anchorBearingStepsDone // current anchor-bearing step's 0-based index
+	k := prog.mpgBearingStepsDone // current mpg-bearing step's 0-based index
 	remaining := map[string]int32{}
 	for c := range p.replicas {
-		if gap := p.anchorBearingStepTarget[c] - prog.currentAnchorBearingStepRolled[c]; gap > 0 {
+		if gap := p.mpgBearingStepTarget[c] - prog.currentMPGBearingStepRolled[c]; gap > 0 {
 			remaining[c] = gap
 		}
 	}
 	// PCSG tail indices continue this step's contiguous block just past what it has already rolled:
-	// the block ends at (k+1)*anchorBearingStepTarget, and remaining remain, so the next unrolled
-	// index is (k+1)*anchorBearingStepTarget - remaining.
+	// the block ends at (k+1)*mpgBearingStepTarget, and remaining remain, so the next unrolled
+	// index is (k+1)*mpgBearingStepTarget - remaining.
 	pcsgIndexStartFn := func(componentName string, remainingReplicas int32) int32 {
-		return (k+1)*p.anchorBearingStepTarget[componentName] - remainingReplicas
+		return (k+1)*p.mpgBearingStepTarget[componentName] - remainingReplicas
 	}
-	return p.buildNonAnchorSubStep(epoch, prog.mostRecentAnchorEpoch, remaining, pcsgIndexStartFn)
+	return p.buildTPGSubStep(epoch, prog.mostRecentMPGEpoch, remaining, pcsgIndexStartFn)
 }
 
-// buildNonAnchorSubStep assembles a sub-step that is not the anchor-creating one: the tail sub-steps
-// of an anchor-bearing step and the sub-steps of the leftover step. remaining is the per-component
+// buildTPGSubStep assembles a sub-step that is not the mpg-creating one: the tail sub-steps
+// of an mpg-bearing step and the sub-steps of the leftover step. remaining is the per-component
 // work this sub-step must roll; the caller computes it for the step being filled. For each component
 // it rolls a rollBudget of min(maxUnavailable, remaining). A PodCliqueScalingGroup gets tail PodGangs
 // at indices pcsgIndexStart(component, remaining) .. +rollBudget; a standalone PodClique subsumes
-// rollBudget pods into the existing anchor at anchorEpoch. The old-hash equivalent is drained in both
-// cases. It returns nil when remaining is empty (nothing left to roll) and creates no anchor.
-func (p *subStepPlanner) buildNonAnchorSubStep(epoch, anchorEpoch string, remaining map[string]int32, pcsgIndexStartFn func(componentName string, remainingReplicas int32) int32) (*subStep, error) {
+// rollBudget pods into the existing MPG at mpgEpoch. The old-hash equivalent is drained in both
+// cases. It returns nil when remaining is empty (nothing left to roll) and creates no MPG.
+func (p *subStepPlanner) buildTPGSubStep(epoch, mpgEpoch string, remaining map[string]int32, pcsgIndexStartFn func(componentName string, remainingReplicas int32) int32) (*subStep, error) {
 	if len(remaining) == 0 {
 		return nil, nil
 	}
@@ -479,7 +474,7 @@ func (p *subStepPlanner) buildNonAnchorSubStep(epoch, anchorEpoch string, remain
 	ss := &subStep{
 		epoch:                       epoch,
 		dependsOn:                   dependsOn,
-		subsumeAnchorEpoch:          anchorEpoch,
+		subsumeMPGEpoch:             mpgEpoch,
 		subsumeStandalonePCLQCounts: map[string]int32{},
 		drainStandalonePCLQCounts:   map[string]int32{},
 		tailPCSGReplicaIndices:      map[string][]int32{},
@@ -514,40 +509,40 @@ func (p *subStepPlanner) dependsOnLatestEpoch() ([]string, error) {
 	return []string{*latest}, nil
 }
 
-// buildAnchorBearingSubStep builds the floor-only first sub-step of a new anchor-bearing step: an
-// anchor carrying minAvailable of every component, with distinct PCSG floor indices allocated to
-// this anchor. It drains the old-hash equivalent of that floor. No tail is emitted here; the tail
+// buildMPGBearingSubStep builds the floor-only first sub-step of a new mpg-bearing step: an
+// MPG carrying minAvailable of every component, with distinct PCSG floor indices allocated to
+// this MPG. It drains the old-hash equivalent of that floor. No tail is emitted here; the tail
 // drains in subsequent buildTailSubStep sub-steps.
-func (p *subStepPlanner) buildAnchorBearingSubStep(prog updateProgress) (*subStep, error) {
+func (p *subStepPlanner) buildMPGBearingSubStep(prog updateProgress) (*subStep, error) {
 	dependsOn, err := p.dependsOnLatestEpoch()
 	if err != nil {
 		return nil, err
 	}
 	epoch := strconv.FormatInt(p.clk.Now().UnixNano(), 10)
 
-	// This anchor is the k-th anchor-bearing step (0-based). It claims PCSG indices in the range
-	// [k*anchorBearingStepTarget, k*anchorBearingStepTarget + minAvailable), so anchors never collide.
-	k := prog.anchorBearingStepsDone
+	// This MPG is the k-th mpg-bearing step (0-based). It claims PCSG indices in the range
+	// [k*mpgBearingStepTarget, k*mpgBearingStepTarget + minAvailable), so MPGs never collide.
+	k := prog.mpgBearingStepsDone
 	pcsgFloorIndices := make(map[string][]int32, len(p.mvu.pcsgs))
 	for name, minAvail := range p.mvu.pcsgs {
-		pcsgFloorIndices[name] = lo.RangeFrom(k*p.anchorBearingStepTarget[name], int(minAvail))
+		pcsgFloorIndices[name] = lo.RangeFrom(k*p.mpgBearingStepTarget[name], int(minAvail))
 	}
 
 	return &subStep{
 		epoch:     epoch,
 		dependsOn: dependsOn,
-		// The anchor carries minAvailable PCSG replicas at the allocated indices, and it takes down
+		// The MPG carries minAvailable PCSG replicas at the allocated indices, and it takes down
 		// the same indices on the old hash (identity-preserving swap). The standalone PodClique floor
 		// is minAvailable per PodClique, added by entriesAfterSubStep from p.mvu, and its old-hash
 		// equivalent is drained here.
-		anchorPCSGReplicaIndices:  pcsgFloorIndices,
+		mpgPCSGReplicaIndices:     pcsgFloorIndices,
 		drainStandalonePCLQCounts: p.mvu.standalonePCLQs,
 		drainPCSGReplicaIndices:   pcsgFloorIndices,
 	}, nil
 }
 
 // anyLeftoverRemaining reports whether any component still has leftover replicas to roll after the
-// anchor-bearing steps. It is called only once all anchor-bearing steps are done, so any gap between
+// mpg-bearing steps. It is called only once all mpg-bearing steps are done, so any gap between
 // rolledCounts and replicas is the leftover that the leftover step must still drain.
 func (p *subStepPlanner) anyLeftoverRemaining(rolledCounts map[string]int32) bool {
 	for c := range p.leftover {
@@ -560,12 +555,12 @@ func (p *subStepPlanner) anyLeftoverRemaining(rolledCounts map[string]int32) boo
 
 // buildLeftoverSubStep builds a sub-step of the leftover step.
 //
-// After the anchor-bearing steps have rolled, some replicas can remain for a component (its
+// After the mpg-bearing steps have rolled, some replicas can remain for a component (its
 // leftover). A single leftover step drains all of them across one or more sub-steps. This method
 // builds one such sub-step. The leftover indices of a component are the ones above every
-// anchor-bearing step's block: [numAnchorBearingSteps*anchorBearingStepTarget, replicas). This range
+// mpg-bearing step's block: [numMPGBearingSteps*mpgBearingStepTarget, replicas). This range
 // ends at replicas, so as sub-steps roll it the next unrolled index is replicas - remaining.
-// Standalone PodClique leftover pods subsume into the most recent anchor.
+// Standalone PodClique leftover pods subsume into the most recent MPG.
 func (p *subStepPlanner) buildLeftoverSubStep(prog updateProgress) (*subStep, error) {
 	epoch := strconv.FormatInt(p.clk.Now().UnixNano(), 10)
 	remaining := map[string]int32{}
@@ -577,23 +572,32 @@ func (p *subStepPlanner) buildLeftoverSubStep(prog updateProgress) (*subStep, er
 	pcsgIndexStartFn := func(componentName string, remainingReplicas int32) int32 {
 		return p.replicas[componentName] - remainingReplicas
 	}
-	return p.buildNonAnchorSubStep(epoch, prog.mostRecentAnchorEpoch, remaining, pcsgIndexStartFn)
+	return p.buildTPGSubStep(epoch, prog.mostRecentMPGEpoch, remaining, pcsgIndexStartFn)
 }
 
 // entriesAfterSubStep returns the entry set that should exist after the sub-step. It works on a deep
 // copy so the snapshot's PodGangMap is untouched: it drains the old-hash take-down, grows the target
-// new-hash anchor with the subsumed standalone PodClique pods, appends the sub-step's new-hash anchor
-// and non-anchor entries, then drops any entry drained to empty.
-func (p *subStepPlanner) entriesAfterSubStep(ss subStep) []grovecorev1alpha1.PodGangEntry {
+// new-hash MPG with the subsumed standalone PodClique pods, appends the sub-step's new-hash MPG
+// and non-mpg entries, then drops any entry drained to empty.
+func (p *subStepPlanner) entriesAfterSubStep(ss subStep) ([]grovecorev1alpha1.PodGangEntry, error) {
 	entries := clonePodGangEntries(p.entries)
 	currentHash := *p.pcs.Status.CurrentGenerationHash
 
+	// Sort oldest-epoch-first: the drains below process entries in slice order, and retiring the
+	// oldest generation first is the desired take-down order.
+	if err := sortEntriesByEpoch(entries); err != nil {
+		return nil, err
+	}
+
 	drainStandalonePCLQs(entries, currentHash, ss.drainStandalonePCLQCounts)
 	drainPCSGIndices(entries, currentHash, ss.drainPCSGReplicaIndices)
-	subsumeIntoAnchor(entries, ss.subsumeAnchorEpoch, ss.subsumeStandalonePCLQCounts)
+	subsumeIntoMPG(entries, ss.subsumeMPGEpoch, ss.subsumeStandalonePCLQCounts)
 
-	entries = append(entries, p.newHashEntriesForSubStep(ss)...)
-	return removeEmptyEntries(entries)
+	if newEntry, ok := p.newHashEntryForSubStep(ss); ok {
+		entries = append(entries, newEntry)
+	}
+
+	return removeEmptyEntries(entries), nil
 }
 
 // clonePodGangEntries returns a deep copy of the entries so the working set can be mutated without
@@ -606,46 +610,25 @@ func clonePodGangEntries(entries []grovecorev1alpha1.PodGangEntry) []grovecorev1
 	return cloned
 }
 
-// drainStandalonePCLQs subtracts each PodClique's take-down count from the old-hash anchors, oldest
-// generation first, until the count is exhausted. Standalone PodClique pods live only on anchors, so
-// only old-hash anchor entries are touched. Draining oldest-epoch-first retires the oldest generation
-// (V1) fully before touching a newer old one (V2), which matters when a re-update mid-update left more
-// than one old-hash generation live. Pod counts are identity-free, so which anchor shrinks does not
-// matter beyond that ordering.
+// drainStandalonePCLQs subtracts each PodClique's take-down count from the old-hash MPGs, in the
+// order the entries appear. Standalone PodClique pods live only on MPGs, so only old-hash MPG entries
+// are touched. Pod counts are identity-free, so which MPG shrinks does not matter beyond entry order.
+// The caller sorts entries oldest-epoch-first so the oldest generation is retired before a newer one,
+// which matters when a re-update mid-update left more than one old-hash generation live.
 func drainStandalonePCLQs(entries []grovecorev1alpha1.PodGangEntry, currentHash string, drainCounts map[string]int32) {
-	if len(drainCounts) == 0 {
-		return
-	}
-	oldHashAnchors := make([]*grovecorev1alpha1.PodGangEntry, 0, len(entries))
-	for i := range entries {
-		if entries[i].PodCliqueSetGenerationHash != currentHash && entries[i].IsEpochAnchor {
-			oldHashAnchors = append(oldHashAnchors, &entries[i])
-		}
-	}
-	slices.SortFunc(oldHashAnchors, func(a, b *grovecorev1alpha1.PodGangEntry) int {
-		return int(mustParseEpochValue(a) - mustParseEpochValue(b))
-	})
 	for name, remaining := range drainCounts {
-		for _, anchor := range oldHashAnchors {
+		for i := range entries {
 			if remaining == 0 {
 				break
 			}
-			take := min(anchor.PodCliques[name], remaining)
-			anchor.PodCliques[name] -= take
+			if entries[i].PodCliqueSetGenerationHash == currentHash || entries[i].Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+				continue
+			}
+			take := min(entries[i].PodCliques[name], remaining)
+			entries[i].PodCliques[name] -= take
 			remaining -= take
 		}
 	}
-}
-
-// mustParseEpochValue parses the entry's epoch label to int64 for ordering. The label is written by
-// Grove and validated before entries reach here, so a parse failure would be a programming error;
-// treat an unparseable label as 0 to keep ordering total rather than panic in a drain.
-func mustParseEpochValue(e *grovecorev1alpha1.PodGangEntry) int64 {
-	v, err := strconv.ParseInt(e.Labels[apicommon.LabelEpoch], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
 }
 
 // drainPCSGIndices removes each PCSG's take-down replica indices from whichever old-hash entry carries
@@ -673,14 +656,14 @@ func removeIndices(from, remove []int32) []int32 {
 	})
 }
 
-// subsumeIntoAnchor adds the subsumed standalone PodClique pod counts to the new-hash anchor at
-// anchorEpoch. It is a no-op when there is nothing to subsume.
-func subsumeIntoAnchor(entries []grovecorev1alpha1.PodGangEntry, anchorEpoch string, subsumeCounts map[string]int32) {
+// subsumeIntoMPG adds the subsumed standalone PodClique pod counts to the new-hash MPG at
+// mpgEpoch. It is a no-op when there is nothing to subsume.
+func subsumeIntoMPG(entries []grovecorev1alpha1.PodGangEntry, mpgEpoch string, subsumeCounts map[string]int32) {
 	if len(subsumeCounts) == 0 {
 		return
 	}
 	for i := range entries {
-		if entries[i].Labels[apicommon.LabelEpoch] != anchorEpoch {
+		if entries[i].Epoch != mpgEpoch {
 			continue
 		}
 		if entries[i].PodCliques == nil {
@@ -693,33 +676,55 @@ func subsumeIntoAnchor(entries []grovecorev1alpha1.PodGangEntry, anchorEpoch str
 	}
 }
 
-// newHashEntriesForSubStep builds the new-hash entries a sub-step adds: the anchor entry when the
-// sub-step opens an anchor-bearing step (carrying the minAvailable standalone PodClique floor and its
-// allocated PCSG floor indices), and one non-anchor entry per PodCliqueScalingGroup collecting that
-// PCSG's rolled indices for this epoch. Every entry shares the sub-step epoch and DependsOn, and
-// carries a salted name so entries within the shared epoch stay distinct.
-func (p *subStepPlanner) newHashEntriesForSubStep(ss subStep) []grovecorev1alpha1.PodGangEntry {
-	hash := *p.pcs.Status.CurrentGenerationHash
-	var newEntries []grovecorev1alpha1.PodGangEntry
-	salt := 0
+// newHashEntryForSubStep builds the new-hash entry a sub-step adds, if any.
+// It will build a new MPG entry, if a sub-step opens an mpg-bearing step (carrying MinAvailable replicas of each
+// standalone PCLQ and MinAvailable replica indices of each PCS), otherwise it builds a non-mpg entry aggregating
+// this sub-step's PCSG indices across all PCSGs. A sub-step that only subsumes standalone PodClique pods into an
+// existing MPG adds no new entry. So a sub-step yields at most one entry, returned with ok true. It returns ok
+// false when the sub-step adds no new entry.
+func (p *subStepPlanner) newHashEntryForSubStep(ss subStep) (grovecorev1alpha1.PodGangEntry, bool) {
+	pcsCurrentGenerationHash := *p.pcs.Status.CurrentGenerationHash
 
-	if len(ss.anchorPCSGReplicaIndices) > 0 {
-		anchor := newPodGangEntry(p.pcs.Name, p.pcsReplicaIndex, fmt.Sprintf("%s-%d", ss.epoch, salt), hash, ss.epoch, ss.dependsOn)
-		anchor.IsEpochAnchor = true
-		anchor.PodCliques = maps.Clone(p.mvu.standalonePCLQs)
-		anchor.PCSGReplicaIndices = ss.anchorPCSGReplicaIndices
-		newEntries = append(newEntries, anchor)
-		salt++
+	if len(ss.mpgPCSGReplicaIndices) > 0 {
+		mpgEntry := newPodGangEntry(ss.epoch, pcsCurrentGenerationHash, ss.dependsOn)
+		mpgEntry.Role = grovecorev1alpha1.PodGangEntryRoleAnchor
+		mpgEntry.PodCliques = maps.Clone(p.mvu.standalonePCLQs)
+		mpgEntry.PCSGReplicaIndices = ss.mpgPCSGReplicaIndices
+		mpgEntry.AnchorIndex = nextAnchorIndex(p.entries, pcsCurrentGenerationHash)
+		return mpgEntry, true
 	}
 
+	tailPCSGReplicaIndices := make(map[string][]int32, len(ss.tailPCSGReplicaIndices))
 	for name, indices := range ss.tailPCSGReplicaIndices {
 		if len(indices) == 0 {
 			continue
 		}
-		tail := newPodGangEntry(p.pcs.Name, p.pcsReplicaIndex, fmt.Sprintf("%s-%d", ss.epoch, salt), hash, ss.epoch, ss.dependsOn)
-		tail.PCSGReplicaIndices = map[string][]int32{name: indices}
-		newEntries = append(newEntries, tail)
-		salt++
+		tailPCSGReplicaIndices[name] = indices
 	}
-	return newEntries
+	if len(tailPCSGReplicaIndices) == 0 {
+		return grovecorev1alpha1.PodGangEntry{}, false
+	}
+	tailEntry := newPodGangEntry(ss.epoch, pcsCurrentGenerationHash, ss.dependsOn)
+	tailEntry.Role = grovecorev1alpha1.PodGangEntryRoleTail
+	tailEntry.PCSGReplicaIndices = tailPCSGReplicaIndices
+	return tailEntry, true
+}
+
+// nextAnchorIndex returns the AnchorIndex for a new Anchor entry for the given PCS generation hash.
+// AnchorIndex is scoped per PCS generation hash. Amongst the existing anchor entries, highest AnchorIndex
+// for the same PCS generation hash is selected and this index+1 is returned.
+// If no anchor entry exists yet, then a value of 0 is returned which is the first index. During coherent update
+// it is possible that entries for more than one PCS generation hash exists. All entries other than the passed in
+// PCS generation hash will be ignored.
+func nextAnchorIndex(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) int32 {
+	highestIndex := int32(-1)
+	for _, entry := range entries {
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor &&
+			entry.PodCliqueSetGenerationHash == pcsGenerationHash {
+			if entry.AnchorIndex > highestIndex {
+				highestIndex = entry.AnchorIndex
+			}
+		}
+	}
+	return highestIndex + 1
 }

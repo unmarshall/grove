@@ -106,11 +106,11 @@ func GetPodGangMapEntriesForPCSG(entries []grovecorev1alpha1.PodGangEntry, pcsgN
 	return result
 }
 
-// LatestEpochForGenerationHash returns the largest grove.io/epoch among the entries whose
+// LatestEpochForGenerationHash returns the largest epoch among the entries whose
 // PodCliqueSetGenerationHash equals generationHash. It returns nil when no entry matches (nothing has
 // been emitted for that generation). Epochs are unix-nano strings; they are compared numerically so
-// the result is correct regardless of digit width. A missing or non-numeric epoch label is a contract
-// violation (Grove is the sole writer of these labels) returned as an error.
+// the result is correct regardless of digit width. A non-numeric epoch is a contract violation (Grove
+// is the sole writer of these values) returned as an error.
 func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, generationHash string) (*string, error) {
 	var (
 		latest string
@@ -121,16 +121,13 @@ func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, gene
 		if entries[i].PodCliqueSetGenerationHash != generationHash {
 			continue
 		}
-		label, ok := entries[i].Labels[apicommon.LabelEpoch]
-		if !ok {
-			return nil, fmt.Errorf("PodGangMap entry %q is missing the %s label", entries[i].Name, apicommon.LabelEpoch)
-		}
-		val, err := strconv.ParseInt(label, 10, 64)
+		epoch := entries[i].Epoch
+		val, err := strconv.ParseInt(epoch, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("PodGangMap entry %q has a non-numeric %s label %q: %w", entries[i].Name, apicommon.LabelEpoch, label, err)
+			return nil, fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", epoch, err)
 		}
 		if !found || val > maxVal {
-			latest, maxVal, found = label, val, true
+			latest, maxVal, found = epoch, val, true
 		}
 	}
 	if !found {

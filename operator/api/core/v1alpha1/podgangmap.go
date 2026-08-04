@@ -53,27 +53,49 @@ type PodGangMapSpec struct {
 	// Entries is the ordered list of desired PodGangs for this PodCliqueSet replica.
 	// Each entry corresponds to one PodGang and specifies its pod and replica counts.
 	// +listType=map
-	// +listMapKey=name
+	// +listMapKey=epoch
 	Entries []PodGangEntry `json:"entries"`
 }
 
+// PodGangEntryRole classifies the role a PodGangMap entry plays in a PodCliqueSet replica.
+// +kubebuilder:validation:Enum={Anchor,Tail,ScaleOut}
+type PodGangEntryRole string
+
+const (
+	// PodGangEntryRoleAnchor marks the entry that carries the MinAvailable replicas.
+	// It holds every standalone PodClique and each PodCliqueScalingGroup's MinAvailable replicas.
+	// It materializes into a single PodGang.
+	PodGangEntryRoleAnchor PodGangEntryRole = "Anchor"
+	// PodGangEntryRoleTail marks a non-anchor entry that holds a PodCliqueScalingGroup's replica
+	// indices above MinAvailable, as declared by the template. It materializes into one PodGang per
+	// replica index.
+	PodGangEntryRoleTail PodGangEntryRole = "Tail"
+	// PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a
+	// steady-state scale-out beyond the template. It materializes into one PodGang per replica index.
+	// It is created on the first scale-out and removed once it holds no replicas.
+	PodGangEntryRoleScaleOut PodGangEntryRole = "ScaleOut"
+)
+
 // PodGangEntry describes the desired composition of a single PodGang.
 type PodGangEntry struct {
-	// Name is the name of the PodGang this entry corresponds to.
-	Name string `json:"name"`
+	// Epoch records the scheduling batch this entry belongs to. The value is a monotonic unix-nano
+	// timestamp. It orders scheduling across entries and is referenced by DependsOn. Epoch is unique
+	// per entry within a PodGangMap, so it is also this entry's identity key.
+	Epoch string `json:"epoch"`
 	// PodCliqueSetGenerationHash is the PodCliqueSet generation hash that pods in this PodGang
 	// must match. Used by PodClique and PodCliqueScalingGroup reconcilers to create pods at the
 	// correct spec version and to distinguish old pods from new pods during a coherent update.
 	PodCliqueSetGenerationHash string `json:"podCliqueSetGenerationHash"`
-	// IsEpochAnchor marks whether this entry is the epoch anchor for its epoch. When true the entry
-	// carries the minimum-availability floor that entries depending on it are scheduled after, and
-	// standalone PodClique tail pods are subsumed into it. When false the entry collapses the tail
-	// PodGangs of a single PodCliqueScalingGroup within one epoch into one entry: PCSGReplicaIndices
-	// holds that epoch's rolled indices for the PCSG, which the PodGang materializer expands into one
-	// PodGang per index. It is the durable marker that lets the coherent update's step structure be
-	// reconstructed from the entries alone, so no separate step record needs to be persisted.
+	// Role classifies this entry. See PodGangEntryRole for the meaning of each value. Role is the
+	// durable marker that lets the entry structure be reconstructed from the entries alone, so no
+	// separate record needs to be persisted.
+	Role PodGangEntryRole `json:"role"`
+	// AnchorIndex is the index of an anchor entry within its generation hash. It is set only on
+	// entries whose Role is Anchor and is 0 for every other entry. The index starts at 0 for each
+	// generation hash and increments for each additional anchor of the same hash. It forms the last
+	// segment of the anchor PodGang name.
 	// +optional
-	IsEpochAnchor bool `json:"isEpochAnchor,omitempty"`
+	AnchorIndex int32 `json:"anchorIndex,omitempty"`
 	// PodCliques maps standalone PodClique name to the number of pods that belong to this PodGang.
 	// Only standalone PodCliques (not owned by a PodCliqueScalingGroup) are listed here.
 	// PodCliques owned by a PodCliqueScalingGroup derive their PodGang association via
@@ -87,11 +109,6 @@ type PodGangEntry struct {
 	// up its replica index here.
 	// +optional
 	PCSGReplicaIndices map[string][]int32 `json:"pcsgReplicaIndices,omitempty"`
-	// Labels carries additional labels to stamp on the materialized PodGang resource,
-	// beyond the labels the PodGang materialization adds by default. Today this carries
-	// the grove.io/epoch label used for scheduling-order semantics.
-	// +optional
-	Labels map[string]string `json:"labels,omitempty"`
 	// DependsOn lists the epochs whose PodGangs must be scheduled before this entry's PodGang
 	// becomes eligible for scheduling. An empty DependsOn means the entry has no scheduling
 	// dependency and its PodGang is eligible for scheduling immediately.

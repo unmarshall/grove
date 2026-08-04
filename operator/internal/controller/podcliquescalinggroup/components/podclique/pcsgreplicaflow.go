@@ -166,11 +166,14 @@ func computeFreeIndices(mapping map[string][]int32, specReplicas int32) []int32 
 	return free
 }
 
-// buildMappingFromPodGangMap constructs a PodGang→PCSG-replica-indices mapping from the PCS
-// replica's PodGangMap (cached on sc.podGangMap). Entries that don't reference this PCSG are
-// skipped; entries with empty index slices are skipped to keep the mapping compact.
+// buildMappingFromPodGangMap constructs a PodGang name to PCSG-replica-indices mapping from the PCS
+// replica's PodGangMap (cached on sc.podGangMap). The key is the materialized PodGang name. An anchor
+// entry contributes one key, the anchor PodGang name, holding this PCSG's MinAvailable indices. A
+// non-anchor entry contributes one key per index, each a non-anchor PodGang name holding that single
+// index, since a non-anchor entry materializes into one PodGang per index. Entries that do not
+// reference this PCSG are skipped.
 func (r _resource) buildMappingFromPodGangMap(sc *syncContext) (map[string][]int32, error) {
-	pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(sc.pcsg.Name, apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex})
+	pcsgName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(sc.pcsg.Name, apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex})
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeUpdateStatus,
@@ -178,15 +181,26 @@ func (r _resource) buildMappingFromPodGangMap(sc *syncContext) (map[string][]int
 			fmt.Sprintf("failed to extract scaling group name from PodCliqueScalingGroup %v", client.ObjectKeyFromObject(sc.pcsg)),
 		)
 	}
+	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
 	mapping := make(map[string][]int32, len(sc.podGangMap.Spec.Entries))
 	for _, entry := range sc.podGangMap.Spec.Entries {
-		indices, ok := entry.PCSGReplicaIndices[pcsgConfigName]
+		indices, ok := entry.PCSGReplicaIndices[pcsgName]
 		if !ok || len(indices) == 0 {
 			continue
 		}
-		cloned := slices.Clone(indices)
-		slices.Sort(cloned)
-		mapping[entry.Name] = cloned
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+			// get all minAvailable number of replica indices
+			clonedIndices := slices.Clone(indices)
+			slices.Sort(clonedIndices)
+			pgName := apicommon.GenerateAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, entry.AnchorIndex)
+			mapping[pgName] = clonedIndices
+		} else {
+			// for all non-anchor entries we uniformly create 1 PodGang name per index of the PCSG
+			for _, pcsgIndex := range indices {
+				pgName := apicommon.GenerateNonAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, pcsgName, pcsgIndex)
+				mapping[pgName] = []int32{pcsgIndex}
+			}
+		}
 	}
 	return mapping, nil
 }

@@ -17,9 +17,11 @@
 package podgangmap
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -369,7 +371,7 @@ func (r _resource) reconcileEntriesWhenPGMEmpty(ctx context.Context, syncSnap *s
 	} else {
 		// No PodGangs and no PodGangMap entries. This is a fresh PCS replica. Derive the initial
 		// entries from the PCS spec.
-		entries = buildBootstrapEntries(syncSnap.pcs, pcsReplicaIndex, r.clk)
+		entries = buildBootstrapEntries(syncSnap.pcs, r.clk)
 	}
 	pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: syncSnap.pcs.Name, Replica: pcsReplicaIndex})
 	return r.createOrPatchPodGangMapSpec(ctx, syncSnap.pcs, pgmName, pcsReplicaIndex, entries)
@@ -439,20 +441,38 @@ func (r _resource) deleteOrphanedPodGangMaps(ctx context.Context, syncSnap *sync
 	return nil
 }
 
-// newPodGangEntry constructs a fresh PodGangEntry. The PodGang name is derived from pcsName,
-// replicaIdx, and epoch. Adds the epoch as Labels[grove.io/epoch] and sets DependsOn.
-func newPodGangEntry(pcsName string, replicaIdx int, nameSuffix, hash, epoch string, dependsOn []string) grovecorev1alpha1.PodGangEntry {
-	entryName := apicommon.GeneratePodGangName(pcsName, replicaIdx, nameSuffix)
-	return newPodGangEntryWithName(entryName, hash, epoch, dependsOn)
-}
-
-// newPodGangEntryWithName constructs a fresh PodGangEntry given the entry name.
-// Adds the epoch as Labels[grove.io/epoch] and sets DependsOn.
-func newPodGangEntryWithName(name, hash, epoch string, dependsOn []string) grovecorev1alpha1.PodGangEntry {
+// newPodGangEntry constructs a fresh PodGangEntry setting epoch, PCS generation hash and dependsOn.
+// The caller sets Role, and AnchorIndex on an anchor entry, after this returns. An entry carries no
+// name or labels. The PodGang materializer derives the name and stamps the epoch and role labels.
+func newPodGangEntry(epoch, pcsGenerationHash string, dependsOn []string) grovecorev1alpha1.PodGangEntry {
 	return grovecorev1alpha1.PodGangEntry{
-		Name:                       name,
-		PodCliqueSetGenerationHash: hash,
-		Labels:                     map[string]string{apicommon.LabelEpoch: epoch},
+		Epoch:                      epoch,
+		PodCliqueSetGenerationHash: pcsGenerationHash,
 		DependsOn:                  dependsOn,
 	}
+}
+
+// sortEntriesByEpoch sorts entries in place by epoch ascending. Epoch is a unix-nano string compared
+// numerically, so ordering is correct regardless of digit width. It returns an error if any entry has
+// a non-numeric epoch, a contract violation since Grove is the sole writer of epochs.
+func sortEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) error {
+	type entryWithEpoch struct {
+		entry grovecorev1alpha1.PodGangEntry
+		epoch int64
+	}
+	paired := make([]entryWithEpoch, len(entries))
+	for i := range entries {
+		epoch, err := strconv.ParseInt(entries[i].Epoch, 10, 64)
+		if err != nil {
+			return fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", entries[i].Epoch, err)
+		}
+		paired[i] = entryWithEpoch{entry: entries[i], epoch: epoch}
+	}
+	slices.SortStableFunc(paired, func(a, b entryWithEpoch) int {
+		return cmp.Compare(a.epoch, b.epoch)
+	})
+	for i := range paired {
+		entries[i] = paired[i].entry
+	}
+	return nil
 }

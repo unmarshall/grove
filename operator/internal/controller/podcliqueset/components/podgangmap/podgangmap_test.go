@@ -37,7 +37,7 @@ func TestGetExistingResourceNames(t *testing.T) {
 	// A PodGangMap owned by a different PodCliqueSet: different name (so different selector labels)
 	// and a different owner UID.
 	otherPGM := testutils.NewPodGangMapBuilder("other-pcs", testNamespace, types.UID("other-uid"), 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithEpochAnchor(true).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 
 	tests := []struct {
 		name      string
@@ -73,7 +73,7 @@ func TestDelete(t *testing.T) {
 	pcs := pcsWithCoherentUpdateStrategy(testHash).Build()
 	owned := pgmWithEpochEntry(0, "e0")
 	other := testutils.NewPodGangMapBuilder("other-pcs", testNamespace, types.UID("other-uid"), 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithEpochAnchor(true).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 	r := newResource(newFakeClient(pcs, owned, other))
 
 	require.NoError(t, r.Delete(context.Background(), logr.Discard(), pcs.ObjectMeta))

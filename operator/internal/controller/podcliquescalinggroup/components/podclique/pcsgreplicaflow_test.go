@@ -482,7 +482,7 @@ func TestComputeDesiredPCSGReplicaMapping(t *testing.T) {
 		// The test simulates the post-step-2 state and confirms the next scale-out picks index 0.
 		sc := newSyncContextForMappingTests(
 			1,
-			// Status mapping after scale-in: only the anchor MPG remains with an empty slice;
+			// Status mapping after scale-in: only the MPG remains with an empty slice;
 			// previous scale-out PodGang is gone. Spec.Replicas grows from 0 to 1 → diff=+1.
 			map[string][]int32{tcsMPG0: {}},
 			nil,

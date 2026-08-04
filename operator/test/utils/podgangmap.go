@@ -46,9 +46,9 @@ func NewPodGangEntryBuilder(name, pcsGenerationHash, epoch string) *PodGangEntry
 	}
 }
 
-// WithEpochAnchor sets the IsEpochAnchor flag on the entry.
-func (b *PodGangEntryBuilder) WithEpochAnchor(isAnchor bool) *PodGangEntryBuilder {
-	b.entry.IsEpochAnchor = isAnchor
+// WithRole sets the Role on the entry.
+func (b *PodGangEntryBuilder) WithRole(role grovecorev1alpha1.PodGangEntryRole) *PodGangEntryBuilder {
+	b.entry.Role = role
 	return b
 }
 

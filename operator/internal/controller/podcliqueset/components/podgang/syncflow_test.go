@@ -255,7 +255,7 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
-	pgName := "test-pcs-0"
+	pgName := "test-pcs-0-1000"
 	pclqName := "test-pcs-0-worker"
 
 	makePCS := func() *grovecorev1alpha1.PodCliqueSet {
@@ -499,8 +499,8 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 		}
 		pclq0Name := "test-pcs-0-worker"
 		pclq1Name := "test-pcs-1-worker"
-		pg0Name := "test-pcs-0"
-		pg1Name := "test-pcs-1"
+		pg0Name := "test-pcs-0-1000"
+		pg1Name := "test-pcs-1-1000"
 		pclq0 := &grovecorev1alpha1.PodClique{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: pclq0Name, Namespace: ns, UID: "pclq0-uid",
@@ -612,7 +612,7 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 			},
 			pcsgConfigs:               nil,
 			expectedNumPodGangs:       2,
-			expectedBasePodGangNames:  []string{"test-pcs-0", "test-pcs-1"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000", "test-pcs-1-1000"},
 			expectedScaledPodGangFQNs: []string{},
 		},
 		{
@@ -636,8 +636,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-scaling-group-0", "test-pcs-0-scaling-group-1"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000"},
+			expectedScaledPodGangFQNs: []string{"test-pcs-0-1001-scaling-group-1", "test-pcs-0-1001-scaling-group-2"},
 		},
 		{
 			name:        "PCS with mixed standalone PCLQ and PCSG",
@@ -667,8 +667,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-sg-0", "test-pcs-0-sg-1"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000"},
+			expectedScaledPodGangFQNs: []string{"test-pcs-0-1001-sg-2", "test-pcs-0-1001-sg-3"},
 		},
 		{
 			name:        "Multiple PCS replicas with PCSG",
@@ -691,10 +691,10 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:      4,
-			expectedBasePodGangNames: []string{"test-pcs-0", "test-pcs-1"},
+			expectedBasePodGangNames: []string{"test-pcs-0-1000", "test-pcs-1-1000"},
 			expectedScaledPodGangFQNs: []string{
-				"test-pcs-0-worker-sg-0",
-				"test-pcs-1-worker-sg-0",
+				"test-pcs-0-1001-worker-sg-1",
+				"test-pcs-1-1001-worker-sg-1",
 			},
 		},
 		{
@@ -718,7 +718,7 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       1,
-			expectedBasePodGangNames:  []string{"test-pcs-0"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000"},
 			expectedScaledPodGangFQNs: []string{},
 		},
 		{
@@ -733,8 +733,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				{Name: "sg-b", Replicas: ptr.To(int32(2)), MinAvailable: ptr.To(int32(1)), CliqueNames: []string{"worker-b"}},
 			},
 			expectedNumPodGangs:       4,
-			expectedBasePodGangNames:  []string{"test-pcs-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-sg-a-0", "test-pcs-0-sg-a-1", "test-pcs-0-sg-b-0"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000"},
+			expectedScaledPodGangFQNs: []string{"test-pcs-0-1001-sg-a-1", "test-pcs-0-1001-sg-a-2", "test-pcs-0-1001-sg-b-1"},
 		},
 		{
 			name:        "Multiple cliques in one PCSG",
@@ -747,8 +747,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				{Name: "sg", Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(1)), CliqueNames: []string{"worker", "helper"}},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-sg-0", "test-pcs-0-sg-1"},
+			expectedBasePodGangNames:  []string{"test-pcs-0-1000"},
+			expectedScaledPodGangFQNs: []string{"test-pcs-0-1001-sg-1", "test-pcs-0-1001-sg-2"},
 		},
 	}
 
@@ -878,7 +878,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: &grovecorev1alpha1.TopologyLevel{Domain: "zone", Key: "topology.kubernetes.io/zone"},
 				},
 			},
@@ -901,7 +901,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						preferredKey: topologyLevelHost.Key,
 					},
@@ -929,7 +929,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						requiredKey:  topologyLevelZone.Key,
 						preferredKey: topologyLevelHost.Key,
@@ -958,7 +958,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						requiredKey: topologyLevelRack.Key,
 					},
@@ -986,7 +986,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						preferredKey: topologyLevelRack.Key,
 					},
@@ -1018,7 +1018,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: nil,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-worker": topologyLevelHost,
@@ -1051,7 +1051,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					pclqPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-worker": {preferredKey: topologyLevelHost.Key},
 					},
@@ -1083,7 +1083,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-worker": topologyLevelHost,
@@ -1126,7 +1126,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-0-decode-leader": topologyLevelHost,
@@ -1137,7 +1137,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-scaling-group-0",
+					fqn:           "test-pcs-0-1001-scaling-group-1",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1182,13 +1182,13 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0",
+					fqn: "test-pcs-0-1000",
 					pcsgPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-scaling-group-0": {preferredKey: topologyLevelRack.Key},
 					},
 				},
 				{
-					fqn: "test-pcs-0-scaling-group-0",
+					fqn: "test-pcs-0-1001-scaling-group-1",
 					pcsgPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-scaling-group-1": {preferredKey: topologyLevelRack.Key},
 					},
@@ -1237,7 +1237,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-router":                        topologyLevelZone,
@@ -1249,7 +1249,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-scaling-group-0",
+					fqn:           "test-pcs-0-1001-scaling-group-1",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1336,7 +1336,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0",
+					fqn:           "test-pcs-0-1000",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-0-decode-leader": topologyLevelHost,
@@ -1344,7 +1344,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-scaling-group-0",
+					fqn:           "test-pcs-0-1001-scaling-group-1",
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1400,7 +1400,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			err := r.computeExpectedPodGangs(t.Context(), sc)
 			require.NoError(t, err)
 
-			basePodGangFQN := apicommon.GenerateBasePodGangName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: 0})
+			basePodGangFQN := apicommon.GeneratePodGangEntryName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, "1000")
 			computedBasePodGangs := lo.Filter(sc.expectedPodGangs, func(pg *podGangInfo, _ int) bool {
 				return pg.fqn == basePodGangFQN
 			})
@@ -1536,7 +1536,7 @@ func TestPrepareSyncFlowTopologyResolution(t *testing.T) {
 func TestCreateOrUpdatePodGangs_ClearsStaleTopologyStateOnExistingPodGang(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
-	pgName := "test-pcs-0"
+	pgName := "test-pcs-0-1000"
 	pclqName := "test-pcs-0-worker"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
 
@@ -1686,7 +1686,7 @@ func TestBuildResourceTopologyAnnotation(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
-	pgName := "test-pcs-0"
+	pgName := "test-pcs-0-1000"
 	pclqName := "test-pcs-0-worker"
 	topologyName := "my-topology"
 
@@ -2395,61 +2395,53 @@ func buildTestPodGangMaps(pcs *grovecorev1alpha1.PodCliqueSet) []*grovecorev1alp
 		pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex})
 		standaloneFQNs := componentutils.GetStandalonePCLQFQNSet(pcs, replicaIndex)
 
-		// BPG entry: standalone PCLQs at template replicas.
-		bpgPodCliques := make(map[string]int32)
+		// MPG (anchor) entry: standalone PCLQs at template replicas.
+		mpgPodCliques := make(map[string]int32)
 		for _, cliqueTemplate := range pcs.Spec.Template.Cliques {
 			fqn := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex}, cliqueTemplate.Name)
 			if standaloneFQNs.Has(fqn) {
-				bpgPodCliques[cliqueTemplate.Name] = cliqueTemplate.Spec.Replicas
+				mpgPodCliques[cliqueTemplate.Name] = cliqueTemplate.Spec.Replicas
 			}
 		}
 
-		// BPG entry: each PCSG contributes index slice [0, MinAvailable).
-		bpgPCSGIndices := make(map[string][]int32)
+		// MPG (anchor) entry: each PCSG contributes index slice [0, MinAvailable).
+		// TPG (non-anchor) entry: each PCSG contributes indices [MinAvailable, Replicas), aggregated.
+		mpgPCSGIndices := make(map[string][]int32)
+		tpgPCSGIndices := make(map[string][]int32)
+		for _, cfg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+			if cfg.MinAvailable == nil || cfg.Replicas == nil {
+				continue
+			}
+			minAvail := *cfg.MinAvailable
+			floor := make([]int32, 0, minAvail)
+			for i := int32(0); i < minAvail; i++ {
+				floor = append(floor, i)
+			}
+			mpgPCSGIndices[cfg.Name] = floor
+			if tail := lo.RangeFrom(minAvail, int(*cfg.Replicas-minAvail)); len(tail) > 0 {
+				tpgPCSGIndices[cfg.Name] = tail
+			}
+		}
 
-		var entries []grovecorev1alpha1.PodGangEntry
-		if len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) > 0 {
-			// Derive PCSG entries from template config.
-			for _, cfg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-				if cfg.MinAvailable != nil {
-					indices := make([]int32, 0, *cfg.MinAvailable)
-					for i := int32(0); i < *cfg.MinAvailable; i++ {
-						indices = append(indices, i)
-					}
-					bpgPCSGIndices[cfg.Name] = indices
-				}
-			}
-			bpgName := apicommon.GenerateBasePodGangName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex})
-			entries = []grovecorev1alpha1.PodGangEntry{{
-				Name:                       bpgName,
+		rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex}
+		mpgEpoch := "1000"
+		tpgEpoch := "1001"
+		entries := []grovecorev1alpha1.PodGangEntry{{
+			Name:                       apicommon.GeneratePodGangEntryName(rnr, mpgEpoch),
+			PodCliqueSetGenerationHash: generationHash,
+			Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+			PodCliques:                 mpgPodCliques,
+			PCSGReplicaIndices:         mpgPCSGIndices,
+			Labels:                     map[string]string{apicommon.LabelEpoch: mpgEpoch},
+		}}
+		if len(tpgPCSGIndices) > 0 {
+			entries = append(entries, grovecorev1alpha1.PodGangEntry{
+				Name:                       apicommon.GeneratePodGangEntryName(rnr, tpgEpoch),
 				PodCliqueSetGenerationHash: generationHash,
-				PodCliques:                 bpgPodCliques,
-				PCSGReplicaIndices:         bpgPCSGIndices,
-			}}
-			// SPG entries from template, holding one replica index each above MinAvailable.
-			for _, cfg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-				pcsgFQN := apicommon.GeneratePodCliqueScalingGroupName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex}, cfg.Name)
-				if cfg.Replicas == nil || cfg.MinAvailable == nil {
-					continue
-				}
-				minAvail := *cfg.MinAvailable
-				for scaledIdx := range *cfg.Replicas - minAvail {
-					spgName := apicommon.CreatePodGangNameFromPCSGFQN(pcsgFQN, int(scaledIdx))
-					entries = append(entries, grovecorev1alpha1.PodGangEntry{
-						Name:                       spgName,
-						PodCliqueSetGenerationHash: generationHash,
-						PCSGReplicaIndices:         map[string][]int32{cfg.Name: {minAvail + scaledIdx}},
-					})
-				}
-			}
-		} else {
-			// Standalone PCLQs only — single BPG entry.
-			bpgName := apicommon.GenerateBasePodGangName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: replicaIndex})
-			entries = []grovecorev1alpha1.PodGangEntry{{
-				Name:                       bpgName,
-				PodCliqueSetGenerationHash: generationHash,
-				PodCliques:                 bpgPodCliques,
-			}}
+				PCSGReplicaIndices:         tpgPCSGIndices,
+				Labels:                     map[string]string{apicommon.LabelEpoch: tpgEpoch},
+				DependsOn:                  []string{mpgEpoch},
+			})
 		}
 
 		pgms = append(pgms, &grovecorev1alpha1.PodGangMap{

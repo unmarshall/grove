@@ -48,6 +48,10 @@ const (
 	// (via InFlightEpoch) and by the pod-component scheduling-gate-removal logic (via the
 	// PodGangEntry's DependsOn).
 	LabelEpoch = "grove.io/epoch"
+	// LabelPodGangRole is set on PodGang resources to record the role of the PodGangMap entry the
+	// PodGang was materialized from. The value is one of Anchor, Tail, or ScaleOut. It lets the role
+	// classification survive on the live PodGang and be selected on.
+	LabelPodGangRole = "grove.io/podgang-role"
 	// LabelPodCliqueScalingGroup is a key for a label that sets the PodCliqueScalingGroup name.
 	LabelPodCliqueScalingGroup = "grove.io/podcliquescalinggroup"
 	// LabelPodCliqueScalingGroupReplicaIndex is a key for a label that sets the replica index of a PodCliqueScalingGroup within PodCliqueSet.

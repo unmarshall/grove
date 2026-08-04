@@ -53,6 +53,14 @@ spec:
                   description: PodGangEntry describes the desired composition of a
                     single PodGang.
                   properties:
+                    anchorIndex:
+                      description: |-
+                        AnchorIndex is the index of an anchor entry within its generation hash. It is set only on
+                        entries whose Role is Anchor and is 0 for every other entry. The index starts at 0 for each
+                        generation hash and increments for each additional anchor of the same hash. It forms the last
+                        segment of the anchor PodGang name.
+                      format: int32
+                      type: integer
                     dependsOn:
                       description: |-
                         DependsOn lists the epochs whose PodGangs must be scheduled before this entry's PodGang
@@ -61,27 +69,11 @@ spec:
                       items:
                         type: string
                       type: array
-                    isEpochAnchor:
+                    epoch:
                       description: |-
-                        IsEpochAnchor marks whether this entry is the epoch anchor for its epoch. When true the entry
-                        carries the minimum-availability floor that entries depending on it are scheduled after, and
-                        standalone PodClique tail pods are subsumed into it. When false the entry collapses the tail
-                        PodGangs of a single PodCliqueScalingGroup within one epoch into one entry: PCSGReplicaIndices
-                        holds that epoch's rolled indices for the PCSG, which the PodGang materializer expands into one
-                        PodGang per index. It is the durable marker that lets the coherent update's step structure be
-                        reconstructed from the entries alone, so no separate step record needs to be persisted.
-                      type: boolean
-                    labels:
-                      additionalProperties:
-                        type: string
-                      description: |-
-                        Labels carries additional labels to stamp on the materialized PodGang resource,
-                        beyond the labels the PodGang materialization adds by default. Today this carries
-                        the grove.io/epoch label used for scheduling-order semantics.
-                      type: object
-                    name:
-                      description: Name is the name of the PodGang this entry corresponds
-                        to.
+                        Epoch records the scheduling batch this entry belongs to. The value is a monotonic unix-nano
+                        timestamp. It orders scheduling across entries and is referenced by DependsOn. Epoch is unique
+                        per entry within a PodGangMap, so it is also this entry's identity key.
                       type: string
                     pcsgReplicaIndices:
                       additionalProperties:
@@ -112,13 +104,24 @@ spec:
                         PodCliques owned by a PodCliqueScalingGroup derive their PodGang association via
                         PCSGReplicaIndices below.
                       type: object
+                    role:
+                      description: |-
+                        Role classifies this entry. See PodGangEntryRole for the meaning of each value. Role is the
+                        durable marker that lets the entry structure be reconstructed from the entries alone, so no
+                        separate record needs to be persisted.
+                      enum:
+                      - Anchor
+                      - Tail
+                      - ScaleOut
+                      type: string
                   required:
-                  - name
+                  - epoch
                   - podCliqueSetGenerationHash
+                  - role
                   type: object
                 type: array
                 x-kubernetes-list-map-keys:
-                - name
+                - epoch
                 x-kubernetes-list-type: map
               podCliqueSetReplicaIndex:
                 description: PodCliqueSetReplicaIndex is the index of the PodCliqueSet

@@ -19,9 +19,7 @@ package podgangmap
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
-	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -150,9 +148,9 @@ func (r _resource) buildResource(pgm *grovecorev1alpha1.PodGangMap, pcs *groveco
 	}
 	pgm.Labels = getLabels(pcs.Name, replicaIndex)
 	pgm.Spec.PodCliqueSetReplicaIndex = int32(replicaIndex)
-	slices.SortFunc(entries, func(a, b grovecorev1alpha1.PodGangEntry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
+	if err := sortEntriesByEpoch(entries); err != nil {
+		return err
+	}
 	pgm.Spec.Entries = entries
 	return nil
 }

@@ -216,48 +216,133 @@ func TestCreatePodGangNameFromPCSGFQN(t *testing.T) {
 	}
 }
 
-func TestGeneratePodGangName(t *testing.T) {
+func TestGenerateAnchorPodGangName(t *testing.T) {
 	tests := []struct {
 		name         string
 		pcsName      string
 		replicaIndex int
-		uniqueSuffix string
+		hash         string
+		anchorIndex  int32
 		expected     string
 	}{
 		{
-			name:         "numeric suffix",
+			name:         "single anchor index 0",
 			pcsName:      "my-pcs",
 			replicaIndex: 0,
-			uniqueSuffix: "1748266985000123456",
-			expected:     "my-pcs-0-1748266985000123456",
+			hash:         "f5b9x",
+			anchorIndex:  0,
+			expected:     "my-pcs-0-f5b9x-0",
 		},
 		{
-			name:         "different replica index",
+			name:         "second anchor of same hash",
 			pcsName:      "my-pcs",
 			replicaIndex: 2,
-			uniqueSuffix: "1748266985000123456",
-			expected:     "my-pcs-2-1748266985000123456",
-		},
-		{
-			name:         "different PCS name",
-			pcsName:      "inference-workload",
-			replicaIndex: 1,
-			uniqueSuffix: "1748266985999999999",
-			expected:     "inference-workload-1-1748266985999999999",
-		},
-		{
-			name:         "opaque non-numeric suffix",
-			pcsName:      "my-pcs",
-			replicaIndex: 0,
-			uniqueSuffix: "abc123",
-			expected:     "my-pcs-0-abc123",
+			hash:         "f5b9x",
+			anchorIndex:  1,
+			expected:     "my-pcs-2-f5b9x-1",
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := GeneratePodGangName(tc.pcsName, tc.replicaIndex, tc.uniqueSuffix)
-			assert.Equal(t, tc.expected, result)
+			actual := GenerateAnchorPodGangName(ResourceNameReplica{Name: tc.pcsName, Replica: tc.replicaIndex}, tc.hash, tc.anchorIndex)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+func TestGenerateNonAnchorPodGangName(t *testing.T) {
+	tests := []struct {
+		name         string
+		pcsName      string
+		replicaIndex int
+		hash         string
+		pcsgName     string
+		index        int32
+		expected     string
+	}{
+		{
+			name:         "single-segment pcsg name",
+			pcsName:      "my-pcs",
+			replicaIndex: 0,
+			hash:         "f5b9x",
+			pcsgName:     "prefill",
+			index:        3,
+			expected:     "my-pcs-0-f5b9x-prefill-3",
+		},
+		{
+			name:         "pcsg name with hyphens",
+			pcsName:      "my-pcs",
+			replicaIndex: 0,
+			hash:         "f5b9x",
+			pcsgName:     "gpu-workers",
+			index:        0,
+			expected:     "my-pcs-0-f5b9x-gpu-workers-0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := GenerateNonAnchorPodGangName(ResourceNameReplica{Name: tc.pcsName, Replica: tc.replicaIndex}, tc.hash, tc.pcsgName, tc.index)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+func TestExtractPCSGNameAndIndexFromPodGangName(t *testing.T) {
+	tests := []struct {
+		name          string
+		pcsName       string
+		replicaIndex  int
+		hash          string
+		podGangName   string
+		expectedPCSG  string
+		expectedIndex int32
+		expectErr     bool
+	}{
+		{
+			name:          "single-segment pcsg name",
+			pcsName:       "my-pcs",
+			replicaIndex:  0,
+			hash:          "f5b9x",
+			podGangName:   "my-pcs-0-f5b9x-prefill-3",
+			expectedPCSG:  "prefill",
+			expectedIndex: 3,
+		},
+		{
+			name:          "pcsg name with hyphens",
+			pcsName:       "my-pcs",
+			replicaIndex:  0,
+			hash:          "f5b9x",
+			podGangName:   "my-pcs-0-f5b9x-gpu-workers-0",
+			expectedPCSG:  "gpu-workers",
+			expectedIndex: 0,
+		},
+		{
+			name:         "prefix missing",
+			pcsName:      "my-pcs",
+			replicaIndex: 0,
+			hash:         "f5b9x",
+			podGangName:  "other-pcs-1-abcde-prefill-3",
+			expectErr:    true,
+		},
+		{
+			name:         "non-integer index",
+			pcsName:      "my-pcs",
+			replicaIndex: 0,
+			hash:         "f5b9x",
+			podGangName:  "my-pcs-0-f5b9x-prefill-x",
+			expectErr:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pcsgName, index, err := ExtractPCSGNameAndIndexFromPodGangName(tc.podGangName, ResourceNameReplica{Name: tc.pcsName, Replica: tc.replicaIndex}, tc.hash)
+			if tc.expectErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.expectedPCSG, pcsgName)
+			assert.Equal(t, tc.expectedIndex, index)
 		})
 	}
 }

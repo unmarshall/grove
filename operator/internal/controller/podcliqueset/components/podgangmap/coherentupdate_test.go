@@ -35,106 +35,106 @@ import (
 )
 
 func TestAscertainUpdateProgress(t *testing.T) {
-	// One PCSG "prefill": replicas 8, minAvailable 2, so numAnchorBearingSteps=4, target=2, leftover=0.
+	// One PCSG "prefill": replicas 8, minAvailable 2, so numMPGBearingSteps=4, target=2, leftover=0.
 	// A separate shape with leftover is used where noted.
 	tests := []struct {
-		name                      string
-		replicas                  map[string]int32
-		minAvailable              map[string]int32
-		standalone                map[string]int32 // mvu standalone minAvailable (for standalone components)
-		entries                   []grovecorev1alpha1.PodGangEntry
-		wantRolled                map[string]int32
-		wantStepsDone             int32
-		wantCurrentStepRolled     map[string]int32
-		wantLeftoverRolled        map[string]int32
-		wantMostRecentAnchorEpoch string
-		wantErr                   bool
+		name                   string
+		replicas               map[string]int32
+		minAvailable           map[string]int32
+		standalone             map[string]int32 // mvu standalone minAvailable (for standalone components)
+		entries                []grovecorev1alpha1.PodGangEntry
+		wantRolled             map[string]int32
+		wantStepsDone          int32
+		wantCurrentStepRolled  map[string]int32
+		wantLeftoverRolled     map[string]int32
+		wantMostRecentMPGEpoch string
+		wantErr                bool
 	}{
 		{
-			name:                      "nothing rolled",
-			replicas:                  map[string]int32{"prefill": 8},
-			minAvailable:              map[string]int32{"prefill": 2},
-			entries:                   nil,
-			wantRolled:                map[string]int32{},
-			wantStepsDone:             0,
-			wantCurrentStepRolled:     map[string]int32{"prefill": 0},
-			wantLeftoverRolled:        map[string]int32{},
-			wantMostRecentAnchorEpoch: "",
+			name:                   "nothing rolled",
+			replicas:               map[string]int32{"prefill": 8},
+			minAvailable:           map[string]int32{"prefill": 2},
+			entries:                nil,
+			wantRolled:             map[string]int32{},
+			wantStepsDone:          0,
+			wantCurrentStepRolled:  map[string]int32{"prefill": 0},
+			wantLeftoverRolled:     map[string]int32{},
+			wantMostRecentMPGEpoch: "",
 		},
 		{
-			name:         "one anchor-bearing step fully rolled (target==minAvailable)",
+			name:         "one MPG-bearing step fully rolled (target==minAvailable)",
 			replicas:     map[string]int32{"prefill": 8},
 			minAvailable: map[string]int32{"prefill": 2},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
+				mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
 			},
-			wantRolled:                map[string]int32{"prefill": 2},
-			wantStepsDone:             1,
-			wantCurrentStepRolled:     map[string]int32{"prefill": 0},
-			wantLeftoverRolled:        map[string]int32{},
-			wantMostRecentAnchorEpoch: "100",
+			wantRolled:             map[string]int32{"prefill": 2},
+			wantStepsDone:          1,
+			wantCurrentStepRolled:  map[string]int32{"prefill": 0},
+			wantLeftoverRolled:     map[string]int32{},
+			wantMostRecentMPGEpoch: "100",
 		},
 		{
-			name:         "anchor-bearing step partially rolled (target 5, floor 2)",
+			name:         "MPG-bearing step partially rolled (target 5, floor 2)",
 			replicas:     map[string]int32{"prefill": 10, "decode": 2}, // steps=min(5,2)=2; prefill target 5, decode target 1
 			minAvailable: map[string]int32{"prefill": 2, "decode": 1},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}, "decode": {0}}),
+				mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}, "decode": {0}}),
 			},
-			wantRolled:                map[string]int32{"prefill": 2, "decode": 1},
-			wantStepsDone:             0, // prefill floor 2 < target 5, so step 0 not complete
-			wantCurrentStepRolled:     map[string]int32{"prefill": 2, "decode": 1},
-			wantLeftoverRolled:        map[string]int32{},
-			wantMostRecentAnchorEpoch: "100",
+			wantRolled:             map[string]int32{"prefill": 2, "decode": 1},
+			wantStepsDone:          0, // prefill floor 2 < target 5, so step 0 not complete
+			wantCurrentStepRolled:  map[string]int32{"prefill": 2, "decode": 1},
+			wantLeftoverRolled:     map[string]int32{},
+			wantMostRecentMPGEpoch: "100",
 		},
 		{
 			name:         "uneven: step done for one component but not the other => min governs",
 			replicas:     map[string]int32{"prefill": 10, "decode": 2}, // prefill target 5, decode target 1, steps 2
 			minAvailable: map[string]int32{"prefill": 2, "decode": 1},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryAt("100", map[string][]int32{"prefill": {0, 1, 2, 3, 4}, "decode": {0}}), // prefill hit target 5, decode at 1
+				mpgEntryAt("100", map[string][]int32{"prefill": {0, 1, 2, 3, 4}, "decode": {0}}), // prefill hit target 5, decode at 1
 			},
-			wantRolled:                map[string]int32{"prefill": 5, "decode": 1},
-			wantStepsDone:             1, // decode 1/1=1, prefill 5/5=1 => min 1
-			wantCurrentStepRolled:     map[string]int32{"prefill": 0, "decode": 0},
-			wantLeftoverRolled:        map[string]int32{},
-			wantMostRecentAnchorEpoch: "100",
+			wantRolled:             map[string]int32{"prefill": 5, "decode": 1},
+			wantStepsDone:          1, // decode 1/1=1, prefill 5/5=1 => min 1
+			wantCurrentStepRolled:  map[string]int32{"prefill": 0, "decode": 0},
+			wantLeftoverRolled:     map[string]int32{},
+			wantMostRecentMPGEpoch: "100",
 		},
 		{
-			name:         "all anchor-bearing steps done, leftover partially rolled",
+			name:         "all MPG-bearing steps done, leftover partially rolled",
 			replicas:     map[string]int32{"prefill": 10}, // minAvail 3 => steps 3, target 3, leftover 1
 			minAvailable: map[string]int32{"prefill": 3},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryAt("100", map[string][]int32{"prefill": {0, 1, 2}}),
-				anchorEntryAt("200", map[string][]int32{"prefill": {3, 4, 5}}),
-				anchorEntryAt("300", map[string][]int32{"prefill": {6, 7, 8}}),
+				mpgEntryAt("100", map[string][]int32{"prefill": {0, 1, 2}}),
+				mpgEntryAt("200", map[string][]int32{"prefill": {3, 4, 5}}),
+				mpgEntryAt("300", map[string][]int32{"prefill": {6, 7, 8}}),
 			},
-			wantRolled:                map[string]int32{"prefill": 9},
-			wantStepsDone:             3,
-			wantCurrentStepRolled:     map[string]int32{"prefill": 0},
-			wantLeftoverRolled:        map[string]int32{}, // index 9 not yet rolled
-			wantMostRecentAnchorEpoch: "300",
+			wantRolled:             map[string]int32{"prefill": 9},
+			wantStepsDone:          3,
+			wantCurrentStepRolled:  map[string]int32{"prefill": 0},
+			wantLeftoverRolled:     map[string]int32{}, // index 9 not yet rolled
+			wantMostRecentMPGEpoch: "300",
 		},
 		{
-			name:         "old-hash entries are ignored, most recent current-hash anchor reported",
+			name:         "old-hash entries are ignored, most recent current-hash MPG reported",
 			replicas:     map[string]int32{"prefill": 8},
 			minAvailable: map[string]int32{"prefill": 2},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				oldHashAnchorEntryAt("old-hash", "50", map[string][]int32{"prefill": {0, 1, 2, 3}}),
-				anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
+				oldHashMPGEntryAt("old-hash", "50", map[string][]int32{"prefill": {0, 1, 2, 3}}),
+				mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
 			},
-			wantRolled:                map[string]int32{"prefill": 2},
-			wantStepsDone:             1,
-			wantCurrentStepRolled:     map[string]int32{"prefill": 0},
-			wantLeftoverRolled:        map[string]int32{},
-			wantMostRecentAnchorEpoch: "100",
+			wantRolled:             map[string]int32{"prefill": 2},
+			wantStepsDone:          1,
+			wantCurrentStepRolled:  map[string]int32{"prefill": 0},
+			wantLeftoverRolled:     map[string]int32{},
+			wantMostRecentMPGEpoch: "100",
 		},
 		{
-			name:         "malformed epoch on an anchor entry yields error",
+			name:         "malformed epoch on an MPG entry yields error",
 			replicas:     map[string]int32{"prefill": 8},
 			minAvailable: map[string]int32{"prefill": 2},
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryAt("not-a-number", map[string][]int32{"prefill": {0, 1}}),
+				mpgEntryAt("not-a-number", map[string][]int32{"prefill": {0, 1}}),
 			},
 			wantErr: true,
 		},
@@ -154,10 +154,10 @@ func TestAscertainUpdateProgress(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantRolled, prog.rolledCounts, "rolledCounts")
-			assert.Equal(t, tc.wantStepsDone, prog.anchorBearingStepsDone, "anchorBearingStepsDone")
-			assert.Equal(t, tc.wantCurrentStepRolled, prog.currentAnchorBearingStepRolled, "currentAnchorBearingStepRolled")
+			assert.Equal(t, tc.wantStepsDone, prog.mpgBearingStepsDone, "mpgBearingStepsDone")
+			assert.Equal(t, tc.wantCurrentStepRolled, prog.currentMPGBearingStepRolled, "currentMPGBearingStepRolled")
 			assert.Equal(t, tc.wantLeftoverRolled, prog.leftoverRolled, "leftoverRolled")
-			assert.Equal(t, tc.wantMostRecentAnchorEpoch, prog.mostRecentAnchorEpoch, "mostRecentAnchorEpoch")
+			assert.Equal(t, tc.wantMostRecentMPGEpoch, prog.mostRecentMPGEpoch, "mostRecentMPGEpoch")
 		})
 	}
 }
@@ -179,7 +179,7 @@ func TestAllComponentsFullyRolled(t *testing.T) {
 	}
 }
 
-func TestCurrentAnchorBearingStepInProgress(t *testing.T) {
+func TestCurrentMPGBearingStepInProgress(t *testing.T) {
 	// prefill: replicas 10, minAvailable 2 alone => steps 5. Pair with decode replicas 2 minAvail 1 =>
 	// steps=min(5,2)=2; prefill target 5, decode target 1.
 	planner := plannerForReplicasMinAvail(t,
@@ -193,23 +193,23 @@ func TestCurrentAnchorBearingStepInProgress(t *testing.T) {
 	}{
 		{
 			name: "partially rolled current step => in progress",
-			prog: updateProgress{anchorBearingStepsDone: 0, currentAnchorBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1}},
+			prog: updateProgress{mpgBearingStepsDone: 0, currentMPGBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1}},
 			want: true, // prefill 2 in (0,5)
 		},
 		{
 			name: "current step at target => not in progress",
-			prog: updateProgress{anchorBearingStepsDone: 0, currentAnchorBearingStepRolled: map[string]int32{"prefill": 5, "decode": 1}},
+			prog: updateProgress{mpgBearingStepsDone: 0, currentMPGBearingStepRolled: map[string]int32{"prefill": 5, "decode": 1}},
 			want: false,
 		},
 		{
-			name: "all anchor-bearing steps done => not in progress",
-			prog: updateProgress{anchorBearingStepsDone: 2, currentAnchorBearingStepRolled: map[string]int32{}},
+			name: "all MPG-bearing steps done => not in progress",
+			prog: updateProgress{mpgBearingStepsDone: 2, currentMPGBearingStepRolled: map[string]int32{}},
 			want: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, planner.currentAnchorBearingStepInProgress(tc.prog))
+			assert.Equal(t, tc.want, planner.currentMPGBearingStepInProgress(tc.prog))
 		})
 	}
 }
@@ -258,7 +258,7 @@ func TestNewSubStepPlanner(t *testing.T) {
 			wantLeftover: map[string]int32{"prefill": 0},
 		},
 		{
-			name:         "numAnchorBearingSteps is min over components",
+			name:         "numMPGBearingSteps is min over components",
 			replicas:     map[string]int32{"prefill": 9, "decode": 4},
 			minAvailable: map[string]int32{"prefill": 3, "decode": 2},
 			wantSteps:    2,
@@ -267,9 +267,9 @@ func TestNewSubStepPlanner(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			planner := plannerForReplicasMinAvail(t, tc.replicas, tc.minAvailable, tc.replicas)
-			assert.Equal(t, tc.wantSteps, planner.numAnchorBearingSteps)
+			assert.Equal(t, tc.wantSteps, planner.numMPGBearingSteps)
 			for c, want := range tc.wantTarget {
-				assert.Equal(t, want, planner.anchorBearingStepTarget[c], "target[%s]", c)
+				assert.Equal(t, want, planner.mpgBearingStepTarget[c], "target[%s]", c)
 			}
 			for c, want := range tc.wantLeftover {
 				assert.Equal(t, want, planner.leftover[c], "leftover[%s]", c)
@@ -285,10 +285,10 @@ func TestNext(t *testing.T) {
 			map[string]int32{"prefill": 2, "decode": 1},
 			map[string]int32{"prefill": 4, "decode": 1})
 		prog := updateProgress{
-			rolledCounts:                   map[string]int32{"prefill": 2, "decode": 1},
-			anchorBearingStepsDone:         0,
-			currentAnchorBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1},
-			mostRecentAnchorEpoch:          "100",
+			rolledCounts:                map[string]int32{"prefill": 2, "decode": 1},
+			mpgBearingStepsDone:         0,
+			currentMPGBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1},
+			mostRecentMPGEpoch:          "100",
 		}
 		ss, err := planner.next(prog)
 		require.NoError(t, err)
@@ -296,32 +296,32 @@ func TestNext(t *testing.T) {
 		assert.NotEmpty(t, ss.tailPCSGReplicaIndices["prefill"])
 	})
 
-	t.Run("current step complete, anchor steps remain yields anchor-bearing sub-step", func(t *testing.T) {
+	t.Run("current step complete, MPG steps remain yields MPG-bearing sub-step", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		prog := updateProgress{
-			rolledCounts:                   map[string]int32{"prefill": 2},
-			anchorBearingStepsDone:         1,
-			currentAnchorBearingStepRolled: map[string]int32{"prefill": 0},
+			rolledCounts:                map[string]int32{"prefill": 2},
+			mpgBearingStepsDone:         1,
+			currentMPGBearingStepRolled: map[string]int32{"prefill": 0},
 		}
 		ss, err := planner.next(prog)
 		require.NoError(t, err)
 		require.NotNil(t, ss)
-		assert.NotEmpty(t, ss.anchorPCSGReplicaIndices["prefill"])
+		assert.NotEmpty(t, ss.mpgPCSGReplicaIndices["prefill"])
 	})
 
-	t.Run("all anchor steps done, leftover remains yields leftover sub-step", func(t *testing.T) {
+	t.Run("all MPG steps done, leftover remains yields leftover sub-step", func(t *testing.T) {
 		// prefill replicas 10, minAvail 3 => steps 3, target 3, leftover 1.
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 10}, map[string]int32{"prefill": 3}, map[string]int32{"prefill": 2})
 		planner.entries = []grovecorev1alpha1.PodGangEntry{
-			anchorEntryAt("300", map[string][]int32{"prefill": {6, 7, 8}}),
+			mpgEntryAt("300", map[string][]int32{"prefill": {6, 7, 8}}),
 		}
 		prog := updateProgress{
-			rolledCounts:           map[string]int32{"prefill": 9},
-			anchorBearingStepsDone: 3,
-			leftoverRolled:         map[string]int32{},
-			mostRecentAnchorEpoch:  "300",
+			rolledCounts:        map[string]int32{"prefill": 9},
+			mpgBearingStepsDone: 3,
+			leftoverRolled:      map[string]int32{},
+			mostRecentMPGEpoch:  "300",
 		}
 		ss, err := planner.next(prog)
 		require.NoError(t, err)
@@ -329,12 +329,12 @@ func TestNext(t *testing.T) {
 		assert.Equal(t, []int32{9}, ss.tailPCSGReplicaIndices["prefill"])
 	})
 
-	t.Run("all anchor steps done, no leftover yields nil", func(t *testing.T) {
+	t.Run("all MPG steps done, no leftover yields nil", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		prog := updateProgress{
-			rolledCounts:           map[string]int32{"prefill": 8},
-			anchorBearingStepsDone: 4,
+			rolledCounts:        map[string]int32{"prefill": 8},
+			mpgBearingStepsDone: 4,
 		}
 		ss, err := planner.next(prog)
 		require.NoError(t, err)
@@ -342,24 +342,24 @@ func TestNext(t *testing.T) {
 	})
 }
 
-func TestBuildAnchorBearingSubStep(t *testing.T) {
-	t.Run("first anchor claims floor indices [0, minAvailable)", func(t *testing.T) {
+func TestBuildMPGBearingSubStep(t *testing.T) {
+	t.Run("first MPG claims floor indices [0, minAvailable)", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		planner.clk = clocktesting.NewFakeClock(time.Unix(0, 7000))
-		ss, err := planner.buildAnchorBearingSubStep(updateProgress{anchorBearingStepsDone: 0})
+		ss, err := planner.buildMPGBearingSubStep(updateProgress{mpgBearingStepsDone: 0})
 		require.NoError(t, err)
-		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, ss.anchorPCSGReplicaIndices)
+		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, ss.mpgPCSGReplicaIndices)
 		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, ss.drainPCSGReplicaIndices)
 		assert.Equal(t, "7000", ss.epoch)
 	})
 
-	t.Run("second anchor claims the next contiguous block", func(t *testing.T) {
+	t.Run("second MPG claims the next contiguous block", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
-		ss, err := planner.buildAnchorBearingSubStep(updateProgress{anchorBearingStepsDone: 1})
+		ss, err := planner.buildMPGBearingSubStep(updateProgress{mpgBearingStepsDone: 1})
 		require.NoError(t, err)
-		assert.Equal(t, map[string][]int32{"prefill": {2, 3}}, ss.anchorPCSGReplicaIndices)
+		assert.Equal(t, map[string][]int32{"prefill": {2, 3}}, ss.mpgPCSGReplicaIndices)
 	})
 }
 
@@ -371,15 +371,15 @@ func TestBuildTailSubStep(t *testing.T) {
 		map[string]int32{"prefill": 4, "decode": 1})
 	planner.clk = clocktesting.NewFakeClock(time.Unix(0, 9000))
 	prog := updateProgress{
-		anchorBearingStepsDone:         0,
-		currentAnchorBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1},
-		mostRecentAnchorEpoch:          "100",
+		mpgBearingStepsDone:         0,
+		currentMPGBearingStepRolled: map[string]int32{"prefill": 2, "decode": 1},
+		mostRecentMPGEpoch:          "100",
 	}
 	ss, err := planner.buildTailSubStep(prog)
 	require.NoError(t, err)
 	// prefill target 5, rolled 2, remaining 3, rollBudget min(4,3)=3, start (0+1)*5-3=2 => [2,5).
 	assert.Equal(t, []int32{2, 3, 4}, ss.tailPCSGReplicaIndices["prefill"])
-	assert.Equal(t, "100", ss.subsumeAnchorEpoch)
+	assert.Equal(t, "100", ss.subsumeMPGEpoch)
 }
 
 func TestBuildLeftoverSubStep(t *testing.T) {
@@ -388,27 +388,27 @@ func TestBuildLeftoverSubStep(t *testing.T) {
 		map[string]int32{"prefill": 10}, map[string]int32{"prefill": 3}, map[string]int32{"prefill": 2})
 	planner.clk = clocktesting.NewFakeClock(time.Unix(0, 12000))
 	prog := updateProgress{
-		leftoverRolled:        map[string]int32{},
-		mostRecentAnchorEpoch: "300",
+		leftoverRolled:     map[string]int32{},
+		mostRecentMPGEpoch: "300",
 	}
 	ss, err := planner.buildLeftoverSubStep(prog)
 	require.NoError(t, err)
 	// leftover index start = replicas - remaining = 10 - 1 = 9 => [9,10).
 	assert.Equal(t, []int32{9}, ss.tailPCSGReplicaIndices["prefill"])
-	assert.Equal(t, "300", ss.subsumeAnchorEpoch)
+	assert.Equal(t, "300", ss.subsumeMPGEpoch)
 }
 
 func TestEntriesAfterSubStep(t *testing.T) {
-	t.Run("anchor-bearing sub-step appends anchor and drains old-hash floor", func(t *testing.T) {
+	t.Run("MPG-bearing sub-step appends MPG and drains old-hash floor", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		planner.mvu.standalonePCLQs = map[string]int32{"frontend": 1}
 		planner.entries = []grovecorev1alpha1.PodGangEntry{
-			oldHashAnchorEntryWithPods("old-hash", "old-e", map[string]int32{"frontend": 1}, map[string][]int32{"prefill": {0, 1, 2, 3}}),
+			oldHashMPGEntryWithPods("old-hash", "old-e", map[string]int32{"frontend": 1}, map[string][]int32{"prefill": {0, 1, 2, 3}}),
 		}
 		ss := subStep{
 			epoch:                     "new-e",
-			anchorPCSGReplicaIndices:  map[string][]int32{"prefill": {0, 1}},
+			mpgPCSGReplicaIndices:     map[string][]int32{"prefill": {0, 1}},
 			drainStandalonePCLQCounts: map[string]int32{"frontend": 1},
 			drainPCSGReplicaIndices:   map[string][]int32{"prefill": {0, 1}},
 		}
@@ -417,22 +417,22 @@ func TestEntriesAfterSubStep(t *testing.T) {
 		byName := entriesByName(result)
 		old := byName["old-hash-old-e"]
 		assert.Equal(t, []int32{2, 3}, old.PCSGReplicaIndices["prefill"], "old floor drained")
-		var newAnchor grovecorev1alpha1.PodGangEntry
+		var newMPG grovecorev1alpha1.PodGangEntry
 		for _, e := range result {
 			if e.PodCliqueSetGenerationHash == testHash {
-				newAnchor = e
+				newMPG = e
 			}
 		}
-		assert.True(t, newAnchor.IsEpochAnchor)
-		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, newAnchor.PCSGReplicaIndices)
-		assert.Equal(t, int32(1), newAnchor.PodCliques["frontend"])
+		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, newMPG.Role)
+		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, newMPG.PCSGReplicaIndices)
+		assert.Equal(t, int32(1), newMPG.PodCliques["frontend"])
 	})
 
 	t.Run("does not mutate planner.entries", func(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		planner.entries = []grovecorev1alpha1.PodGangEntry{
-			oldHashAnchorEntryWithPods("old-hash", "old-e", nil, map[string][]int32{"prefill": {0, 1, 2, 3}}),
+			oldHashMPGEntryWithPods("old-hash", "old-e", nil, map[string][]int32{"prefill": {0, 1, 2, 3}}),
 		}
 		_ = planner.entriesAfterSubStep(subStep{epoch: "new-e", drainPCSGReplicaIndices: map[string][]int32{"prefill": {0}}})
 		assert.Equal(t, []int32{0, 1, 2, 3}, planner.entries[0].PCSGReplicaIndices["prefill"])
@@ -442,8 +442,8 @@ func TestEntriesAfterSubStep(t *testing.T) {
 func TestDrainStandalonePCLQs(t *testing.T) {
 	t.Run("drains oldest generation first", func(t *testing.T) {
 		entries := []grovecorev1alpha1.PodGangEntry{
-			oldHashAnchorEntryWithPods("v1-hash", "100", map[string]int32{"frontend": 2}, nil),
-			oldHashAnchorEntryWithPods("v2-hash", "200", map[string]int32{"frontend": 3}, nil),
+			oldHashMPGEntryWithPods("v1-hash", "100", map[string]int32{"frontend": 2}, nil),
+			oldHashMPGEntryWithPods("v2-hash", "200", map[string]int32{"frontend": 3}, nil),
 		}
 		drainStandalonePCLQs(entries, testHash, map[string]int32{"frontend": 3})
 		byName := entriesByName(entries)
@@ -451,9 +451,9 @@ func TestDrainStandalonePCLQs(t *testing.T) {
 		assert.Equal(t, int32(2), byName["v2-hash-200"].PodCliques["frontend"])
 	})
 
-	t.Run("new-hash anchors untouched", func(t *testing.T) {
+	t.Run("new-hash mpgs untouched", func(t *testing.T) {
 		entries := []grovecorev1alpha1.PodGangEntry{
-			anchorEntryWithPods("300", map[string]int32{"frontend": 4}, nil),
+			mpgEntryWithPods("300", map[string]int32{"frontend": 4}, nil),
 		}
 		drainStandalonePCLQs(entries, testHash, map[string]int32{"frontend": 2})
 		assert.Equal(t, int32(4), entries[0].PodCliques["frontend"])
@@ -462,8 +462,8 @@ func TestDrainStandalonePCLQs(t *testing.T) {
 
 func TestDrainPCSGIndices(t *testing.T) {
 	entries := []grovecorev1alpha1.PodGangEntry{
-		oldHashAnchorEntryWithPods("old-hash", "100", nil, map[string][]int32{"prefill": {0, 1, 2}}),
-		anchorEntryWithPods("200", nil, map[string][]int32{"prefill": {0, 1, 2}}),
+		oldHashMPGEntryWithPods("old-hash", "100", nil, map[string][]int32{"prefill": {0, 1, 2}}),
+		mpgEntryWithPods("200", nil, map[string][]int32{"prefill": {0, 1, 2}}),
 	}
 	drainPCSGIndices(entries, testHash, map[string][]int32{"prefill": {1}})
 	byName := entriesByName(entries)
@@ -471,53 +471,69 @@ func TestDrainPCSGIndices(t *testing.T) {
 	assert.Equal(t, []int32{0, 1, 2}, byName["200"].PCSGReplicaIndices["prefill"], "new-hash untouched")
 }
 
-func TestSubsumeIntoAnchor(t *testing.T) {
-	t.Run("adds counts to anchor at epoch", func(t *testing.T) {
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryWithPods("e0", map[string]int32{"frontend": 1}, nil)}
-		subsumeIntoAnchor(entries, "e0", map[string]int32{"frontend": 2})
+func TestSubsumeIntoMPG(t *testing.T) {
+	t.Run("adds counts to MPG at epoch", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryWithPods("e0", map[string]int32{"frontend": 1}, nil)}
+		subsumeIntoMPG(entries, "e0", map[string]int32{"frontend": 2})
 		assert.Equal(t, int32(3), entries[0].PodCliques["frontend"])
 	})
 
 	t.Run("initialises nil PodCliques map", func(t *testing.T) {
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryAt("e0", nil)}
-		subsumeIntoAnchor(entries, "e0", map[string]int32{"frontend": 2})
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryAt("e0", nil)}
+		subsumeIntoMPG(entries, "e0", map[string]int32{"frontend": 2})
 		assert.Equal(t, int32(2), entries[0].PodCliques["frontend"])
 	})
 
 	t.Run("no-op on empty counts", func(t *testing.T) {
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryAt("e0", nil)}
-		subsumeIntoAnchor(entries, "e0", nil)
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryAt("e0", nil)}
+		subsumeIntoMPG(entries, "e0", nil)
 		assert.Empty(t, entries[0].PodCliques)
 	})
 }
 
-func TestNewHashEntriesForSubStep(t *testing.T) {
+func TestNewHashEntryForSubStep(t *testing.T) {
 	planner := plannerForReplicasMinAvail(t,
 		map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 	planner.mvu.standalonePCLQs = map[string]int32{"frontend": 2}
 
-	t.Run("anchor plus one non-anchor entry per PCSG", func(t *testing.T) {
+	t.Run("MPG-bearing sub-step yields one MPG entry", func(t *testing.T) {
 		ss := subStep{
-			epoch:                    "e0",
-			dependsOn:                []string{"prev"},
-			anchorPCSGReplicaIndices: map[string][]int32{"prefill": {0, 1}},
-			tailPCSGReplicaIndices:   map[string][]int32{"prefill": {2, 3, 4}},
+			epoch:                 "e0",
+			dependsOn:             []string{"prev"},
+			mpgPCSGReplicaIndices: map[string][]int32{"prefill": {0, 1}},
 		}
-		entries := planner.newHashEntriesForSubStep(ss)
-		require.Len(t, entries, 2)
-		anchor := anchorEntry(t, entries)
-		assert.Equal(t, map[string]int32{"frontend": 2}, anchor.PodCliques)
-		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, anchor.PCSGReplicaIndices)
-		assert.Equal(t, []string{"prev"}, anchor.DependsOn)
-		tails := nonAnchorEntries(entries)
-		require.Len(t, tails, 1)
-		assert.Equal(t, map[string][]int32{"prefill": {2, 3, 4}}, tails[0].PCSGReplicaIndices)
-		assert.NotEqual(t, anchor.Name, tails[0].Name, "salted names distinct")
+		entry, ok := planner.newHashEntryForSubStep(ss)
+		require.True(t, ok)
+		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, entry.Role)
+		assert.Equal(t, map[string]int32{"frontend": 2}, entry.PodCliques)
+		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, entry.PCSGReplicaIndices)
+		assert.Equal(t, []string{"prev"}, entry.DependsOn)
 	})
 
-	t.Run("empty index slice skipped", func(t *testing.T) {
-		ss := subStep{epoch: "e0", tailPCSGReplicaIndices: map[string][]int32{"prefill": {}}}
-		assert.Empty(t, planner.newHashEntriesForSubStep(ss))
+	t.Run("tail sub-step yields one TPG entry aggregating all PCSGs", func(t *testing.T) {
+		ss := subStep{
+			epoch:                  "e1",
+			dependsOn:              []string{"e0"},
+			tailPCSGReplicaIndices: map[string][]int32{"prefill": {2, 3, 4}},
+		}
+		entry, ok := planner.newHashEntryForSubStep(ss)
+		require.True(t, ok)
+		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, entry.Role)
+		assert.Empty(t, entry.PodCliques)
+		assert.Equal(t, map[string][]int32{"prefill": {2, 3, 4}}, entry.PCSGReplicaIndices)
+		assert.Equal(t, []string{"e0"}, entry.DependsOn)
+	})
+
+	t.Run("standalone-subsume-only sub-step yields no entry", func(t *testing.T) {
+		ss := subStep{epoch: "e1", subsumeStandalonePCLQCounts: map[string]int32{"frontend": 1}}
+		_, ok := planner.newHashEntryForSubStep(ss)
+		assert.False(t, ok)
+	})
+
+	t.Run("empty index slice yields no entry", func(t *testing.T) {
+		ss := subStep{epoch: "e1", tailPCSGReplicaIndices: map[string][]int32{"prefill": {}}}
+		_, ok := planner.newHashEntryForSubStep(ss)
+		assert.False(t, ok)
 	})
 }
 
@@ -541,7 +557,7 @@ func TestRemoveIndices(t *testing.T) {
 
 func TestParseEpoch(t *testing.T) {
 	t.Run("parses numeric label", func(t *testing.T) {
-		v, err := parseEpoch(anchorEntryAt("1748266985000000000", nil))
+		v, err := parseEpoch(mpgEntryAt("1748266985000000000", nil))
 		require.NoError(t, err)
 		assert.Equal(t, int64(1748266985000000000), v)
 	})
@@ -550,7 +566,7 @@ func TestParseEpoch(t *testing.T) {
 		assertErrorCode(t, err, errCodeMissingEpochLabel)
 	})
 	t.Run("non-numeric label yields error", func(t *testing.T) {
-		_, err := parseEpoch(anchorEntryAt("nope", nil))
+		_, err := parseEpoch(mpgEntryAt("nope", nil))
 		assertErrorCode(t, err, errCodeInvalidEpochLabel)
 	})
 }
@@ -558,7 +574,7 @@ func TestParseEpoch(t *testing.T) {
 func TestBuildCoherentUpdateEntries(t *testing.T) {
 	t.Run("complete: fully rolled returns entries unchanged", func(t *testing.T) {
 		pcs := coherentPCS(testHash)
-		// current-hash entries fully cover prefill replicas (8, minAvail 2 => 4 anchor steps).
+		// current-hash entries fully cover prefill replicas (8, minAvail 2 => 4 MPG steps).
 		entries := fullyRolledPrefillEntries()
 		snap := coherentSnapshot(pcs, entries)
 		r := newResource(newFakeClient(pcs)) // no PodGangs needed; complete short-circuits before List
@@ -570,7 +586,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 
 	t.Run("waiting: latest batch not ready returns entries unchanged", func(t *testing.T) {
 		pcs := coherentPCS(testHash)
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
 		snap := coherentSnapshot(pcs, entries)
 		// A PodGang at epoch 100 exists but is NOT ready (no LastReady).
 		r := newResource(newFakeClient(pcs, unreadyPodGang("pg-100", "100")))
@@ -580,40 +596,40 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 		assert.Equal(t, entries, got)
 	})
 
-	t.Run("proceed not started: opens the first anchor-bearing sub-step", func(t *testing.T) {
+	t.Run("proceed not started: opens the first MPG-bearing sub-step", func(t *testing.T) {
 		pcs := coherentPCS(testHash)
 		// Only old-hash entries: nothing current-hash emitted yet.
 		entries := []grovecorev1alpha1.PodGangEntry{
-			oldHashAnchorEntryWithPods("old-hash", "50", nil, map[string][]int32{"prefill": {0, 1, 2, 3, 4, 5, 6, 7}}),
+			oldHashMPGEntryWithPods("old-hash", "50", nil, map[string][]int32{"prefill": {0, 1, 2, 3, 4, 5, 6, 7}}),
 		}
 		snap := coherentSnapshot(pcs, entries)
 		r := newResource(newFakeClient(pcs))
 
 		got, err := buildCoherentUpdateEntries(context.Background(), r.client, 0, snap, r.clk)
 		require.NoError(t, err)
-		assert.Greater(t, len(got), len(entries), "a new-hash anchor entry was appended")
-		assert.True(t, hasNewHashAnchor(got), "new-hash anchor emitted")
+		assert.Greater(t, len(got), len(entries), "a new-hash MPG entry was appended")
+		assert.True(t, hasNewHashMPG(got), "new-hash MPG emitted")
 	})
 
 	t.Run("proceed ready: advances to the next sub-step", func(t *testing.T) {
 		pcs := coherentPCS(testHash)
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
 		snap := coherentSnapshot(pcs, entries)
 		// PodGang at epoch 100 is ready => proceed.
 		r := newResource(newFakeClient(pcs, readyPodGang("pg-100", "100")))
 
 		got, err := buildCoherentUpdateEntries(context.Background(), r.client, 0, snap, r.clk)
 		require.NoError(t, err)
-		assert.Greater(t, len(got), len(entries), "next anchor-bearing step emitted")
+		assert.Greater(t, len(got), len(entries), "next MPG-bearing step emitted")
 	})
 
 	t.Run("multi-generation re-update: drains older generations, plans current only", func(t *testing.T) {
 		pcs := coherentPCS(testHash) // current hash V3
-		// V1 (oldest) and V2 old-hash anchors still live, plus one current-hash (V3) anchor at epoch 300.
+		// V1 (oldest) and V2 old-hash mpgs still live, plus one current-hash (V3) MPG at epoch 300.
 		entries := []grovecorev1alpha1.PodGangEntry{
-			oldHashAnchorEntryWithPods("v1", "100", nil, map[string][]int32{"prefill": {6, 7}}),
-			oldHashAnchorEntryWithPods("v2", "200", nil, map[string][]int32{"prefill": {2, 3, 4, 5}}),
-			anchorEntryAt("300", map[string][]int32{"prefill": {0, 1}}),
+			oldHashMPGEntryWithPods("v1", "100", nil, map[string][]int32{"prefill": {6, 7}}),
+			oldHashMPGEntryWithPods("v2", "200", nil, map[string][]int32{"prefill": {2, 3, 4, 5}}),
+			mpgEntryAt("300", map[string][]int32{"prefill": {0, 1}}),
 		}
 		snap := coherentSnapshot(pcs, entries)
 		r := newResource(newFakeClient(pcs, readyPodGang("pg-300", "300")))
@@ -622,7 +638,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 		require.NoError(t, err)
 		// V3 planning proceeds (a new current-hash entry appears) and older generations remain present
 		// as drain targets (not wiped by the current-generation reconstruction).
-		assert.True(t, hasNewHashAnchor(got))
+		assert.True(t, hasNewHashMPG(got))
 		byName := entriesByName(got)
 		_, v1Present := byName["v1-100"]
 		_, v2Present := byName["v2-200"]
@@ -632,7 +648,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	t.Run("budget violated: soft-requeues without emitting the next sub-step", func(t *testing.T) {
 		pcs := coherentPCS(testHash)
 		// Latest current-hash batch is ready, so the readiness gate passes and we reach the budget gate.
-		entries := []grovecorev1alpha1.PodGangEntry{anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
+		entries := []grovecorev1alpha1.PodGangEntry{mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}})}
 		snap := coherentSnapshot(pcs, entries)
 		// Drop the in-scope prefill PCSG below its floor (replicas 8 - maxUnavailable 2 = 6).
 		snap.existingPCSGsByReplica = map[int][]grovecorev1alpha1.PodCliqueScalingGroup{0: {
@@ -732,45 +748,45 @@ func TestMaxUnavailabilityBudgetViolated(t *testing.T) {
 
 // --- helpers (after all Test* functions per the package test convention) ---
 
-// anchorEntryAt builds a current-hash anchor entry at the given epoch with the given PCSG indices.
-func anchorEntryAt(epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder("anchor-"+epoch, testHash, epoch).
-		WithEpochAnchor(true).WithPCSGReplicaIndices(pcsgIndices).Build()
+// mpgEntryAt builds a current-hash MPG entry at the given epoch with the given PCSG indices.
+func mpgEntryAt(epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
+	return testutils.NewPodGangEntryBuilder("mpg-"+epoch, testHash, epoch).
+		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
-// anchorEntryWithPods builds a current-hash anchor entry at the given epoch with pod counts and indices.
-func anchorEntryWithPods(epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
+// mpgEntryWithPods builds a current-hash MPG entry at the given epoch with pod counts and indices.
+func mpgEntryWithPods(epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
 	return testutils.NewPodGangEntryBuilder(epoch, testHash, epoch).
-		WithEpochAnchor(true).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
+		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
-// oldHashAnchorEntryAt builds an old-generation anchor entry.
-func oldHashAnchorEntryAt(hash, epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
+// oldHashMPGEntryAt builds an old-generation MPG entry.
+func oldHashMPGEntryAt(hash, epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
 	return testutils.NewPodGangEntryBuilder(hash+"-"+epoch, hash, epoch).
-		WithEpochAnchor(true).WithPCSGReplicaIndices(pcsgIndices).Build()
+		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
-// oldHashAnchorEntryWithPods builds an old-generation anchor entry with pod counts and indices.
-func oldHashAnchorEntryWithPods(hash, epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
+// oldHashMPGEntryWithPods builds an old-generation MPG entry with pod counts and indices.
+func oldHashMPGEntryWithPods(hash, epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
 	return testutils.NewPodGangEntryBuilder(hash+"-"+epoch, hash, epoch).
-		WithEpochAnchor(true).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
+		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
 // fullyRolledPrefillEntries returns current-hash entries covering prefill replicas 8 (minAvail 2 =>
-// 4 anchor-bearing steps of 2 indices each), leaving nothing to roll.
+// 4 MPG-bearing steps of 2 indices each), leaving nothing to roll.
 func fullyRolledPrefillEntries() []grovecorev1alpha1.PodGangEntry {
 	return []grovecorev1alpha1.PodGangEntry{
-		anchorEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
-		anchorEntryAt("200", map[string][]int32{"prefill": {2, 3}}),
-		anchorEntryAt("300", map[string][]int32{"prefill": {4, 5}}),
-		anchorEntryAt("400", map[string][]int32{"prefill": {6, 7}}),
+		mpgEntryAt("100", map[string][]int32{"prefill": {0, 1}}),
+		mpgEntryAt("200", map[string][]int32{"prefill": {2, 3}}),
+		mpgEntryAt("300", map[string][]int32{"prefill": {4, 5}}),
+		mpgEntryAt("400", map[string][]int32{"prefill": {6, 7}}),
 	}
 }
 
-// hasNewHashAnchor reports whether entries contains a current-hash anchor entry.
-func hasNewHashAnchor(entries []grovecorev1alpha1.PodGangEntry) bool {
+// hasNewHashMPG reports whether entries contains a current-hash MPG entry.
+func hasNewHashMPG(entries []grovecorev1alpha1.PodGangEntry) bool {
 	for _, e := range entries {
-		if e.PodCliqueSetGenerationHash == testHash && e.IsEpochAnchor {
+		if e.PodCliqueSetGenerationHash == testHash && e.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
 			return true
 		}
 	}
@@ -827,7 +843,7 @@ func coherentSnapshot(pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1
 }
 
 // plannerForReplicasMinAvail builds a subStepPlanner directly with the given step-plan inputs,
-// computing numAnchorBearingSteps/anchorBearingStepTarget/leftover the same way newSubStepPlanner
+// computing numMPGBearingSteps/mpgBearingStepTarget/leftover the same way newSubStepPlanner
 // does. It avoids constructing a syncSnapshot for the pure planner tests. The mvu starts PCSG-only;
 // tests that need standalone components set planner.mvu.standalonePCLQs afterward.
 func plannerForReplicasMinAvail(t *testing.T, replicas, minAvailable, maxUnavailable map[string]int32) *subStepPlanner {
@@ -859,15 +875,15 @@ func plannerForReplicasMinAvail(t *testing.T, replicas, minAvailable, maxUnavail
 		WithStatusCurrentGenerationHash(ptr.To(testHash)).Build()
 
 	return &subStepPlanner{
-		pcs:                     pcs,
-		mvu:                     mvu,
-		pcsReplicaIndex:         0,
-		clk:                     clocktesting.NewFakeClock(time.Unix(0, 1000)),
-		replicas:                replicas,
-		minAvailable:            minAvailable,
-		maxUnavailable:          maxUnavailable,
-		numAnchorBearingSteps:   numSteps,
-		anchorBearingStepTarget: target,
-		leftover:                leftover,
+		pcs:                  pcs,
+		mvu:                  mvu,
+		pcsReplicaIndex:      0,
+		clk:                  clocktesting.NewFakeClock(time.Unix(0, 1000)),
+		replicas:             replicas,
+		minAvailable:         minAvailable,
+		maxUnavailable:       maxUnavailable,
+		numMPGBearingSteps:   numSteps,
+		mpgBearingStepTarget: target,
+		leftover:             leftover,
 	}
 }

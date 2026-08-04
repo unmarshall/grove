@@ -266,7 +266,7 @@ func TestReconcileEntriesWhenPGMEmpty(t *testing.T) {
 			podGangs: []groveschedulerv1alpha1.PodGang{*testutils.NewPodGangBuilder("my-pcs-0", testNamespace).WithPodGroup("my-pcs-0-frontend", 2).Build()},
 			assert: func(t *testing.T, pgm *grovecorev1alpha1.PodGangMap) {
 				require.Len(t, pgm.Spec.Entries, 1)
-				assert.True(t, pgm.Spec.Entries[0].IsEpochAnchor)
+				assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, pgm.Spec.Entries[0].Role)
 			},
 		},
 	}
@@ -287,7 +287,7 @@ func TestReconcileSteadyStateEntries(t *testing.T) {
 	pclq := standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2})
 	pcsg := prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}})
 	existingPGM := testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithEpochAnchor(true).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 	cl := newFakeClient(pcs, pclq, pcsg, existingPGM)
 	r := newResource(cl)
 	snap := snapshotFor(pcs,
@@ -306,7 +306,7 @@ func TestReconcileCoherentUpdateEntries(t *testing.T) {
 	pclq := standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2})
 	pcsg := prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}})
 	pgm := testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", "old-hash", "e0").WithEpochAnchor(true).
+		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", "old-hash", "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"frontend": 2}).WithPCSGReplicaIndices(map[string][]int32{"prefill": {0}}).Build()).Build()
 	cl := newFakeClient(pcs, pclq, pcsg, pgm)
 	r := newResource(cl)
@@ -354,8 +354,8 @@ func TestDeleteOrphanedPodGangMaps(t *testing.T) {
 }
 
 func TestNewPodGangEntry(t *testing.T) {
-	entry := newPodGangEntry(testPCSName, 0, "sfx", testHash, "epoch-1", []string{"dep"})
-	assert.Equal(t, "my-pcs-0-sfx", entry.Name)
+	entry := newPodGangEntry(apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}, "epoch-1", testHash, []string{"dep"})
+	assert.Equal(t, "my-pcs-0-epoch-1", entry.Name)
 	assert.Equal(t, testHash, entry.PodCliqueSetGenerationHash)
 	assert.Equal(t, "epoch-1", entry.Labels[apicommon.LabelEpoch])
 	assert.Equal(t, []string{"dep"}, entry.DependsOn)
@@ -393,7 +393,7 @@ func TestRunSyncFlow(t *testing.T) {
 			assert: func(t *testing.T, cl client.Client) {
 				pgm := getPGM(t, cl, 0)
 				require.Len(t, pgm.Spec.Entries, 1)
-				assert.True(t, pgm.Spec.Entries[0].IsEpochAnchor)
+				assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, pgm.Spec.Entries[0].Role)
 			},
 		},
 		{
@@ -403,7 +403,7 @@ func TestRunSyncFlow(t *testing.T) {
 				standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2}),
 				prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}}),
 				testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-					WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithEpochAnchor(true).Build()).Build(),
+					WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build(),
 			},
 			assert: func(t *testing.T, cl client.Client) {
 				pgm := getPGM(t, cl, 0)
@@ -492,7 +492,7 @@ func prefillPCSGWithMapping(pcsReplicaIndex int, mapping map[string][]int32) *gr
 // pgmWithEpochEntry builds a PodGangMap for the given replica carrying a single entry at the given epoch.
 func pgmWithEpochEntry(replicaIndex int, epoch string) *grovecorev1alpha1.PodGangMap {
 	return testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, replicaIndex).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, epoch).WithEpochAnchor(true).
+		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"frontend": 1}).Build()).Build()
 }
 

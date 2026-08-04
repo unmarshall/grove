@@ -28,20 +28,19 @@ import (
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // prepareSyncFlow computes the required state for synchronizing PodGang resources.
@@ -169,45 +168,48 @@ func (r _resource) getExistingPCSGsForPCS(ctx context.Context, pcs *grovecorev1a
 // computeExpectedPodGangs computes expected PodGangs by reading the PodGangMap for each PCS replica.
 // PodGangMap is the single source of truth for PodGang composition in all cases.
 func (r _resource) computeExpectedPodGangs(ctx context.Context, sc *syncContext) error {
-	for replicaIndex := range int(sc.pcs.Spec.Replicas) {
-		pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: replicaIndex})
+	for pcsReplicaIndex := range int(sc.pcs.Spec.Replicas) {
+		pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex})
 		pgm, err := componentutils.GetPodGangMap(ctx, r.client, pgmName, sc.pcs.Namespace)
 		if err != nil {
 			return err
 		}
 		for _, entry := range pgm.Spec.Entries {
-			pgi, err := r.buildPodGangInfoFromEntry(sc, replicaIndex, entry)
+			pgInfos, err := r.buildPodGangInfosFromEntry(sc, pcsReplicaIndex, entry)
 			if err != nil {
 				return fmt.Errorf("failed to build PodGang info from entry %q in PodGangMap %s: %w", entry.Name, pgmName, err)
 			}
-			sc.expectedPodGangs = append(sc.expectedPodGangs, pgi)
+			sc.expectedPodGangs = append(sc.expectedPodGangs, pgInfos...)
 		}
 	}
 	return nil
 }
 
-// buildPodGangInfoFromEntry translates a PodGangEntry into a podGangInfo.
-// The entry's PCSGReplicaIndices give the PCSG replica indices owned by this PodGang
-// directly; no positional accumulator across entries is needed.
-func (r _resource) buildPodGangInfoFromEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) (*podGangInfo, error) {
-	pg := &podGangInfo{fqn: pgEntry.Name, pcsReplicaIndex: pcsReplicaIndex, extraLabels: pgEntry.Labels}
-
-	pg.pclqs = buildStandalonePCLQInfos(sc, pcsReplicaIndex, pgEntry)
-	pcsgPCLQs, pcsgConstraints, err := buildPCLQInfosAndTopologyConstraintsForPCSGs(sc, pcsReplicaIndex, pgEntry)
-	if err != nil {
-		return nil, err
+// buildPodGangInfosFromEntry translates a PodGangMap entry into the PodGangs it materializes into.
+// An Anchor entry (the MPG) yields one PodGang named entry.Name. It carries the standalone
+// PodCliques and the PCSG replica indices the entry holds.
+// A non-anchor entry (Tail or ScaleOut) yields one PodGang per (PCSG, index) in
+// entry.PCSGReplicaIndices. It carries no standalone PodCliques.
+func (r _resource) buildPodGangInfosFromEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]*podGangInfo, error) {
+	if pgEntry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+		pg := &podGangInfo{fqn: pgEntry.Name, pcsReplicaIndex: pcsReplicaIndex, extraLabels: pgEntry.Labels}
+		pg.pclqs = buildStandalonePCLQInfosFromMPGEntry(sc, pcsReplicaIndex, pgEntry)
+		pcsgPCLQInfos, pcsgTopoConstraints, err := buildPCSGPCLQInfosAndTopoConstraintsFromMPGEntry(sc, pcsReplicaIndex, pgEntry)
+		if err != nil {
+			return nil, err
+		}
+		pg.pclqs = append(pg.pclqs, pcsgPCLQInfos...)
+		pg.pcsgTopologyConstraints = pcsgTopoConstraints
+		pg.topologyConstraint = createPodGangTopologyPackConstraint(sc, client.ObjectKeyFromObject(sc.pcs), sc.pcs.Spec.Template.TopologyConstraint)
+		return []*podGangInfo{pg}, nil
 	}
-	pg.pclqs = append(pg.pclqs, pcsgPCLQs...)
-	pg.pcsgTopologyConstraints = pcsgConstraints
-	pg.topologyConstraint = createTopologyPackConstraint(sc, client.ObjectKeyFromObject(sc.pcs), sc.pcs.Spec.Template.TopologyConstraint)
-
-	return pg, nil
+	return r.buildTPGPodGangInfos(sc, pcsReplicaIndex, pgEntry)
 }
 
-// buildStandalonePCLQInfos builds pclqInfo entries for standalone PodCliques referenced in the entry.
+// buildStandalonePCLQInfosFromMPGEntry builds pclqInfo entries for standalone PodCliques referenced in the entry.
 // Iterates template cliques in order to keep the result deterministic.
-func buildStandalonePCLQInfos(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) []pclqInfo {
-	var pclqs []pclqInfo
+func buildStandalonePCLQInfosFromMPGEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) []pclqInfo {
+	pclqInfos := make([]pclqInfo, 0, len(sc.pcs.Spec.Template.Cliques))
 	for _, cliqueTemplate := range sc.pcs.Spec.Template.Cliques {
 		pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex}, cliqueTemplate.Name)
 		desiredPCLQReplicas, ok := pgEntry.PodCliques[cliqueTemplate.Name]
@@ -220,87 +222,153 @@ func buildStandalonePCLQInfos(sc *syncContext, pcsReplicaIndex int, pgEntry grov
 			minAvailable: *cliqueTemplate.Spec.MinAvailable,
 			isStandalone: true,
 		}
-		pi.topologyConstraint = createTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pclqFQN}, cliqueTemplate.TopologyConstraint)
-		pclqs = append(pclqs, pi)
+		pi.topologyConstraint = createPodGangTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pclqFQN}, cliqueTemplate.TopologyConstraint)
+		pclqInfos = append(pclqInfos, pi)
 	}
-	return pclqs
+	return pclqInfos
 }
 
-// buildPCLQInfosAndTopologyConstraintsForPCSGs builds pclqInfo entries and TopologyConstraintGroupConfigs for
-// PCSG-owned PodCliques referenced in the entry. Iterates template PCSG configs in order to keep the result deterministic.
-func buildPCLQInfosAndTopologyConstraintsForPCSGs(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]pclqInfo, []groveschedulerv1alpha1.TopologyConstraintGroupConfig, error) {
+// buildPCSGPCLQInfosAndTopoConstraintsFromMPGEntry builds the pclqInfo entries and topology constraints for all PCSG
+// replica indices the MPG entry carries. The MPG is a single PodGang, so results are flattened.
+// Iterates template PCSG configs in order to keep the result deterministic.
+func buildPCSGPCLQInfosAndTopoConstraintsFromMPGEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]pclqInfo, []groveschedulerv1alpha1.TopologyConstraintGroupConfig, error) {
 	var (
-		pclqs           []pclqInfo
-		pcsgConstraints []groveschedulerv1alpha1.TopologyConstraintGroupConfig
+		pclqInfos       []pclqInfo
+		topoConstraints []groveschedulerv1alpha1.TopologyConstraintGroupConfig
 	)
 	for _, pcsgConfig := range sc.pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-		pcsgFQN := apicommon.GeneratePodCliqueScalingGroupName(apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex}, pcsgConfig.Name)
-		replicaIndices, ok := pgEntry.PCSGReplicaIndices[pcsgConfig.Name]
-		if !ok || len(replicaIndices) == 0 {
+		pcsgReplicaIndices, ok := pgEntry.PCSGReplicaIndices[pcsgConfig.Name]
+		if !ok || len(pcsgReplicaIndices) == 0 {
 			continue
 		}
-		for _, replicaIdx := range replicaIndices {
-			pclqFQNs := make([]string, 0, len(pcsgConfig.CliqueNames))
-			for _, cliqueName := range pcsgConfig.CliqueNames {
-				pclqTemplateSpec := componentutils.FindPodCliqueTemplateSpecByName(sc.pcs, cliqueName)
-				if pclqTemplateSpec == nil {
-					return nil, nil, fmt.Errorf("PCSG %q references clique %q that does not exist in PodCliqueSet %v", pcsgFQN, cliqueName, client.ObjectKeyFromObject(sc.pcs))
-				}
-				pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcsgFQN, Replica: int(replicaIdx)}, cliqueName)
-				pi := pclqInfo{
-					fqn:          pclqFQN,
-					replicas:     pclqTemplateSpec.Spec.Replicas,
-					minAvailable: *pclqTemplateSpec.Spec.MinAvailable,
-					isStandalone: false,
-				}
-				pi.topologyConstraint = createTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pclqFQN}, pclqTemplateSpec.TopologyConstraint)
-				pclqs = append(pclqs, pi)
-				pclqFQNs = append(pclqFQNs, pclqFQN)
+		for _, pcsgReplicaIndex := range pcsgReplicaIndices {
+			replicaPCLQs, topoConstraint, err := buildPCLQInfosAndTopoConstraintsForPCSGReplica(sc, pcsReplicaIndex, pcsgConfig, pcsgReplicaIndex)
+			if err != nil {
+				return nil, nil, err
 			}
-			pcsgTopologyConstraint := createTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pcsgFQN}, pcsgConfig.TopologyConstraint)
-			if pcsgTopologyConstraint != nil {
-				pcsgConstraints = append(pcsgConstraints, groveschedulerv1alpha1.TopologyConstraintGroupConfig{
-					Name:               fmt.Sprintf("%s-%d", pcsgFQN, replicaIdx),
-					PodGroupNames:      pclqFQNs,
-					TopologyConstraint: pcsgTopologyConstraint,
-				})
+			pclqInfos = append(pclqInfos, replicaPCLQs...)
+			if topoConstraint != nil {
+				topoConstraints = append(topoConstraints, *topoConstraint)
 			}
 		}
 	}
-	return pclqs, pcsgConstraints, nil
+	return pclqInfos, topoConstraints, nil
 }
 
-// createTopologyPackConstraint creates a TopologyPackConstraint based on the sync context and provided parameters for a resource.
-// PackConstraints are defined at multiple levels (PodCliqueSet, PodCliqueScalingGroup, PodClique). This function helps create a TopologyPackConstraint for any of these levels.
-func createTopologyPackConstraint(sc *syncContext, nsName types.NamespacedName, topologyConstraint *grovecorev1alpha1.TopologyConstraint) *groveschedulerv1alpha1.TopologyConstraint {
+// buildTPGPodGangInfos expands a TPG entry into one podGangInfo per (PCSG, index).
+// It iterates template PCSG configs in order for deterministic output.
+func (r _resource) buildTPGPodGangInfos(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]*podGangInfo, error) {
+	var pgInfos []*podGangInfo
+	for _, pcsgConfig := range sc.pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		pcsgReplicaIndices, ok := pgEntry.PCSGReplicaIndices[pcsgConfig.Name]
+		if !ok || len(pcsgReplicaIndices) == 0 {
+			continue
+		}
+		for _, pcsgReplicaIndex := range pcsgReplicaIndices {
+			pclqs, constraint, err := buildPCLQInfosAndTopoConstraintsForPCSGReplica(sc, pcsReplicaIndex, pcsgConfig, pcsgReplicaIndex)
+			if err != nil {
+				return nil, err
+			}
+			pg := &podGangInfo{
+				fqn:                apicommon.GenerateNonAnchorPodGangName(pgEntry.Name, pcsgConfig.Name, pcsgReplicaIndex),
+				pcsReplicaIndex:    pcsReplicaIndex,
+				extraLabels:        pgEntry.Labels,
+				pclqs:              pclqs,
+				topologyConstraint: createPodGangTopologyPackConstraint(sc, client.ObjectKeyFromObject(sc.pcs), sc.pcs.Spec.Template.TopologyConstraint),
+			}
+			if constraint != nil {
+				pg.pcsgTopologyConstraints = []groveschedulerv1alpha1.TopologyConstraintGroupConfig{*constraint}
+			}
+			pgInfos = append(pgInfos, pg)
+		}
+	}
+	return pgInfos, nil
+}
+
+// buildPCLQInfosAndTopoConstraintsForPCSGReplica builds the pclqInfo entries and optional topology
+// constraint for a single PodCliqueScalingGroup replica. It creates one pclqInfo per constituent
+// clique of the PCSG at the given replica index. The topology constraint is non-nil only when the
+// PCSG declares one and topology-aware scheduling is enabled. Returns an error when the PCSG
+// references a clique that does not exist in the PodCliqueSet.
+func buildPCLQInfosAndTopoConstraintsForPCSGReplica(sc *syncContext, pcsReplicaIndex int, pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig, pcsgReplicaIndex int32) ([]pclqInfo, *groveschedulerv1alpha1.TopologyConstraintGroupConfig, error) {
+	pcsgFQN := apicommon.GeneratePodCliqueScalingGroupName(apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex}, pcsgConfig.Name)
+	pclqFQNs := make([]string, 0, len(pcsgConfig.CliqueNames))
+	pclqs := make([]pclqInfo, 0, len(pcsgConfig.CliqueNames))
+	for _, cliqueName := range pcsgConfig.CliqueNames {
+		pclqTemplateSpec := componentutils.FindPodCliqueTemplateSpecByName(sc.pcs, cliqueName)
+		if pclqTemplateSpec == nil {
+			return nil, nil, fmt.Errorf("PCSG %q references clique %q that does not exist in PodCliqueSet %v", pcsgFQN, cliqueName, client.ObjectKeyFromObject(sc.pcs))
+		}
+		pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcsgFQN, Replica: int(pcsgReplicaIndex)}, cliqueName)
+		pi := pclqInfo{
+			fqn:          pclqFQN,
+			replicas:     pclqTemplateSpec.Spec.Replicas,
+			minAvailable: *pclqTemplateSpec.Spec.MinAvailable,
+			isStandalone: false,
+		}
+		pi.topologyConstraint = createPodGangTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pclqFQN}, pclqTemplateSpec.TopologyConstraint)
+		pclqs = append(pclqs, pi)
+		pclqFQNs = append(pclqFQNs, pclqFQN)
+	}
+
+	var topoConstraintGroupConfig *groveschedulerv1alpha1.TopologyConstraintGroupConfig
+	pcsgTopologyConstraint := createPodGangTopologyPackConstraint(sc, types.NamespacedName{Namespace: sc.pcs.Namespace, Name: pcsgFQN}, pcsgConfig.TopologyConstraint)
+	if pcsgTopologyConstraint != nil {
+		topoConstraintGroupConfig = &groveschedulerv1alpha1.TopologyConstraintGroupConfig{
+			Name:               fmt.Sprintf("%s-%d", pcsgFQN, pcsgReplicaIndex),
+			PodGroupNames:      pclqFQNs,
+			TopologyConstraint: pcsgTopologyConstraint,
+		}
+	}
+	return pclqs, topoConstraintGroupConfig, nil
+}
+
+// createPodGangTopologyPackConstraint creates a [groveschedulerv1alpha1.TopologyPackConstraint]
+// PackConstraints are defined at multiple levels (PodCliqueSet, PodCliqueScalingGroup, PodClique). This function helps
+// create a TopologyPackConstraint for any of these levels.
+func createPodGangTopologyPackConstraint(sc *syncContext, nsName types.NamespacedName, topologyConstraint *grovecorev1alpha1.TopologyConstraint) *groveschedulerv1alpha1.TopologyConstraint {
 	// If Topology aware scheduling is disabled, return nil even if TopologyConstraint is specified.
 	if !sc.tasEnabled || topologyConstraint == nil {
 		return nil
 	}
 
-	pgPackConstraint := &groveschedulerv1alpha1.TopologyPackConstraint{}
-	pgPackConstraint.Required = topologyLevelKeyForPackDomain(sc, nsName, topologyConstraint, topologyConstraint.RequiredDomain(), "required")
-	pgPackConstraint.Preferred = topologyLevelKeyForPackDomain(sc, nsName, topologyConstraint, topologyConstraint.PreferredDomain(), "preferred")
+	var (
+		requiredPackConstraint  *string
+		preferredPackConstraint *string
+		logger                  = sc.logger.WithValues("namespace", nsName.Namespace, "name", nsName.Name, "topologyConstraint", *topologyConstraint)
+	)
 
-	if pgPackConstraint.Required == nil && pgPackConstraint.Preferred == nil {
-		return nil
+	// set the required pack constraint if configured
+	if topologyConstraint.RequiredDomain() != "" {
+		topologyLevel, found := lo.Find(sc.topologyLevels, func(topologyLevel grovecorev1alpha1.TopologyLevel) bool {
+			return topologyLevel.Domain == topologyConstraint.RequiredDomain()
+		})
+		if !found {
+			logger.Info("required topology domain not found in cluster topology levels, skipping setting it")
+		} else {
+			requiredPackConstraint = &topologyLevel.Key
+		}
 	}
-	return &groveschedulerv1alpha1.TopologyConstraint{PackConstraint: pgPackConstraint}
-}
 
-func topologyLevelKeyForPackDomain(sc *syncContext, nsName types.NamespacedName, topologyConstraint *grovecorev1alpha1.TopologyConstraint, topologyDomain grovecorev1alpha1.TopologyDomain, packConstraintType string) *string {
-	if topologyDomain == "" {
+	if topologyConstraint.PreferredDomain() != "" {
+		topologyLevel, found := lo.Find(sc.topologyLevels, func(topologyLevel grovecorev1alpha1.TopologyLevel) bool {
+			return topologyLevel.Domain == topologyConstraint.PreferredDomain()
+		})
+		if !found {
+			logger.Info("preferred topology domain not found in cluster topology levels, skipping setting it")
+		} else {
+			preferredPackConstraint = &topologyLevel.Key
+		}
+	}
+
+	if requiredPackConstraint == nil && preferredPackConstraint == nil {
 		return nil
 	}
-	topologyLevel, found := lo.Find(sc.topologyLevels, func(topologyLevel grovecorev1alpha1.TopologyLevel) bool {
-		return topologyLevel.Domain == topologyDomain
-	})
-	if !found {
-		// This can happen if the ClusterTopologyBinding CR has changed after the resource was admitted.
-		sc.logger.Info(packConstraintType+" topology domain not found in cluster topology levels, skipping setting "+packConstraintType+" pack constraint", "namespacedName", nsName, "topologyDomain", topologyDomain, "topologyConstraint", *topologyConstraint)
-		return nil
-	}
-	return ptr.To(topologyLevel.Key)
+	return &groveschedulerv1alpha1.TopologyConstraint{
+		PackConstraint: &groveschedulerv1alpha1.TopologyPackConstraint{
+			Required:  requiredPackConstraint,
+			Preferred: preferredPackConstraint,
+		}}
 }
 
 // getExistingPodsByPCLQForPCS fetches all non-terminating pods grouped by PodClique.
@@ -710,7 +778,6 @@ func (r _resource) patchPodGangCondition(ctx context.Context, sc *syncContext, p
 // fallback because lazy mutation of syncContext would race the moment the struct is shared
 // across goroutines.
 type syncContext struct {
-	//ctx                  context.Context
 	pcs                    *grovecorev1alpha1.PodCliqueSet
 	logger                 logr.Logger
 	expectedPodGangs       []*podGangInfo

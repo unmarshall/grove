@@ -16,6 +16,7 @@ package common
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -87,21 +88,66 @@ func GeneratePodCliqueScalingGroupName(pcsNameReplica ResourceNameReplica, pclqS
 }
 
 // GenerateBasePodGangName generates a legacy base PodGang name (shape: `<pcs-name>-<pcs-replica-index>`)
-// for a PodCliqueSet replica. All existing PodCliqueSet resources that already have base PodGang with
-// this naming scheme will be preserved till they are updated via coherent update. For all new PodCliqueSet resources
-// this naming scheme will no longer be used.
-// Use GeneratePodGangName instead for all newly created PodGangs.
+// for a PodCliqueSet replica. It is a recognizer for PodGangs created before the hash-based naming
+// scheme. Migration converts these to the new scheme. New PodGangs use GenerateAnchorPodGangName.
 func GenerateBasePodGangName(pcsNameReplica ResourceNameReplica) string {
 	return fmt.Sprintf("%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica)
 }
 
 // CreatePodGangNameFromPCSGFQN generates a legacy scaled PodGang name (shape: `<pcsg-fqn>-<index>`)
-// for each replica of PodCliqueScalingGroup above the minAvailable. All existing PodCliqueSet resources that
-// already have scaled PodGangs with this naming scheme will be preserved till they are updated via coherent update.
-// For all new PodCliqueSet resources this naming scheme to create scaled PodGangs will no longer be used.
-// Use GeneratePodGangName instead for all newly created PodGangs.
+// for each replica of PodCliqueScalingGroup above the minAvailable. It is a recognizer for PodGangs
+// created before the hash-based naming scheme. Migration converts these to the new scheme. New
+// PodGangs use GenerateNonAnchorPodGangName.
 func CreatePodGangNameFromPCSGFQN(pcsgFQN string, scaledPodGangIndex int) string {
 	return fmt.Sprintf("%s-%d", pcsgFQN, scaledPodGangIndex)
+}
+
+// GenerateAnchorPodGangName generates the name of an anchor PodGang.
+// Format: <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<anchor-index>.
+// anchorIndex is 0 for the single anchor of a generation. A coherent update that creates additional
+// anchors of the same generation hash uses the next index. The PodGangMap writer authors the anchor
+// name once. Every other reconciler reads it and never recomputes it.
+func GenerateAnchorPodGangName(pcsNameReplica ResourceNameReplica, pcsGenerationHash string, anchorIndex int32) string {
+	return fmt.Sprintf("%s-%d-%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash, anchorIndex)
+}
+
+// GenerateNonAnchorPodGangName generates the name of a non-anchor PodGang.
+// Format: <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<pcsg-name>-<pcsg-replica-index>.
+// One non-anchor PodGang exists per PodCliqueScalingGroup replica index. The name is deterministic
+// and carries no epoch. The pcsgName segment keeps replica indices of different PodCliqueScalingGroups
+// from colliding. Each PodCliqueScalingGroup numbers its replicas from 0.
+func GenerateNonAnchorPodGangName(pcsNameReplica ResourceNameReplica, pcsGenerationHash, pcsgName string, pcsgReplicaIndex int32) string {
+	return fmt.Sprintf("%s-%d-%s-%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash, pcsgName, pcsgReplicaIndex)
+}
+
+// GeneratePodGangMapName generates a PodGangMap resource name for a PodCliqueSet replica.
+// One PodGangMap exists per PodCliqueSet replica, named <pcs-name>-<pcs-replica-index>.
+func GeneratePodGangMapName(pcsNameReplica ResourceNameReplica) string {
+	return fmt.Sprintf("%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica)
+}
+
+// ExtractPCSGNameAndIndexFromPodGangName parses a non-anchor PodGang name back into its
+// PodCliqueScalingGroup name and replica index. It is the inverse of GenerateNonAnchorPodGangName.
+// It builds the known <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>- prefix and strips it
+// first. The remainder is split on the last dash into the PodCliqueScalingGroup name and the integer
+// index. Stripping the known prefix first keeps the split correct even when the PodCliqueScalingGroup
+// name contains dashes. It returns an error when podGangName does not carry the prefix or the index
+// is not an integer.
+func ExtractPCSGNameAndIndexFromPodGangName(podGangName string, pcsNameReplica ResourceNameReplica, pcsGenerationHash string) (pcsgName string, index int32, err error) {
+	prefix := fmt.Sprintf("%s-%d-%s-", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash)
+	if !strings.HasPrefix(podGangName, prefix) {
+		return "", 0, fmt.Errorf("PodGang name %q does not carry the expected prefix %q", podGangName, prefix)
+	}
+	remainder := podGangName[len(prefix):]
+	lastDash := strings.LastIndex(remainder, "-")
+	if lastDash <= 0 || lastDash == len(remainder)-1 {
+		return "", 0, fmt.Errorf("PodGang name %q has no <pcsg-name>-<index> remainder after prefix %q", podGangName, prefix)
+	}
+	parsedIndex, err := strconv.Atoi(remainder[lastDash+1:])
+	if err != nil {
+		return "", 0, fmt.Errorf("trailing index of PodGang name %q is not an integer: %w", podGangName, err)
+	}
+	return remainder[:lastDash], int32(parsedIndex), nil
 }
 
 // ExtractScalingGroupNameFromPCSGFQN extracts the scaling group name from a PodCliqueScalingGroup FQN.
@@ -120,27 +166,4 @@ func ExtractScalingGroupNameFromPCSGFQN(pcsgFQN string, pcsNameReplica ResourceN
 func ExtractPodCliqueNameFromStandalonePCLQFQN(pclqFQN string, pcsNameReplica ResourceNameReplica) string {
 	prefix := fmt.Sprintf("%s-%d-", pcsNameReplica.Name, pcsNameReplica.Replica)
 	return pclqFQN[len(prefix):]
-}
-
-// GeneratePodGangName generates a PodGang name following the unified naming convention
-// for all PodGangs created for the PodCliqueSet.
-// Format: <pcs-name>-<pcs-replica-index>-<unique-suffix>
-//
-// `uniqueSuffix` is opaque to this function. The caller is responsible for ensuring that
-// every name produced for the same (pcsName, replicaIndex) is unique — both across
-// reconciles and within a single reconcile call when generating multiple names.
-//
-// This is the unified PodGang naming convention and applies to all update strategies
-// including Coherent and RollingRecreate, as well as initial deployment. Over time,
-// the legacy BasePodGang and ScaledPodGang naming conventions
-// (GenerateBasePodGangName, CreatePodGangNameFromPCSGFQN) will be retired in favor
-// of this scheme.
-func GeneratePodGangName(pcsName string, replicaIndex int, uniqueSuffix string) string {
-	return fmt.Sprintf("%s-%d-%s", pcsName, replicaIndex, uniqueSuffix)
-}
-
-// GeneratePodGangMapName generates a PodGangMap resource name for a PodCliqueSet replica.
-// One PodGangMap exists per PodCliqueSet replica, named <pcs-name>-<pcs-replica-index>.
-func GeneratePodGangMapName(pcsNameReplica ResourceNameReplica) string {
-	return fmt.Sprintf("%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica)
 }

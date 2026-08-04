@@ -37,26 +37,30 @@ import (
 )
 
 // buildBootstrapEntries emits the initial PodGangMap entries for a fresh PCS replica. It produces
-// one anchor entry (epoch E0, DependsOn nil) carrying every standalone PCLQ's full replica count
-// and every PCSG's MinAvailable replicas, plus one non-anchor entry per PCSG collecting that PCSG's
-// replicas above MinAvailable (epoch E1 > E0, DependsOn E0). Returns the anchor entry first, the
-// non-anchor entries after.
-func buildBootstrapEntries(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, clk clock.Clock) []grovecorev1alpha1.PodGangEntry {
-	hash := *pcs.Status.CurrentGenerationHash
+// one MPG entry (epoch E0, DependsOn nil) carrying every standalone PCLQ's full replica count
+// and every PCSG's MinAvailable replicas, plus one TPG entry aggregating, across all PCSGs, each
+// PCSG's replicas above MinAvailable (epoch E1 > E0, DependsOn E0). Returns the MPG entry first,
+// the TPG entry after.
+func buildBootstrapEntries(pcs *grovecorev1alpha1.PodCliqueSet, clk clock.Clock) []grovecorev1alpha1.PodGangEntry {
 	mpgEpoch := strconv.FormatInt(clk.Now().UnixNano(), 10)
 	tpgEpoch := strconv.FormatInt(clk.Now().UnixNano()+1, 10)
 
-	mpg := buildBootstrapMPG(pcs, pcsReplicaIndex, hash, mpgEpoch)
-	entries := []grovecorev1alpha1.PodGangEntry{mpg}
-	entries = append(entries, buildBootstrapTPGs(pcs, pcsReplicaIndex, hash, tpgEpoch, mpgEpoch)...)
+	entries := make([]grovecorev1alpha1.PodGangEntry, 0, 2)
+	entries = append(entries, buildBootstrapMPGEntry(pcs, mpgEpoch))
+	if tpgEntry, ok := buildBootstrapTPGEntry(pcs, tpgEpoch, mpgEpoch); ok {
+		entries = append(entries, tpgEntry)
+	}
+
 	return entries
 }
 
-// buildBootstrapMPG returns the anchor entry carrying every standalone PCLQ's full Replicas count
+// buildBootstrapMPGEntry returns the MPG entry carrying every standalone PCLQ's full Replicas count
 // and every PCSG's MinAvailable replicas (PCSG indices [0, MinAvailable)). DependsOn is nil.
-func buildBootstrapMPG(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, hash, epoch string) grovecorev1alpha1.PodGangEntry {
-	entry := newPodGangEntry(pcs.Name, pcsReplicaIndex, epoch, hash, epoch, nil)
-	entry.IsEpochAnchor = true
+func buildBootstrapMPGEntry(pcs *grovecorev1alpha1.PodCliqueSet, epoch string) grovecorev1alpha1.PodGangEntry {
+	entry := newPodGangEntry(epoch, *pcs.Status.CurrentGenerationHash, nil)
+	entry.Role = grovecorev1alpha1.PodGangEntryRoleAnchor
+	// entry.AnchorIndex is defaulted to 0. This is the correct index for MPG. During bootstrap there is only going
+	// to a single MPG. Skipping setting this explicitly.
 	entry.PodCliques = componentutils.GetStandalonePCLQReplicasFromPCSTemplateSpec(pcs)
 
 	pcsgMinAvailable := componentutils.GetPCSGMinAvailableFromPCSTemplateSpec(pcs)
@@ -71,34 +75,35 @@ func buildBootstrapMPG(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int,
 	return entry
 }
 
-// buildBootstrapTPGs returns one non-anchor entry per PCSG. Each entry collects that PCSG's replica
-// indices at or above MinAvailable into a single PodGangEntry, shares the non-anchor batch epoch,
-// and depends on mpgEpoch. Entries carry salted names so they stay distinct within the shared
-// epoch. The PodGang materializer expands each entry into one PodGang per index.
-func buildBootstrapTPGs(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, hash, epoch, mpgEpoch string) []grovecorev1alpha1.PodGangEntry {
-	pcsgReplicas := componentutils.GetPCSGReplicasFromPCSTemplateSpec(pcs)
-	pcsgMinAvailable := componentutils.GetPCSGMinAvailableFromPCSTemplateSpec(pcs)
-
-	var tpgs []grovecorev1alpha1.PodGangEntry
-	salt := 0
-	for name, total := range pcsgReplicas {
-		if total <= pcsgMinAvailable[name] {
+// buildBootstrapTPGEntry returns a single TPG entry for a fresh PCS replica.
+// A TPG entry corresponds to either a legacy scaled PodGang (SPG) or the tail PodGang (TPG).
+// The entry aggregates, across all PCSGs, each PCSG's replica indices above MinAvailable into a single
+// entry. All PCSGs and their indices share the same epoch value and depend on the same MPG epoch.
+// The PodGang materializer expands this entry into one PodGang (SPG/TPG) per (PCSG, index).
+func buildBootstrapTPGEntry(pcs *grovecorev1alpha1.PodCliqueSet, epoch, mpgEpoch string) (grovecorev1alpha1.PodGangEntry, bool) {
+	pcsgReplicaIndices := make(map[string][]int32)
+	for _, pcsgConfig := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		replicas := *pcsgConfig.Replicas
+		minAvailable := *pcsgConfig.MinAvailable
+		if replicas <= minAvailable {
 			continue
 		}
-		indices := lo.RangeFrom(pcsgMinAvailable[name], int(total-pcsgMinAvailable[name]))
-		entry := newPodGangEntry(pcs.Name, pcsReplicaIndex, fmt.Sprintf("%s-%d", epoch, salt), hash, epoch, []string{mpgEpoch})
-		entry.PCSGReplicaIndices = map[string][]int32{name: indices}
-		tpgs = append(tpgs, entry)
-		salt++
+		pcsgReplicaIndices[pcsgConfig.Name] = lo.RangeFrom(minAvailable, int(replicas-minAvailable))
 	}
-	return tpgs
+	if len(pcsgReplicaIndices) == 0 {
+		return grovecorev1alpha1.PodGangEntry{}, false
+	}
+	entry := newPodGangEntry(epoch, *pcs.Status.CurrentGenerationHash, []string{mpgEpoch})
+	entry.Role = grovecorev1alpha1.PodGangEntryRoleTail
+	entry.PCSGReplicaIndices = pcsgReplicaIndices
+	return entry, true
 }
 
 // buildEntriesFromPCLQAndPCSGStatuses rebuilds the steady-state PodGangMap entries from the
 // PodGangMapping status fields on the standalone PCLQs and PCSGs.
 // It returns an ErrCodeContinueReconcileAndRequeue error when at least one standalone PCLQ or PCSG
 // has not yet published its PodGangMapping status, signalling the caller to requeue rather than
-// persist a partial rebuild. For existing entries their epoch, DependsOn, and IsAnchor are
+// persist a partial rebuild. For existing entries their epoch, DependsOn, and Role are
 // preserved. For new entries (created as a result of scale-out of PCSGs) a new epoch is created and
 // its DependsOn is set to nil. Entries that end up with no PCLQ or PCSG content are dropped.
 func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
@@ -114,21 +119,21 @@ func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
 			fmt.Sprintf("cannot rebuild PodGangMap for replica %d or PodCliqueSet %v: PodGangMapping for one or more PCLQ/PCSG are not yet published", pcsReplicaIndex, client.ObjectKeyFromObject(pcs)))
 	}
 
-	// preserve epoch, DependsOn, and IsAnchor for the existing PGM entries keyed by PodGang name.
-	// For a new entry a fresh epoch, a nil DependsOn, and IsAnchor false will be set. These fields
+	// preserve epoch, DependsOn, and Role for the existing PGM entries keyed by PodGang name.
+	// For a new entry a fresh epoch, a nil DependsOn, and the Tail role will be set. These fields
 	// are decided when an entry is first created and must survive a rebuild from owner statuses, so
 	// they are preserved by PodGang name rather than recomputed.
 	type preservedEntryFields struct {
 		epoch     string
 		dependsOn []string
-		isAnchor  bool
+		role      grovecorev1alpha1.PodGangEntryRole
 	}
 	existingByPGName := make(map[string]preservedEntryFields, len(existingPGM.Spec.Entries))
 	for _, entry := range existingPGM.Spec.Entries {
 		existingByPGName[entry.Name] = preservedEntryFields{
 			epoch:     entry.Labels[apicommon.LabelEpoch],
 			dependsOn: entry.DependsOn,
-			isAnchor:  entry.IsEpochAnchor,
+			role:      entry.Role,
 		}
 	}
 
@@ -142,17 +147,17 @@ func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
 		var (
 			epoch     string
 			dependsOn []string
-			isAnchor  bool
+			role      = grovecorev1alpha1.PodGangEntryRoleTail
 		)
 		if preserved, isExisting := existingByPGName[pgName]; isExisting {
 			epoch = preserved.epoch
 			dependsOn = preserved.dependsOn
-			isAnchor = preserved.isAnchor
+			role = preserved.role
 		} else {
 			epoch = newEntryEpoch
 		}
 		entry := newPodGangEntryWithName(pgName, *pcs.Status.CurrentGenerationHash, epoch, dependsOn)
-		entry.IsEpochAnchor = isAnchor
+		entry.Role = role
 		entryByName[pgName] = &entry
 		return &entry
 	}
@@ -244,7 +249,7 @@ func removeEmptyEntries(entries []grovecorev1alpha1.PodGangEntry) []grovecorev1a
 // with DependsOn = &E0, so a gang-termination recreate keeps the BPG-first-then-SPG scheduling
 // order. The BPG is identified by the absence of the base-podgang label rather than by carrying
 // standalone PodClique pods, so a PCS whose cliques are all PCSG-owned (empty PodCliques on the
-// BPG) still gets exactly one anchor. Returns an error if a PodGang's PodGroup names cannot be
+// BPG) still gets exactly one MPG. Returns an error if a PodGang's PodGroup names cannot be
 // parsed.
 func reconstructEntriesFromExistingPodGangs(pcs *grovecorev1alpha1.PodCliqueSet, existingPGs []groveschedulerv1alpha1.PodGang, pcsReplicaIndex int, clk clock.Clock) ([]grovecorev1alpha1.PodGangEntry, error) {
 	var (
@@ -265,12 +270,13 @@ func reconstructEntriesFromExistingPodGangs(pcs *grovecorev1alpha1.PodCliqueSet,
 		}
 		if _, isSPG := existingPGs[i].Labels[apicommon.LabelBasePodGang]; isSPG {
 			// A scaled PodGang carries the base-podgang label pointing at its BPG. It depends on
-			// the BPG and is not an anchor.
+			// the BPG and is not the MPG.
+			pgEntry.Role = grovecorev1alpha1.PodGangEntryRoleTail
 			pgEntry.Labels = map[string]string{apicommon.LabelEpoch: spgEpoch}
 			pgEntry.DependsOn = []string{bpgEpoch}
 		} else {
-			// The base PodGang carries no base-podgang label. It is the anchor.
-			pgEntry.IsEpochAnchor = true
+			// The base PodGang carries no base-podgang label. It is the MPG.
+			pgEntry.Role = grovecorev1alpha1.PodGangEntryRoleAnchor
 			pgEntry.Labels = map[string]string{apicommon.LabelEpoch: bpgEpoch}
 		}
 		pgEntries = append(pgEntries, *pgEntry)
