@@ -17,13 +17,13 @@
 package podclique
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -36,26 +36,21 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// reconcilePCSGReplicaDistribution drives the desired-state-driven sync flow for the PodCliques
-// owned by a PodCliqueScalingGroup. It updates pcsg.Status.PodGangMapping to the desired
-// PodGang→PCSG-replica-indices mapping and then reconciles live PCLQs to match.
+// reconcilePCSGReplicaDistribution drives the desired-state sync for the PodCliques owned by a
+// PodCliqueScalingGroup. It updates pcsg.Status.PodGangMapping to the desired per-PodGang replica
+// assignments and then reconciles live PodCliques to match.
 //
 // Direction of authority:
-//   - Coherent update in progress: PodGangMap (PGM) drives. status.PodGangMapping is
-//     overwritten from PGM entries each reconcile.
-//   - Steady state: status.PodGangMapping drives. Spec.Replicas changes are translated into
-//     mapping mutations: scale-out generates a new PodGang entry (under the unified naming
-//     convention) per new replica, claiming a free index from [0, Spec.Replicas); scale-in
-//     walks two tiers (legacy SPGs first, then everything else) and pops indices until the
-//     deficit is absorbed.
+//   - Coherent update in progress: the PodGangMap drives. status.PodGangMapping is rebuilt from PGM
+//     entries each reconcile.
+//   - Steady state: status.PodGangMapping drives. A scale-out appends new ScaleOut assignments and a
+//     scale-in drains assignments by role.
 //
-// The index↔PodGang binding is now recorded explicitly in status, so applyPCSGPerPodGangDeltas
-// can recover desired PCLQ placement directly from the status mapping without scanning live
-// PCLQ labels.
+// Each assignment records its PodGang name, so applyPCSGPerPodGangDeltas recovers desired PodClique
+// placement directly from status without scanning live PodClique labels.
 func (r _resource) reconcilePCSGReplicaDistribution(logger logr.Logger, sc *syncContext) error {
 	desiredMapping, err := r.computeDesiredPCSGReplicaMapping(sc)
 	if err != nil {
@@ -67,112 +62,61 @@ func (r _resource) reconcilePCSGReplicaDistribution(logger logr.Logger, sc *sync
 	return r.applyPCSGPerPodGangDeltas(logger, sc, desiredMapping)
 }
 
-// computeDesiredPCSGReplicaMapping returns the desired PodGang→PCSG-replica-indices mapping.
+// computeDesiredPCSGReplicaMapping returns the desired per-PodGang replica assignments for this PCSG.
 //
-// During a coherent update PodGangMap is the authoritative source and the mapping is
-// rebuilt from PGM entries every reconcile. In steady state the existing status mapping
-// is the source of truth and is mutated only when Spec.Replicas drifts from sum-of-lengths.
-func (r _resource) computeDesiredPCSGReplicaMapping(sc *syncContext) (map[string][]int32, error) {
+// During a coherent update the PodGangMap is authoritative and the assignments are rebuilt from PGM
+// entries. In steady state the existing status assignments are the source of truth and are adjusted
+// only when Spec.Replicas drifts from the assigned replica count.
+func (r _resource) computeDesiredPCSGReplicaMapping(sc *syncContext) ([]grovecorev1alpha1.PodGangReplicaAssignment, error) {
 	if componentutils.IsCoherentUpdateInProgress(sc.pcs) {
 		return r.buildMappingFromPodGangMap(sc)
 	}
 
-	var desired map[string][]int32
+	var desired []grovecorev1alpha1.PodGangReplicaAssignment
 	if len(sc.pcsg.Status.PodGangMapping) == 0 {
-		// Fresh PCSG — seed from PGM (PGM was created by the PCS reconciler from spec).
+		// Fresh PCSG — seed from the PodGangMap (created by the PCS reconciler from spec).
 		seed, err := r.buildMappingFromPodGangMap(sc)
 		if err != nil {
 			return nil, err
 		}
 		desired = seed
 	} else {
-		desired = cloneIndexMapping(sc.pcsg.Status.PodGangMapping)
+		desired = cloneAssignments(sc.pcsg.Status.PodGangMapping)
 	}
 
 	pcsNameReplica := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
-
-	currentSum := sumIndexCount(desired)
+	currentSum := sumReplicaIndices(desired)
 	diff := sc.pcsg.Spec.Replicas - currentSum
 	switch {
 	case diff > 0:
-		// For each missing replica, claim the smallest free index in [0, Spec.Replicas) and
-		// generate a new PodGang name (under the unified naming convention) to hold it.
-		freeIndices := computeFreeIndices(desired, sc.pcsg.Spec.Replicas)
-		if int32(len(freeIndices)) < diff {
-			return nil, groveerr.New(errCodeUpdateStatus,
-				component.OperationSync,
-				fmt.Sprintf("not enough free PCSG replica indices to generate %d new entries for PodCliqueScalingGroup %v: free=%v",
-					diff, client.ObjectKeyFromObject(sc.pcsg), freeIndices))
+		// Scale-out appends the new replica indices [currentSum, Spec.Replicas) as ScaleOut PodGangs.
+		// The index set is contiguous, so a new replica takes the next index up. The non-anchor PodGang
+		// name is derived deterministically from the index.
+		pcsgName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(sc.pcsg.Name, pcsNameReplica)
+		if err != nil {
+			return nil, groveerr.WrapError(err, errCodeUpdateStatus, component.OperationSync,
+				fmt.Sprintf("failed to extract scaling group name from PodCliqueScalingGroup %v", client.ObjectKeyFromObject(sc.pcsg)))
 		}
-		newNames := generateScaledPodGangNames(int(diff), sc.pcs.Name, sc.pcsReplicaIndex, r.clk)
-		for i, name := range newNames {
-			desired[name] = []int32{freeIndices[i]}
+		for idx := currentSum; idx < sc.pcsg.Spec.Replicas; idx++ {
+			desired = append(desired, grovecorev1alpha1.PodGangReplicaAssignment{
+				PodGangName:    apicommon.GenerateNonAnchorPodGangName(pcsNameReplica, *sc.pcs.Status.CurrentGenerationHash, pcsgName, idx),
+				Role:           grovecorev1alpha1.PodGangEntryRoleScaleOut,
+				ReplicaIndices: []int32{idx},
+			})
 		}
 	case diff < 0:
-		legacySPGPrefix := sc.pcsg.Name + "-"
-		bpgName := apicommon.GenerateBasePodGangName(pcsNameReplica)
-		if err := decrementPCSGMappingForScaleIn(desired, int(-diff), legacySPGPrefix, bpgName); err != nil {
-			return nil, groveerr.WrapError(err,
-				errCodeUpdateStatus,
-				component.OperationSync,
-				fmt.Sprintf("cannot decrement PodGangMapping for scale-in on PodCliqueScalingGroup %v",
-					client.ObjectKeyFromObject(sc.pcsg)))
-		}
+		drainAssignmentsForScaleIn(desired, int(-diff))
 	}
-	// Drop entries with empty index slices so the index space stays compact.
-	// decrementPCSGMappingForScaleIn leaves entries empty rather than removing them.
-	for name, indices := range desired {
-		if len(indices) == 0 {
-			delete(desired, name)
-		}
-	}
-	return desired, nil
+	return dropEmptyAssignments(desired), nil
 }
 
-// cloneIndexMapping deep-clones the slice values of a PodGang→indices mapping so the caller
-// can mutate without aliasing the original (which is typically a status field).
-func cloneIndexMapping(in map[string][]int32) map[string][]int32 {
-	out := make(map[string][]int32, len(in))
-	for k, v := range in {
-		out[k] = slices.Clone(v)
-	}
-	return out
-}
-
-// sumIndexCount returns the total count of PCSG replicas across all PodGangs in the mapping.
-func sumIndexCount(mapping map[string][]int32) int32 {
-	var total int32
-	for _, indices := range mapping {
-		total += int32(len(indices))
-	}
-	return total
-}
-
-// computeFreeIndices returns indices in [0, specReplicas) that are not currently claimed by
-// any entry in `mapping`. Returned sorted ascending so the smallest free index is taken first.
-func computeFreeIndices(mapping map[string][]int32, specReplicas int32) []int32 {
-	taken := make(map[int32]struct{})
-	for _, indices := range mapping {
-		for _, idx := range indices {
-			taken[idx] = struct{}{}
-		}
-	}
-	free := make([]int32, 0, specReplicas)
-	for i := int32(0); i < specReplicas; i++ {
-		if _, ok := taken[i]; !ok {
-			free = append(free, i)
-		}
-	}
-	return free
-}
-
-// buildMappingFromPodGangMap constructs a PodGang name to PCSG-replica-indices mapping from the PCS
-// replica's PodGangMap (cached on sc.podGangMap). The key is the materialized PodGang name. An anchor
-// entry contributes one key, the anchor PodGang name, holding this PCSG's MinAvailable indices. A
-// non-anchor entry contributes one key per index, each a non-anchor PodGang name holding that single
-// index, since a non-anchor entry materializes into one PodGang per index. Entries that do not
-// reference this PCSG are skipped.
-func (r _resource) buildMappingFromPodGangMap(sc *syncContext) (map[string][]int32, error) {
+// buildMappingFromPodGangMap constructs the per-PodGang replica assignments for this PCSG from the PCS
+// replica's PodGangMap (cached on sc.podGangMap). Each assignment records a materialized PodGang name,
+// its role, and the PCSG replica indices it carries. An anchor entry contributes one assignment (the
+// anchor PodGang name) holding this PCSG's MinAvailable indices. A non-anchor entry contributes one
+// assignment per index, each a non-anchor PodGang name holding that single index, since a non-anchor
+// entry materializes into one PodGang per index. Entries that do not reference this PCSG are skipped.
+func (r _resource) buildMappingFromPodGangMap(sc *syncContext) ([]grovecorev1alpha1.PodGangReplicaAssignment, error) {
 	pcsgName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(sc.pcsg.Name, apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex})
 	if err != nil {
 		return nil, groveerr.WrapError(err,
@@ -182,173 +126,125 @@ func (r _resource) buildMappingFromPodGangMap(sc *syncContext) (map[string][]int
 		)
 	}
 	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
-	mapping := make(map[string][]int32, len(sc.podGangMap.Spec.Entries))
+	var assignments []grovecorev1alpha1.PodGangReplicaAssignment
 	for _, entry := range sc.podGangMap.Spec.Entries {
 		indices, ok := entry.PCSGReplicaIndices[pcsgName]
 		if !ok || len(indices) == 0 {
 			continue
 		}
 		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-			// get all minAvailable number of replica indices
 			clonedIndices := slices.Clone(indices)
 			slices.Sort(clonedIndices)
-			pgName := apicommon.GenerateAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, entry.AnchorIndex)
-			mapping[pgName] = clonedIndices
-		} else {
-			// for all non-anchor entries we uniformly create 1 PodGang name per index of the PCSG
-			for _, pcsgIndex := range indices {
-				pgName := apicommon.GenerateNonAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, pcsgName, pcsgIndex)
-				mapping[pgName] = []int32{pcsgIndex}
-			}
+			assignments = append(assignments, grovecorev1alpha1.PodGangReplicaAssignment{
+				PodGangName:    apicommon.GenerateAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, entry.AnchorIndex),
+				Role:           grovecorev1alpha1.PodGangEntryRoleAnchor,
+				AnchorIndex:    entry.AnchorIndex,
+				ReplicaIndices: clonedIndices,
+			})
+			continue
+		}
+		// A non-anchor entry materializes into one PodGang per index.
+		for _, pcsgIndex := range indices {
+			assignments = append(assignments, grovecorev1alpha1.PodGangReplicaAssignment{
+				PodGangName:    apicommon.GenerateNonAnchorPodGangName(rnr, entry.PodCliqueSetGenerationHash, pcsgName, pcsgIndex),
+				Role:           entry.Role,
+				ReplicaIndices: []int32{pcsgIndex},
+			})
 		}
 	}
-	return mapping, nil
+	return assignments, nil
 }
 
-// generateScaledPodGangNames generates `count` new PodGang names following the unified
-// PodGang naming convention <pcs>-<replica>-<unix-nano>. Names are made unique within this
-// call by adding an intra-call counter to the clock-derived nano, so all names share a
-// single base nano + (0..count-1) salt.
-func generateScaledPodGangNames(count int, pcsName string, pcsReplicaIndex int, clk clock.Clock) []string {
-	base := clk.Now().UnixNano()
-	names := make([]string, 0, count)
-	for i := range count {
-		suffix := strconv.FormatInt(base+int64(i), 10)
-		names = append(names, apicommon.GeneratePodGangName(pcsName, pcsReplicaIndex, suffix))
+// cloneAssignments deep-clones a slice of PodGangReplicaAssignment so the caller can mutate without
+// aliasing the original (which is typically a status field).
+func cloneAssignments(in []grovecorev1alpha1.PodGangReplicaAssignment) []grovecorev1alpha1.PodGangReplicaAssignment {
+	out := make([]grovecorev1alpha1.PodGangReplicaAssignment, len(in))
+	for i := range in {
+		in[i].DeepCopyInto(&out[i])
 	}
-	return names
+	return out
 }
 
-// decrementPCSGMappingForScaleIn pops `count` PCSG replica indices from the desired mapping.
-// BPG (the base PodGang in the legacy convention) is excluded from the walk entirely:
-// popping from it would breach the PCS-level MinAvailable invariant and cause gang termination
-// of the PCS replica. The webhook ensures Spec.Replicas - count >= MinAvailable, so the walk
-// has enough drainable replicas without touching BPG.
-//
-// Selection proceeds in two tiers (each tier popped highest-replica-index first within the
-// tier and entry):
-//   - Tier 1: Legacy SPG entries (pre-upgrade scaled PodGangs, name matching legacySPGPrefix).
-//     Each holds 1 replica. Sorted by trailing PG-name suffix descending.
-//   - Tier 2: Everything else not BPG-named (entries created under the unified naming
-//     convention — MPGs, TailPGs, and steady-state Scaled-PGs). Sorted by trailing PG-name
-//     suffix descending; multi-replica entries can absorb multiple steps (popping the
-//     highest replica index each time).
-//
-// Walking legacy SPGs ahead of unified-naming entries naturally compacts older state first
-// across a Grove-upgrade boundary, leaving newer entries in the mapping. Within tier 2,
-// descending-suffix order corresponds to most-recently-generated first; under the unified
-// naming convention this means steady-state Scaled-PGs (created during scale-out, after a
-// coherent update completes) are drained before MPGs/TailPGs (created during the coherent
-// update itself, with smaller nano suffixes).
-//
-// Empty entries (zero indices remaining) are left in the mapping and dropped by the caller.
-//
-// Returns an error if any entry name in the mapping fails to parse — Grove is the sole writer
-// of these names so an unparseable name is a contract violation, not a soft skip.
-func decrementPCSGMappingForScaleIn(desired map[string][]int32, count int, legacySPGPrefix, bpgName string) error {
-	if count <= 0 {
-		return nil
+// sumReplicaIndices returns the total count of PCSG replica indices across all assignments.
+func sumReplicaIndices(assignments []grovecorev1alpha1.PodGangReplicaAssignment) int32 {
+	var total int32
+	for i := range assignments {
+		total += int32(len(assignments[i].ReplicaIndices))
 	}
-	tierLegacySPG, tierUnified := partitionPodGangNamesByTier(desired, legacySPGPrefix, bpgName)
-	if err := sortDescByPodGangNameSuffix(tierLegacySPG); err != nil {
-		return fmt.Errorf("tier 1 (legacy SPG) entries in PCSG.Status.PodGangMapping have an unparseable name: %w", err)
+	return total
+}
+
+// drainAssignmentsForScaleIn removes count PCSG replica indices from the assignments for a scale-in.
+// It drains in role order: ScaleOut PodGangs first, then Tail, then Anchor from the highest
+// AnchorIndex down. The anchor with AnchorIndex 0 carries the PCS-level MinAvailable replicas and is
+// never drained. Within a chosen assignment the highest replica index is removed first. The webhook
+// guarantees Spec.Replicas - count >= MinAvailable, so the drainable assignments always hold enough
+// indices without touching the AnchorIndex 0 anchor. Emptied assignments are left in place and
+// removed by the caller. This sorts assignments in place; the order is irrelevant to callers.
+func drainAssignmentsForScaleIn(pgReplicaAssignments []grovecorev1alpha1.PodGangReplicaAssignment, count int) {
+	drainPriority := func(a grovecorev1alpha1.PodGangReplicaAssignment) int {
+		switch a.Role {
+		case grovecorev1alpha1.PodGangEntryRoleScaleOut:
+			return 0
+		case grovecorev1alpha1.PodGangEntryRoleTail:
+			return 1
+		default:
+			return 2
+		}
 	}
-	if err := sortDescByPodGangNameSuffix(tierUnified); err != nil {
-		return fmt.Errorf("tier 2 (unified-naming) entries in PCSG.Status.PodGangMapping have an unparseable name: %w", err)
-	}
+	// Order the assignments so a scale-in drains ScaleOut first, then Tail, then Anchor. Among
+	// anchors the highest AnchorIndex is drained first so the AnchorIndex 0 anchor is reached last.
+	sort.SliceStable(pgReplicaAssignments, func(i, j int) bool {
+		ip := drainPriority(pgReplicaAssignments[i])
+		jp := drainPriority(pgReplicaAssignments[j])
+		if ip != jp {
+			return ip < jp
+		}
+		if pgReplicaAssignments[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+			return pgReplicaAssignments[i].AnchorIndex > pgReplicaAssignments[j].AnchorIndex
+		}
+		return false
+	})
 
 	remaining := count
-	for _, name := range tierLegacySPG {
+	for i := range pgReplicaAssignments {
 		if remaining == 0 {
 			break
 		}
-		if popHighestIndex(desired, name) {
-			remaining--
-		}
-	}
-	for _, name := range tierUnified {
-		for len(desired[name]) > 0 && remaining > 0 {
-			popHighestIndex(desired, name)
-			remaining--
-		}
-		if remaining == 0 {
-			break
-		}
-	}
-	return nil
-}
-
-// popHighestIndex pops the largest replica index from the slice at desired[name]. Returns true
-// if a pop happened, false if the slice was empty. The slice is sorted in place to find the
-// highest index deterministically; the smaller indices are kept in sorted order.
-func popHighestIndex(desired map[string][]int32, name string) bool {
-	indices := desired[name]
-	if len(indices) == 0 {
-		return false
-	}
-	slices.Sort(indices)
-	desired[name] = indices[:len(indices)-1]
-	return true
-}
-
-// partitionPodGangNamesByTier splits the names in the mapping into two tiers for scale-in:
-//   - tierLegacySPG: legacy scaled PodGangs (names matching legacySPGPrefix). Each holds 1 replica.
-//   - tierUnified: everything else (entries created under the unified naming convention —
-//     MPGs, TailPGs, and steady-state Scaled-PGs). May hold one or more replicas per entry.
-//
-// bpgName is excluded from both tiers — BPG is the base PodGang carrying MinAvailable replicas
-// in the legacy convention and must never be popped during scale-in.
-func partitionPodGangNamesByTier(mapping map[string][]int32, legacySPGPrefix, bpgName string) (tierLegacySPG, tierUnified []string) {
-	for name := range mapping {
-		switch {
-		case name == bpgName:
+		a := &pgReplicaAssignments[i]
+		// Never drain the anchor carrying the MinAvailable replicas.
+		if a.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && a.AnchorIndex == 0 {
 			continue
-		case strings.HasPrefix(name, legacySPGPrefix):
-			tierLegacySPG = append(tierLegacySPG, name)
-		default:
-			tierUnified = append(tierUnified, name)
 		}
+		slices.Sort(a.ReplicaIndices)
+		take := min(remaining, len(a.ReplicaIndices))
+		a.ReplicaIndices = a.ReplicaIndices[:len(a.ReplicaIndices)-take]
+		remaining -= take
 	}
-	return
 }
 
-// sortDescByPodGangNameSuffix sorts PodGang names by their trailing integer suffix in
-// descending order. Returns an error if any name's suffix fails to parse — Grove is the
-// sole writer of these names so a parse failure indicates a contract violation, not a
-// soft skip.
-//
-// Under the unified PodGang naming convention, the suffix is the unix-nano timestamp at
-// which the name was generated, so descending suffix order corresponds to most-recently-
-// generated first. For legacy SPG names, the suffix is the per-replica counter and
-// descending order corresponds to highest-counter first.
-func sortDescByPodGangNameSuffix(names []string) error {
-	suffixes := make(map[string]int, len(names))
-	for _, name := range names {
-		suffix, err := utils.ExtractPodGangNameSuffix(name)
-		if err != nil {
-			return fmt.Errorf("PodGang entry name %q does not match the expected naming convention: %w", name, err)
-		}
-		suffixes[name] = suffix
-	}
-	sort.SliceStable(names, func(i, j int) bool {
-		return suffixes[names[i]] > suffixes[names[j]]
+// dropEmptyAssignments removes assignments whose ReplicaIndices are empty. These arise from a
+// scale-in that drained a PodGang's indices to zero.
+func dropEmptyAssignments(assignments []grovecorev1alpha1.PodGangReplicaAssignment) []grovecorev1alpha1.PodGangReplicaAssignment {
+	return slices.DeleteFunc(assignments, func(a grovecorev1alpha1.PodGangReplicaAssignment) bool {
+		return len(a.ReplicaIndices) == 0
 	})
-	return nil
 }
 
-// patchPCSGPodGangMapping persists the desired mapping to pcsg.Status.PodGangMapping if it
-// differs from the current value. The check avoids waking other reconcilers via a no-op watch
-// event. Empty maps are normalized to nil for status hygiene.
-func (r _resource) patchPCSGPodGangMapping(sc *syncContext, desired map[string][]int32) error {
-	if equalIndexMappings(sc.pcsg.Status.PodGangMapping, desired) {
+// patchPCSGPodGangMapping persists the desired assignments to pcsg.Status.PodGangMapping if they
+// differ from the current value. The desired assignments are canonicalized (sorted by PodGang name,
+// each ReplicaIndices sorted) so the stored order is deterministic and a plain equality check avoids
+// waking other reconcilers via a no-op patch. An empty desired is normalized to nil.
+func (r _resource) patchPCSGPodGangMapping(sc *syncContext, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
+	canonicalizeAssignments(desired)
+	if len(desired) == 0 {
+		desired = nil
+	}
+	if reflect.DeepEqual(sc.pcsg.Status.PodGangMapping, desired) {
 		return nil
 	}
 	patch := client.MergeFrom(sc.pcsg.DeepCopy())
-	if len(desired) == 0 {
-		sc.pcsg.Status.PodGangMapping = nil
-	} else {
-		sc.pcsg.Status.PodGangMapping = desired
-	}
+	sc.pcsg.Status.PodGangMapping = desired
 	if err := client.IgnoreNotFound(r.client.Status().Patch(sc.ctx, sc.pcsg, patch)); err != nil {
 		return groveerr.WrapError(err,
 			errCodeUpdateStatus,
@@ -359,27 +255,15 @@ func (r _resource) patchPCSGPodGangMapping(sc *syncContext, desired map[string][
 	return nil
 }
 
-// equalIndexMappings reports whether two PodGang→indices mappings have the same keys and
-// the same (set-wise, since slice order on status is not contractual) indices per key.
-// Used as a pre-patch no-op check to avoid spurious status updates.
-func equalIndexMappings(a, b map[string][]int32) bool {
-	if len(a) != len(b) {
-		return false
+// canonicalizeAssignments sorts assignments by PodGang name and sorts each assignment's ReplicaIndices
+// ascending, giving a deterministic stored order so equality checks and persisted status are stable.
+func canonicalizeAssignments(assignments []grovecorev1alpha1.PodGangReplicaAssignment) {
+	for i := range assignments {
+		slices.Sort(assignments[i].ReplicaIndices)
 	}
-	for k, av := range a {
-		bv, ok := b[k]
-		if !ok || len(av) != len(bv) {
-			return false
-		}
-		aSorted := slices.Clone(av)
-		bSorted := slices.Clone(bv)
-		slices.Sort(aSorted)
-		slices.Sort(bSorted)
-		if !slices.Equal(aSorted, bSorted) {
-			return false
-		}
-	}
-	return true
+	slices.SortFunc(assignments, func(a, b grovecorev1alpha1.PodGangReplicaAssignment) int {
+		return cmp.Compare(a.PodGangName, b.PodGangName)
+	})
 }
 
 // applyPCSGPerPodGangDeltas reconciles live PCLQs to the desired mapping. For each (pgName, indices)
@@ -390,11 +274,11 @@ func equalIndexMappings(a, b map[string][]int32) bool {
 // PCLQs whose live PodGang label disagrees with status are deleted; the next reconcile creates
 // them under the correct PodGang. Deletes go before creates so the controller does not race
 // with itself in creating PCLQs at indices currently held by a doomed PCLQ.
-func (r _resource) applyPCSGPerPodGangDeltas(logger logr.Logger, sc *syncContext, desired map[string][]int32) error {
+func (r _resource) applyPCSGPerPodGangDeltas(logger logr.Logger, sc *syncContext, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
 	desiredIndexToPG := make(map[int]string)
-	for pgName, indices := range desired {
-		for _, idx := range indices {
-			desiredIndexToPG[int(idx)] = pgName
+	for i := range desired {
+		for _, idx := range desired[i].ReplicaIndices {
+			desiredIndexToPG[int(idx)] = desired[i].PodGangName
 		}
 	}
 

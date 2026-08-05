@@ -107,13 +107,30 @@ type PodCliqueScalingGroupStatus struct {
 	CurrentPodCliqueSetGenerationHash *string `json:"currentPodCliqueSetGenerationHash,omitempty"`
 	// UpdateProgress provides details about the ongoing update of the PodCliqueScalingGroup.
 	UpdateProgress *PodCliqueScalingGroupUpdateProgress `json:"updateProgress,omitempty"`
-	// PodGangMapping captures the desired state of per-PodGang replica distribution.
-	// During an update, this is derived from PodGangMap resource as that is a single source of truth during updates.
-	// In steady state (post update) this field becomes a source of truth. Any scale-in and scale-out of the PodCliqueScalingGroup
-	// is reflected in the desired state. PodGangMap resource will be synced from the desired state as captured in this
-	// field during steady state.
-	// Key is the PodGang name; value is the list of PCSG replica indices associated to that PodGang.
-	PodGangMapping map[string][]int32 `json:"podGangMapping,omitempty"`
+	// PodGangMapping captures the desired association of each PodCliqueScalingGroup replica to a PodGang.
+	// During initial deployment and while an update is in flight, it is derived from the PodGangMap,
+	// the single source of truth in those phases. In steady state it becomes the source of truth:
+	// PodCliqueScalingGroup scale-in and scale-out are recorded here, and the PodGangMap is synced from it.
+	//
+	// Each entry maps a PodGang name to the PodCliqueScalingGroup replica indices it carries.
+	//   - The anchor PodGang holds the MinAvailable replica indices.
+	//   - Each replica above MinAvailable has its own PodGang.
+	// +listType=map
+	// +listMapKey=podGangName
+	PodGangMapping []PodGangReplicaAssignment `json:"podGangMapping,omitempty"`
+}
+
+// PodGangReplicaAssignment records the PodCliqueScalingGroup replica indices carried by one PodGang.
+type PodGangReplicaAssignment struct {
+	// PodGangName is the name of the PodGang that carries these PodCliqueScalingGroup replica indices.
+	PodGangName string `json:"podGangName"`
+	// Role classifies the PodGang as Anchor, Tail, or ScaleOut.
+	Role PodGangEntryRole `json:"role"`
+	// AnchorIndex is the index of the anchor PodGang. It is meaningful only when Role is Anchor.
+	// +optional
+	AnchorIndex int32 `json:"anchorIndex,omitempty"`
+	// ReplicaIndices are the PodCliqueScalingGroup replica indices carried by this PodGang.
+	ReplicaIndices []int32 `json:"replicaIndices"`
 }
 
 // PodCliqueScalingGroupUpdateProgress provides details about the ongoing update of the PodCliqueScalingGroup.
