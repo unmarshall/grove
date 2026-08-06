@@ -34,14 +34,13 @@ type PodGangEntryBuilder struct {
 	entry grovecorev1alpha1.PodGangEntry
 }
 
-// NewPodGangEntryBuilder creates a PodGangEntryBuilder for an entry with the given name, generation
-// hash, and grove.io/epoch label.
-func NewPodGangEntryBuilder(name, pcsGenerationHash, epoch string) *PodGangEntryBuilder {
+// NewPodGangEntryBuilder creates a PodGangEntryBuilder for an entry with the given generation hash
+// and epoch. Epoch is the entry's identity.
+func NewPodGangEntryBuilder(pcsGenerationHash, epoch string) *PodGangEntryBuilder {
 	return &PodGangEntryBuilder{
 		entry: grovecorev1alpha1.PodGangEntry{
-			Name:                       name,
+			Epoch:                      epoch,
 			PodCliqueSetGenerationHash: pcsGenerationHash,
-			Labels:                     map[string]string{apicommon.LabelEpoch: epoch},
 		},
 	}
 }

@@ -303,7 +303,7 @@ func TestMapPodGangMapToPCLQs(t *testing.T) {
 				metav1.ObjectMeta{Name: "my-pcs-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{pcsOwner}},
 				0,
 				[]grovecorev1alpha1.PodGangEntry{
-					{Name: "my-pcs-0", PodCliques: map[string]int32{"frontend": 2, "backend": 3}},
+					{PodCliques: map[string]int32{"frontend": 2, "backend": 3}},
 				},
 			),
 			wantFQNs: []string{"my-pcs-0-frontend", "my-pcs-0-backend"},
@@ -314,20 +314,19 @@ func TestMapPodGangMapToPCLQs(t *testing.T) {
 				metav1.ObjectMeta{Name: "my-pcs-1", Namespace: ns, OwnerReferences: []metav1.OwnerReference{pcsOwner}},
 				1,
 				[]grovecorev1alpha1.PodGangEntry{
-					{Name: "my-pcs-1", PodCliques: map[string]int32{"frontend": 2}},
-					{Name: "my-pcs-1-tail-0", PodCliques: map[string]int32{"frontend": 1}},
+					{PodCliques: map[string]int32{"frontend": 2}},
+					{PodCliques: map[string]int32{"frontend": 1}},
 				},
 			),
 			wantFQNs: []string{"my-pcs-1-frontend"},
 		},
 		{
-			name: "uses replica index from spec, not parsed from name",
-			// Name suffix says "0" but spec says replica 3 — assert FQNs use 3.
+			name: "uses replica index from spec",
 			obj: pgmWith(
 				metav1.ObjectMeta{Name: "my-pcs-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{pcsOwner}},
 				3,
 				[]grovecorev1alpha1.PodGangEntry{
-					{Name: "my-pcs-3", PodCliques: map[string]int32{"frontend": 2}},
+					{PodCliques: map[string]int32{"frontend": 2}},
 				},
 			),
 			wantFQNs: []string{"my-pcs-3-frontend"},
@@ -338,7 +337,7 @@ func TestMapPodGangMapToPCLQs(t *testing.T) {
 				metav1.ObjectMeta{Name: "my-pcs-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{pcsOwner}},
 				0,
 				[]grovecorev1alpha1.PodGangEntry{
-					{Name: "my-pcs-0", PCSGReplicaIndices: map[string][]int32{"prefill": {0}}},
+					{PCSGReplicaIndices: map[string][]int32{"prefill": {0}}},
 				},
 			),
 			wantFQNs: nil,
@@ -349,7 +348,7 @@ func TestMapPodGangMapToPCLQs(t *testing.T) {
 				metav1.ObjectMeta{Name: "my-pcs-0", Namespace: ns},
 				0,
 				[]grovecorev1alpha1.PodGangEntry{
-					{Name: "my-pcs-0", PodCliques: map[string]int32{"frontend": 2}},
+					{PodCliques: map[string]int32{"frontend": 2}},
 				},
 			),
 			wantFQNs: nil,

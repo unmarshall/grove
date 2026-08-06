@@ -198,10 +198,10 @@ func TestCheckAndAdvanceCoherentUpdate(t *testing.T) {
 	pgmWithEntries := func(entries ...grovecorev1alpha1.PodGangEntry) *grovecorev1alpha1.PodGangMap {
 		return testutils.NewPodGangMapBuilder(pcsName, ns, "uid", 0).WithEntries(entries...).Build()
 	}
-	// newHashMPGEntry builds a current-hash MPG entry for the given epoch. Its name matches the
+	// newHashMPGEntry builds a current-hash MPG entry for the given epoch, matching by epoch the
 	// PodGang podGangForEpoch creates for the same epoch.
 	newHashMPGEntry := func(epoch string) grovecorev1alpha1.PodGangEntry {
-		return testutils.NewPodGangEntryBuilder(podGangNameForEpoch(epoch), newHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+		return testutils.NewPodGangEntryBuilder(newHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"worker": 2}).Build()
 	}
 
@@ -224,7 +224,7 @@ func TestCheckAndAdvanceCoherentUpdate(t *testing.T) {
 		},
 		{
 			name:                  "PGM has no current-hash epoch requeues",
-			podGangMap:            pgmWithEntries(testutils.NewPodGangEntryBuilder("pg-old", "old-hash", "50").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()),
+			podGangMap:            pgmWithEntries(testutils.NewPodGangEntryBuilder("old-hash", "50").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()),
 			expectRequeue:         true,
 			expectMessageNonEmpty: true,
 		},

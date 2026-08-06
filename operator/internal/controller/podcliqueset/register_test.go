@@ -151,7 +151,7 @@ func TestPodCliqueSetPredicateUpdate(t *testing.T) {
 // re-run after a scale-out, leaving newly-created pods stranded in PodGangs whose pod-references
 // haven't been updated.
 func TestHasStatusChanged_PodGangMapping(t *testing.T) {
-	mkPCLQ := func(mapping map[string]int32) *grovecorev1alpha1.PodClique {
+	newPCLQWithPodGangMapping := func(mapping []grovecorev1alpha1.PodGangPodCountAssignment) *grovecorev1alpha1.PodClique {
 		return &grovecorev1alpha1.PodClique{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pclq", Namespace: "default"},
 			Status:     grovecorev1alpha1.PodCliqueStatus{PodGangMapping: mapping},
@@ -160,21 +160,21 @@ func TestHasStatusChanged_PodGangMapping(t *testing.T) {
 
 	tests := []struct {
 		name string
-		old  map[string]int32
-		new  map[string]int32
+		old  []grovecorev1alpha1.PodGangPodCountAssignment
+		new  []grovecorev1alpha1.PodGangPodCountAssignment
 		want bool
 	}{
-		{name: "identical mappings", old: map[string]int32{"pg-0": 1, "pg-1": 2}, new: map[string]int32{"pg-0": 1, "pg-1": 2}, want: false},
-		{name: "value changed", old: map[string]int32{"pg-0": 1, "pg-1": 2}, new: map[string]int32{"pg-0": 1, "pg-1": 3}, want: true},
-		{name: "entry added", old: map[string]int32{"pg-0": 1}, new: map[string]int32{"pg-0": 1, "pg-1": 2}, want: true},
-		{name: "entry removed", old: map[string]int32{"pg-0": 1, "pg-1": 2}, new: map[string]int32{"pg-0": 1}, want: true},
+		{name: "identical mappings", old: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 2}}, new: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 2}}, want: false},
+		{name: "value changed", old: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 2}}, new: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 3}}, want: true},
+		{name: "entry added", old: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}}, new: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 2}}, want: true},
+		{name: "entry removed", old: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}, {PodGangName: "pg-1", PodCount: 2}}, new: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}}, want: true},
 		{name: "both nil", old: nil, new: nil, want: false},
-		{name: "old nil, new set", old: nil, new: map[string]int32{"pg-0": 1}, want: true},
-		{name: "old set, new nil", old: map[string]int32{"pg-0": 1}, new: nil, want: true},
+		{name: "old nil, new set", old: nil, new: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}}, want: true},
+		{name: "old set, new nil", old: []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", PodCount: 1}}, new: nil, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hasStatusChanged(event.UpdateEvent{ObjectOld: mkPCLQ(tc.old), ObjectNew: mkPCLQ(tc.new)})
+			got := hasStatusChanged(event.UpdateEvent{ObjectOld: newPCLQWithPodGangMapping(tc.old), ObjectNew: newPCLQWithPodGangMapping(tc.new)})
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -288,7 +288,7 @@ func TestPodCliqueScalingGroupPredicateStatusChangesAffectingUpdatedAccounting(t
 // PCS reconcile when pcsg.Status.PodGangMapping changes. Same regression class as the PCLQ
 // predicate above but for PCSG-driven scale-out / coherent-update mapping changes.
 func TestPodCliqueScalingGroupPredicate_PodGangMapping(t *testing.T) {
-	mkPCSG := func(mapping map[string][]int32) *grovecorev1alpha1.PodCliqueScalingGroup {
+	newPCSGWithPodGangMapping := func(mapping []grovecorev1alpha1.PodGangReplicaAssignment) *grovecorev1alpha1.PodCliqueScalingGroup {
 		return &grovecorev1alpha1.PodCliqueScalingGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pcsg", Namespace: "default"},
 			Status:     grovecorev1alpha1.PodCliqueScalingGroupStatus{PodGangMapping: mapping},
@@ -300,21 +300,21 @@ func TestPodCliqueScalingGroupPredicate_PodGangMapping(t *testing.T) {
 
 	tests := []struct {
 		name string
-		old  map[string][]int32
-		new  map[string][]int32
+		old  []grovecorev1alpha1.PodGangReplicaAssignment
+		new  []grovecorev1alpha1.PodGangReplicaAssignment
 		want bool
 	}{
-		{name: "identical mappings", old: map[string][]int32{"pg-0": {0, 1}}, new: map[string][]int32{"pg-0": {0, 1}}, want: false},
-		{name: "indices changed", old: map[string][]int32{"pg-0": {0, 1}}, new: map[string][]int32{"pg-0": {0, 1, 2}}, want: true},
-		{name: "entry added", old: map[string][]int32{"pg-0": {0, 1}}, new: map[string][]int32{"pg-0": {0, 1}, "pg-1": {2}}, want: true},
-		{name: "entry removed", old: map[string][]int32{"pg-0": {0, 1}, "pg-1": {2}}, new: map[string][]int32{"pg-0": {0, 1}}, want: true},
+		{name: "identical mappings", old: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}}, new: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}}, want: false},
+		{name: "indices changed", old: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}}, new: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1, 2}}}, want: true},
+		{name: "entry added", old: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}}, new: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}, {Epoch: "e1", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{2}}}, want: true},
+		{name: "entry removed", old: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}, {Epoch: "e1", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{2}}}, new: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0, 1}}}, want: true},
 		{name: "both nil", old: nil, new: nil, want: false},
-		{name: "old nil, new set", old: nil, new: map[string][]int32{"pg-0": {0}}, want: true},
-		{name: "old set, new nil", old: map[string][]int32{"pg-0": {0}}, new: nil, want: true},
+		{name: "old nil, new set", old: nil, new: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0}}}, want: true},
+		{name: "old set, new nil", old: []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{0}}}, new: nil, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := funcs.UpdateFunc(event.UpdateEvent{ObjectOld: mkPCSG(tc.old), ObjectNew: mkPCSG(tc.new)})
+			got := funcs.UpdateFunc(event.UpdateEvent{ObjectOld: newPCSGWithPodGangMapping(tc.old), ObjectNew: newPCSGWithPodGangMapping(tc.new)})
 			assert.Equal(t, tc.want, got)
 		})
 	}

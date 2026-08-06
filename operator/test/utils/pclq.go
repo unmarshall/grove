@@ -119,7 +119,7 @@ func (b *PodCliqueBuilder) WithOwnerReference(kind, name string, uid types.UID) 
 }
 
 // WithPodGangMapping sets the Status.PodGangMapping for the PodClique.
-func (b *PodCliqueBuilder) WithPodGangMapping(mapping map[string]int32) *PodCliqueBuilder {
+func (b *PodCliqueBuilder) WithPodGangMapping(mapping []grovecorev1alpha1.PodGangPodCountAssignment) *PodCliqueBuilder {
 	b.pclq.Status.PodGangMapping = mapping
 	return b
 }

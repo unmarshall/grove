@@ -96,7 +96,7 @@ func (b *PodCliqueScalingGroupBuilder) WithOwnerReference(kind, name, uid string
 }
 
 // WithPodGangMapping sets the Status.PodGangMapping for the PodCliqueScalingGroup.
-func (b *PodCliqueScalingGroupBuilder) WithPodGangMapping(mapping map[string][]int32) *PodCliqueScalingGroupBuilder {
+func (b *PodCliqueScalingGroupBuilder) WithPodGangMapping(mapping []grovecorev1alpha1.PodGangReplicaAssignment) *PodCliqueScalingGroupBuilder {
 	b.pcsg.Status.PodGangMapping = mapping
 	return b
 }
