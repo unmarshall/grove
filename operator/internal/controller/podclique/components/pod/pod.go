@@ -64,6 +64,7 @@ const (
 	errCodeMissingPodCliqueTemplate            grovecorev1alpha1.ErrorCode = "ERR_MISSING_PODCLIQUE_TEMPLATE"
 	errCodeGetPodCliqueTemplate                grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUE_TEMPLATE"
 	errCodeUpdatePodCliqueStatus               grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODCLIQUE_STATUS"
+	errCodeMissingAnchorPodGangEntry           grovecorev1alpha1.ErrorCode = "ERR_MISSING_ANCHOR_PODGANG_ENTRY"
 )
 
 const (

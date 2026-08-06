@@ -17,8 +17,9 @@
 package pod
 
 import (
+	"cmp"
 	"fmt"
-	"maps"
+	"reflect"
 	"slices"
 	"sort"
 
@@ -130,167 +131,163 @@ func (r _resource) reconcileStandalonePCLQDistribution(logger logr.Logger, sc *s
 	r.expectationsStore.SyncExpectations(sc.pclqExpectationsStoreKey, nonTerminatingUIDs, terminatingUIDs)
 
 	currentMapping := buildLivePodGangMapping(sc.existingPCLQPods)
-	deltas := computePerPodGangDeltas(desiredMapping, currentMapping)
+	deltas := computePerPodGangDeltas(assignmentsToCountByName(desiredMapping), currentMapping)
 	return r.applyPerPodGangDeltas(logger, sc, deltas)
 }
 
-// computeDesiredPodGangMapping returns the desired pod-to-PodGang mapping for this PCLQ.
+// computeDesiredPodGangMapping returns the desired pod-to-PodGang assignments for this PodClique.
 //
-// During a coherent update PGM is authoritative and the mapping is rebuilt from PGM entries
-// every reconcile. In steady state the existing status mapping is the source of truth and is
-// mutated only when Spec.Replicas drifts from sum(mapping).
-func (r _resource) computeDesiredPodGangMapping(sc *syncContext) (map[string]int32, error) {
+// During a coherent update the PodGangMap is authoritative and the assignments are rebuilt from PGM
+// entries. In steady state the existing status assignments are the source of truth and are adjusted
+// only when Spec.Replicas drifts from the assigned pod count.
+func (r _resource) computeDesiredPodGangMapping(sc *syncContext) ([]grovecorev1alpha1.PodGangPodCountAssignment, error) {
 	if componentutils.IsCoherentUpdateInProgress(sc.pcs) {
-		return r.buildMappingFromPodGangMap(sc)
+		return r.buildMappingFromPodGangMap(sc), nil
 	}
 
-	var desired map[string]int32
+	var desired []grovecorev1alpha1.PodGangPodCountAssignment
 	if len(sc.pclq.Status.PodGangMapping) == 0 {
-		// If there are no PodGangMapping captured in the PCLQ status this indicates
-		// that it is a fresh PCLQ. For a fresh PCLQ use PodGangMap as a source of truth
-		// only to initialize it.
-		seed, err := r.buildMappingFromPodGangMap(sc)
-		if err != nil {
-			return nil, err
-		}
-		desired = seed
+		// Fresh PodClique — seed from the PodGangMap (created by the PCS reconciler from spec).
+		desired = r.buildMappingFromPodGangMap(sc)
 	} else {
-		desired = maps.Clone(sc.pclq.Status.PodGangMapping)
+		desired = slices.Clone(sc.pclq.Status.PodGangMapping)
 	}
 
-	currentSum := lo.Reduce(lo.Values(desired), func(agg int32, v int32, _ int) int32 { return agg + v }, int32(0))
+	currentSum := sumPodCounts(desired)
 	diff := sc.pclq.Spec.Replicas - currentSum
 	switch {
 	case diff > 0:
-		latestPGName, err := latestPodGangName(desired)
-		if err != nil {
-			return nil, groveerr.WrapError(err,
-				errCodeGetPodGang,
-				component.OperationSync,
-				fmt.Sprintf("cannot determine latest PodGang for PodClique %v",
-					client.ObjectKeyFromObject(sc.pclq)))
+		// New pods join the anchor with the highest AnchorIndex, the most recent anchor.
+		if err := r.addPodsToLatestAnchor(sc, desired, diff); err != nil {
+			return nil, err
 		}
-		if latestPGName == "" {
-			return nil, groveerr.New(errCodeGetPodGang,
-				component.OperationSync,
-				fmt.Sprintf("cannot scale out PodClique %v: status.PodGangMapping is empty after seed",
-					client.ObjectKeyFromObject(sc.pclq)))
-		}
-		desired[latestPGName] += diff
 	case diff < 0:
-		decrementMappingForScaleIn(desired, sc.existingPCLQPods, sc.getExpectedPodTemplateHash(), int(-diff))
+		r.reducePodsForScaleIn(sc, desired, -diff)
 	}
 	return desired, nil
 }
 
-// buildMappingFromPodGangMap constructs a pod-to-PodGang mapping from the PCS replica's
-// PodGangMap (cached on sc.pgm). Entries that do not include this PCLQ's clique are skipped.
-// Counts of zero are skipped to keep the mapping compact. Returns an empty mapping when the
-// PodGangMap has not yet been created (sc.pgm is nil).
-func (r _resource) buildMappingFromPodGangMap(sc *syncContext) (map[string]int32, error) {
-	if sc.pgm == nil {
-		return map[string]int32{}, nil
+// sumPodCounts returns the total pod count across all assignments.
+func sumPodCounts(assignments []grovecorev1alpha1.PodGangPodCountAssignment) int32 {
+	var total int32
+	for i := range assignments {
+		total += assignments[i].PodCount
 	}
-	mapping := make(map[string]int32, len(sc.pgm.Spec.Entries))
+	return total
+}
+
+// addPodsToLatestAnchor adds diff pods to the anchor PodGang with the highest AnchorIndex, the most
+// recent anchor for this PCS replica. New standalone pods always join the most recent anchor. This
+// PodClique already holds pods at every anchor (each anchor carries MinAvailable of every standalone
+// PodClique), so the assignment for the latest anchor already exists and is incremented in place. It
+// errors when the PodGangMap has no anchor entry, or the latest anchor has no assignment, both of
+// which are contract violations for a live PCS replica.
+func (r _resource) addPodsToLatestAnchor(sc *syncContext, desired []grovecorev1alpha1.PodGangPodCountAssignment, diff int32) error {
+	var latest *grovecorev1alpha1.PodGangEntry
+	for i := range sc.pgm.Spec.Entries {
+		entry := &sc.pgm.Spec.Entries[i]
+		if entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+			continue
+		}
+		if latest == nil || entry.AnchorIndex > latest.AnchorIndex {
+			latest = entry
+		}
+	}
+	if latest == nil {
+		return groveerr.New(errCodeMissingAnchorPodGangEntry, component.OperationSync,
+			fmt.Sprintf("cannot scale out PodClique %v: PodGangMap has no anchor entry", client.ObjectKeyFromObject(sc.pclq)))
+	}
+	for i := range desired {
+		if desired[i].Epoch == latest.Epoch {
+			desired[i].PodCount += diff
+			return nil
+		}
+	}
+	return groveerr.New(errCodeMissingAnchorPodGangEntry, component.OperationSync,
+		fmt.Sprintf("cannot scale out PodClique %v: no assignment for the latest anchor with epoch %s", client.ObjectKeyFromObject(sc.pclq), latest.Epoch))
+}
+
+// reducePodsForScaleIn reduces this PodClique's desired pod counts by count for a scale-in. It drains
+// the anchor with the highest AnchorIndex first and spills to the next-highest as each is exhausted,
+// which peels off the most recently added anchors first, mirroring the scale-out that grows the
+// highest anchor. Anchors are ordered by AnchorIndex read from the PodGangMap, a reliable integer
+// order, rather than by epoch which is a string. Which pods are actually deleted is decided later,
+// on live pod health, by the realize-vs-live phase.
+func (r _resource) reducePodsForScaleIn(sc *syncContext, desired []grovecorev1alpha1.PodGangPodCountAssignment, count int32) {
+	anchors := make([]*grovecorev1alpha1.PodGangEntry, 0, len(sc.pgm.Spec.Entries))
+	for i := range sc.pgm.Spec.Entries {
+		if sc.pgm.Spec.Entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+			anchors = append(anchors, &sc.pgm.Spec.Entries[i])
+		}
+	}
+	slices.SortFunc(anchors, func(a, b *grovecorev1alpha1.PodGangEntry) int {
+		return cmp.Compare(b.AnchorIndex, a.AnchorIndex) // highest AnchorIndex first
+	})
+
+	remaining := count
+	for _, anchor := range anchors {
+		if remaining == 0 {
+			break
+		}
+		for i := range desired {
+			if desired[i].Epoch != anchor.Epoch {
+				continue
+			}
+			take := min(remaining, desired[i].PodCount)
+			desired[i].PodCount -= take
+			remaining -= take
+			break
+		}
+	}
+}
+
+// buildMappingFromPodGangMap constructs this standalone PodClique's pod-to-PodGang assignments from
+// the PCS replica's PodGangMap (cached on sc.pgm). Only anchor entries carry standalone PodClique pod
+// counts, so every assignment references an anchor PodGang. Entries that do not include this
+// PodClique's clique, or hold a zero count, are skipped. Returns an empty slice when the PodGangMap
+// has not yet been created (sc.pgm is nil).
+func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alpha1.PodGangPodCountAssignment {
+	if sc.pgm == nil {
+		return nil
+	}
+	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
+	hash := *sc.pcs.Status.CurrentGenerationHash
+	var assignments []grovecorev1alpha1.PodGangPodCountAssignment
 	for _, entry := range sc.pgm.Spec.Entries {
 		count, ok := entry.PodCliques[sc.cliqueName]
 		if !ok || count == 0 {
 			continue
 		}
-		mapping[entry.Name] = count
+		assignments = append(assignments, grovecorev1alpha1.PodGangPodCountAssignment{
+			PodGangName: apicommon.GenerateAnchorPodGangName(rnr, hash, entry.AnchorIndex),
+			Epoch:       entry.Epoch,
+			PodCount:    count,
+		})
 	}
-	return mapping, nil
+	return assignments
 }
 
-// latestPodGangName returns the entry name from the mapping whose trailing integer suffix is
-// the largest. Names must follow the unified PodGang naming convention <pcs>-<replica>-<unix-nano>;
-// the largest suffix corresponds to the most recently generated name. Legacy SPG names also
-// have an integer trailing segment and parse correctly; a name that does not parse is treated
-// as a controller bug and surfaced as an error rather than silently skipped. Returns ("", nil)
-// when the mapping is empty.
-func latestPodGangName(mapping map[string]int32) (string, error) {
-	var (
-		latestName string
-		bestSuffix = -1
-	)
-	for name := range mapping {
-		suffix, err := utils.ExtractPodGangNameSuffix(name)
-		if err != nil {
-			return "", fmt.Errorf("PodGang entry name %q in PodGangMapping does not match the expected naming convention: %w", name, err)
-		}
-		if suffix > bestSuffix {
-			latestName, bestSuffix = name, suffix
-		}
-	}
-	return latestName, nil
-}
-
-// decrementMappingForScaleIn mutates the desired mapping in place, decrementing it by `count`
-// pods, where the pods are chosen via the deletion sorter. This is a pure in-memory step — no
-// API calls — that records the per-PodGang scale-in decision the caller will later apply.
-func decrementMappingForScaleIn(desired map[string]int32, existingPods []*corev1.Pod, expectedPodTemplateHash string, count int) {
-	if count <= 0 {
-		return
-	}
-	candidates := nonTerminatingPods(existingPods)
-	if len(candidates) == 0 {
-		return
-	}
-	sorter := DeletionSorter{
-		Pods:                    slices.Clone(candidates),
-		ExpectedPodTemplateHash: expectedPodTemplateHash,
-	}
-	sort.Sort(sorter)
-	// Walk the full sorter and stop after `remaining` successful decrements. A pod missing
-	// the PodGang label cannot be charged to any entry, so it is skipped without consuming
-	// the budget — the next pod in deletion order is considered instead. The budget is
-	// clamped to the number of pods available so we never wait for decrements we cannot make.
-	remaining := min(count, len(sorter.Pods))
-	for _, pod := range sorter.Pods {
-		if remaining == 0 {
-			break
-		}
-		pgName, ok := pod.Labels[apicommon.LabelPodGang]
-		if !ok {
-			continue
-		}
-		if desired[pgName] > 0 {
-			desired[pgName]--
-			remaining--
-		}
-	}
-}
-
-// nonTerminatingPods returns pods that have not been marked for deletion.
-func nonTerminatingPods(pods []*corev1.Pod) []*corev1.Pod {
-	return lo.Filter(pods, func(p *corev1.Pod, _ int) bool {
-		return !k8sutils.IsResourceTerminating(p.ObjectMeta)
+// patchPodGangMapping persists the desired assignments to pclq.Status.PodGangMapping if they differ
+// from the current value. Assignments with a zero pod count are pruned so the stored mapping carries
+// only PodGangs that own at least one pod of this PodClique. The assignments are canonicalized (sorted
+// by epoch) so the stored order is deterministic and the equality check avoids waking other
+// reconcilers via a no-op patch. An empty desired is normalized to nil.
+func (r _resource) patchPodGangMapping(sc *syncContext, desired []grovecorev1alpha1.PodGangPodCountAssignment) error {
+	desired = slices.DeleteFunc(desired, func(a grovecorev1alpha1.PodGangPodCountAssignment) bool {
+		return a.PodCount == 0
 	})
-}
-
-// patchPodGangMapping persists the desired mapping to pclq.Status.PodGangMapping if it differs
-// from the current value. The check avoids waking other reconcilers via a no-op watch event.
-// Zero-count entries are pruned before comparison and persistence so the stored mapping carries
-// only PodGangs that actually own at least one pod of this PCLQ. Without this prune, a scale-in
-// that decremented an entry to zero would leave a phantom name in the mapping; subsequent
-// scale-outs would see it as a candidate (e.g. via latestPodGangName) and route new pods
-// into a PodGang that no longer exists in the PodGangMap. Empty maps are normalized to nil for
-// status hygiene.
-func (r _resource) patchPodGangMapping(sc *syncContext, desired map[string]int32) error {
-	for name, count := range desired {
-		if count == 0 {
-			delete(desired, name)
-		}
+	if len(desired) == 0 {
+		desired = nil
+	} else {
+		slices.SortFunc(desired, func(a, b grovecorev1alpha1.PodGangPodCountAssignment) int {
+			return cmp.Compare(a.Epoch, b.Epoch)
+		})
 	}
-	if maps.Equal(sc.pclq.Status.PodGangMapping, desired) {
+	if reflect.DeepEqual(sc.pclq.Status.PodGangMapping, desired) {
 		return nil
 	}
 	patch := client.MergeFrom(sc.pclq.DeepCopy())
-	if len(desired) == 0 {
-		sc.pclq.Status.PodGangMapping = nil
-	} else {
-		sc.pclq.Status.PodGangMapping = desired
-	}
+	sc.pclq.Status.PodGangMapping = desired
 	if err := client.IgnoreNotFound(r.client.Status().Patch(sc.ctx, sc.pclq, patch)); err != nil {
 		return groveerr.WrapError(err,
 			errCodeUpdatePodCliqueStatus,
@@ -299,6 +296,16 @@ func (r _resource) patchPodGangMapping(sc *syncContext, desired map[string]int32
 		)
 	}
 	return nil
+}
+
+// assignmentsToCountByName projects the assignments to a PodGang-name to pod-count map for delta
+// computation against the live pod distribution.
+func assignmentsToCountByName(assignments []grovecorev1alpha1.PodGangPodCountAssignment) map[string]int32 {
+	m := make(map[string]int32, len(assignments))
+	for i := range assignments {
+		m[assignments[i].PodGangName] = assignments[i].PodCount
+	}
+	return m
 }
 
 // buildLivePodGangMapping counts non-terminating live pods by their LabelPodGang.
@@ -381,7 +388,7 @@ func (r _resource) applyPerPodGangDeltas(logger logr.Logger, sc *syncContext, de
 	if len(createTasks) > 0 {
 		runResult := utils.RunConcurrentlyWithSlowStart(sc.ctx, logger, 1, createTasks)
 		if runResult.HasErrors() {
-			err := runResult.GetAggregatedError()
+			err = runResult.GetAggregatedError()
 			logger.Error(err, "failed to create pods for PCLQ", "runSummary", runResult.GetSummary())
 			return err
 		}
@@ -389,7 +396,7 @@ func (r _resource) applyPerPodGangDeltas(logger logr.Logger, sc *syncContext, de
 	if len(deleteTasks) > 0 {
 		runResult := utils.RunConcurrentlyWithSlowStart(sc.ctx, logger, 1, deleteTasks)
 		if runResult.HasErrors() {
-			err := runResult.GetAggregatedError()
+			err = runResult.GetAggregatedError()
 			logger.Error(err, "failed to delete pods for PCLQ", "runSummary", runResult.GetSummary())
 			return groveerr.WrapError(err,
 				errCodeDeletePod,
