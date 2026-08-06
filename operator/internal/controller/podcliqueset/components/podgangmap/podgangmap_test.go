@@ -37,7 +37,7 @@ func TestGetExistingResourceNames(t *testing.T) {
 	// A PodGangMap owned by a different PodCliqueSet: different name (so different selector labels)
 	// and a different owner UID.
 	otherPGM := testutils.NewPodGangMapBuilder("other-pcs", testNamespace, types.UID("other-uid"), 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder(testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 
 	tests := []struct {
 		name      string
@@ -73,7 +73,7 @@ func TestDelete(t *testing.T) {
 	pcs := pcsWithCoherentUpdateStrategy(testHash).Build()
 	owned := pgmWithEpochEntry(0, "e0")
 	other := testutils.NewPodGangMapBuilder("other-pcs", testNamespace, types.UID("other-uid"), 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder(testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 	r := newResource(newFakeClient(pcs, owned, other))
 
 	require.NoError(t, r.Delete(context.Background(), logr.Discard(), pcs.ObjectMeta))
@@ -90,9 +90,9 @@ func TestBuildResource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-pcs-0", Namespace: testNamespace},
 	}
 	entries := []grovecorev1alpha1.PodGangEntry{
-		testutils.NewPodGangEntryBuilder("pg-c", testHash, "e2").Build(),
-		testutils.NewPodGangEntryBuilder("pg-a", testHash, "e0").Build(),
-		testutils.NewPodGangEntryBuilder("pg-b", testHash, "e1").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "e2").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "e0").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "e1").Build(),
 	}
 
 	require.NoError(t, r.buildResource(pgm, pcs, 0, entries))
@@ -100,9 +100,9 @@ func TestBuildResource(t *testing.T) {
 	assert.True(t, metav1.IsControlledBy(pgm, pcs))
 	assert.Equal(t, int32(0), pgm.Spec.PodCliqueSetReplicaIndex)
 	assert.Equal(t, getLabels(testPCSName, 0), pgm.Labels)
-	names := make([]string, len(pgm.Spec.Entries))
+	epochs := make([]string, len(pgm.Spec.Entries))
 	for i, e := range pgm.Spec.Entries {
-		names[i] = e.Name
+		epochs[i] = e.Epoch
 	}
-	assert.Equal(t, []string{"pg-a", "pg-b", "pg-c"}, names, "entries sorted by name")
+	assert.Equal(t, []string{"e0", "e1", "e2"}, epochs, "entries sorted by epoch")
 }
