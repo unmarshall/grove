@@ -64,7 +64,7 @@ const (
 	errCodeComputePendingPodCliqueScalingGroupUpdateWork grovecorev1alpha1.ErrorCode = "ERR_COMPUTE_PENDINGUPDATE_WORK"
 	errCodeSyncPCSGResourceClaim                         grovecorev1alpha1.ErrorCode = "ERR_SYNC_PCSG_RESOURCE_CLAIM"
 	errCodeGetPodGangMap                                 grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANGMAP"
-	errCodePatchPodCliqueLabels                          grovecorev1alpha1.ErrorCode = "ERR_PATCH_PODCLIQUE_LABELS"
+	errCodeMissingPodCliqueScalingGroupConfig            grovecorev1alpha1.ErrorCode = "ERR_MISSING_PODCLIQUESCALINGGROUP_CONFIG"
 )
 
 var (

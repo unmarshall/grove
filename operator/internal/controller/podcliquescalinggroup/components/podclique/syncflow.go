@@ -42,6 +42,7 @@ type syncContext struct {
 	pcsg                           *grovecorev1alpha1.PodCliqueScalingGroup
 	pcsgConfig                     *grovecorev1alpha1.PodCliqueScalingGroupConfig
 	pcsReplicaIndex                int
+	pcsResourceNameReplica         apicommon.ResourceNameReplica
 	podGangMap                     *grovecorev1alpha1.PodGangMap
 	existingPCLQs                  []grovecorev1alpha1.PodClique
 	existingPCLQNameSet            componentutils.Set[string]
@@ -77,6 +78,11 @@ func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, p
 		return nil, err
 	}
 	syncCtx.pcsgConfig = resourceclaim.FindPCSGConfig(syncCtx.pcs, pcsg, syncCtx.pcsReplicaIndex)
+	if syncCtx.pcsgConfig == nil {
+		return nil, groveerr.New(errCodeMissingPodCliqueScalingGroupConfig, component.OperationSync,
+			fmt.Sprintf("no matching PodCliqueScalingGroupConfig in PodCliqueSet %s for PodCliqueScalingGroup %s", client.ObjectKeyFromObject(syncCtx.pcs), client.ObjectKeyFromObject(pcsg)))
+	}
+	syncCtx.pcsResourceNameReplica = apicommon.ResourceNameReplica{Name: syncCtx.pcs.Name, Replica: syncCtx.pcsReplicaIndex}
 
 	// Fetch the PodGangMap for this PCS replica. PodGangMap is the single source of truth
 	// for resolving the PodGang name for each PCSG replica; if it does not yet exist, requeue
@@ -245,7 +251,7 @@ func (r _resource) runSyncFlow(logger logr.Logger, sc *syncContext) error {
 // ensurePCSGResourceClaims creates PCSG-level AllReplicas and PerReplica ResourceClaims
 // and cleans up stale PerReplica RCs from previous scale-in operations.
 func (r _resource) ensurePCSGResourceClaims(sc *syncContext) error {
-	if sc.pcsgConfig == nil || len(sc.pcsgConfig.ResourceSharing) == 0 {
+	if len(sc.pcsgConfig.ResourceSharing) == 0 {
 		return nil
 	}
 	resourceSharers := resourceclaim.ResourceSharersFromPCSG(sc.pcsgConfig.ResourceSharing)
