@@ -49,6 +49,7 @@ const (
 	errCodeComputeMVUTemplate         grovecorev1alpha1.ErrorCode = "ERR_COMPUTE_MVU_TEMPLATE"
 	errCodeExtractPodCliqueName       grovecorev1alpha1.ErrorCode = "ERR_EXTRACT_PODCLIQUE_NAME"
 	errCodeReconstructPodGangMapEntry grovecorev1alpha1.ErrorCode = "ERR_RECONSTRUCT_PODGANGMAP_ENTRY"
+	errCodeStatusEpochNotInPodGangMap grovecorev1alpha1.ErrorCode = "ERR_STATUS_EPOCH_NOT_IN_PODGANGMAP"
 	errCodeMissingEpochLabel          grovecorev1alpha1.ErrorCode = "ERR_MISSING_EPOCH_LABEL"
 	errCodeInvalidEpochLabel          grovecorev1alpha1.ErrorCode = "ERR_INVALID_EPOCH_LABEL"
 )

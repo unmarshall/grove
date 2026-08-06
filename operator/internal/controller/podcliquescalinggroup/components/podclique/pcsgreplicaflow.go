@@ -154,11 +154,11 @@ func appendToOrCreateScaleOutEntry(pgReplicaAssignments []grovecorev1alpha1.PodG
 }
 
 // drainAssignmentsForScaleIn removes count PCSG replica indices from the assignments for a scale-in.
-// It drains in role order: ScaleOut PodGangs first, then Tail, then Anchor from the highest
-// AnchorIndex down. The anchor with AnchorIndex 0 carries the PCS-level MinAvailable replicas and is
-// never drained. Within a chosen assignment the highest replica index is removed first. The webhook
-// guarantees Spec.Replicas - count >= MinAvailable, so the drainable assignments always hold enough
-// indices without touching the AnchorIndex 0 anchor. Emptied assignments are left in place and
+// It drains in role order: ScaleOut PodGangs first, then Tail, then Anchor from the highest AnchorIndex
+// down, so the anchor with AnchorIndex 0 (which carries the MinAvailable replicas) is drained last and
+// only when it is the sole or final anchor. The webhook guarantees Spec.Replicas - count >= MinAvailable,
+// so the drain removes count indices without reducing the clique below MinAvailable. Within a chosen
+// assignment the highest replica index is removed first. Emptied assignments are left in place and
 // removed by the caller. This sorts assignments in place; the order is irrelevant to callers.
 func drainAssignmentsForScaleIn(pgReplicaAssignments []grovecorev1alpha1.PodGangReplicaAssignment, count int) {
 	drainPriority := func(a grovecorev1alpha1.PodGangReplicaAssignment) int {
@@ -191,10 +191,6 @@ func drainAssignmentsForScaleIn(pgReplicaAssignments []grovecorev1alpha1.PodGang
 			break
 		}
 		a := &pgReplicaAssignments[i]
-		// Never drain the anchor carrying the MinAvailable replicas.
-		if a.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && a.AnchorIndex == 0 {
-			continue
-		}
 		slices.Sort(a.ReplicaIndices)
 		take := min(remaining, len(a.ReplicaIndices))
 		a.ReplicaIndices = a.ReplicaIndices[:len(a.ReplicaIndices)-take]

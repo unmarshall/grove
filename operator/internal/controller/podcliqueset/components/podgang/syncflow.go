@@ -177,7 +177,7 @@ func (r _resource) computeExpectedPodGangs(ctx context.Context, sc *syncContext)
 		for _, entry := range pgm.Spec.Entries {
 			pgInfos, err := r.buildPodGangInfosFromEntry(sc, pcsReplicaIndex, entry)
 			if err != nil {
-				return fmt.Errorf("failed to build PodGang info from entry %q in PodGangMap %s: %w", entry.Name, pgmName, err)
+				return fmt.Errorf("failed to build PodGang info from entry with epoch %q in PodGangMap %s: %w", entry.Epoch, pgmName, err)
 			}
 			sc.expectedPodGangs = append(sc.expectedPodGangs, pgInfos...)
 		}
@@ -192,7 +192,9 @@ func (r _resource) computeExpectedPodGangs(ctx context.Context, sc *syncContext)
 // entry.PCSGReplicaIndices. It carries no standalone PodCliques.
 func (r _resource) buildPodGangInfosFromEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]*podGangInfo, error) {
 	if pgEntry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-		pg := &podGangInfo{fqn: pgEntry.Name, pcsReplicaIndex: pcsReplicaIndex, extraLabels: pgEntry.Labels}
+		rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex}
+		pgName := apicommon.GenerateAnchorPodGangName(rnr, pgEntry.PodCliqueSetGenerationHash, pgEntry.AnchorIndex)
+		pg := &podGangInfo{fqn: pgName, pcsReplicaIndex: pcsReplicaIndex, extraLabels: buildAdditionalLabelsFromPodGangEntry(pgEntry)}
 		pg.pclqs = buildStandalonePCLQInfosFromMPGEntry(sc, pcsReplicaIndex, pgEntry)
 		pcsgPCLQInfos, pcsgTopoConstraints, err := buildPCSGPCLQInfosAndTopoConstraintsFromMPGEntry(sc, pcsReplicaIndex, pgEntry)
 		if err != nil {
@@ -204,6 +206,14 @@ func (r _resource) buildPodGangInfosFromEntry(sc *syncContext, pcsReplicaIndex i
 		return []*podGangInfo{pg}, nil
 	}
 	return r.buildTPGPodGangInfos(sc, pcsReplicaIndex, pgEntry)
+}
+
+// buildAdditionalLabelsFromPodGangEntry creates additional labels for PodGangs materialized from the given PodGangEntry.
+func buildAdditionalLabelsFromPodGangEntry(pgEntry grovecorev1alpha1.PodGangEntry) map[string]string {
+	return map[string]string{
+		apicommon.LabelEpoch:       pgEntry.Epoch,
+		apicommon.LabelPodGangRole: string(pgEntry.Role),
+	}
 }
 
 // buildStandalonePCLQInfosFromMPGEntry builds pclqInfo entries for standalone PodCliques referenced in the entry.
@@ -259,6 +269,7 @@ func buildPCSGPCLQInfosAndTopoConstraintsFromMPGEntry(sc *syncContext, pcsReplic
 // It iterates template PCSG configs in order for deterministic output.
 func (r _resource) buildTPGPodGangInfos(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]*podGangInfo, error) {
 	var pgInfos []*podGangInfo
+	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: pcsReplicaIndex}
 	for _, pcsgConfig := range sc.pcs.Spec.Template.PodCliqueScalingGroupConfigs {
 		pcsgReplicaIndices, ok := pgEntry.PCSGReplicaIndices[pcsgConfig.Name]
 		if !ok || len(pcsgReplicaIndices) == 0 {
@@ -270,9 +281,9 @@ func (r _resource) buildTPGPodGangInfos(sc *syncContext, pcsReplicaIndex int, pg
 				return nil, err
 			}
 			pg := &podGangInfo{
-				fqn:                apicommon.GenerateNonAnchorPodGangName(pgEntry.Name, pcsgConfig.Name, pcsgReplicaIndex),
+				fqn:                apicommon.GenerateNonAnchorPodGangName(rnr, pgEntry.PodCliqueSetGenerationHash, pcsgConfig.Name, pcsgReplicaIndex),
 				pcsReplicaIndex:    pcsReplicaIndex,
-				extraLabels:        pgEntry.Labels,
+				extraLabels:        buildAdditionalLabelsFromPodGangEntry(pgEntry),
 				pclqs:              pclqs,
 				topologyConstraint: createPodGangTopologyPackConstraint(sc, client.ObjectKeyFromObject(sc.pcs), sc.pcs.Spec.Template.TopologyConstraint),
 			}

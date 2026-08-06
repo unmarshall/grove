@@ -100,12 +100,15 @@ func buildBootstrapTPGEntry(pcs *grovecorev1alpha1.PodCliqueSet, epoch, mpgEpoch
 }
 
 // buildEntriesFromPCLQAndPCSGStatuses rebuilds the steady-state PodGangMap entries from the
-// PodGangMapping status fields on the standalone PCLQs and PCSGs.
-// It returns an ErrCodeContinueReconcileAndRequeue error when at least one standalone PCLQ or PCSG
-// has not yet published its PodGangMapping status, signalling the caller to requeue rather than
-// persist a partial rebuild. For existing entries their epoch, DependsOn, and Role are
-// preserved. For new entries (created as a result of scale-out of PCSGs) a new epoch is created and
-// its DependsOn is set to nil. Entries that end up with no PCLQ or PCSG content are dropped.
+// PodGangMapping status on the standalone PodCliques and PodCliqueScalingGroups. existingPGM holds
+// each entry's identity (epoch, role, anchor index, DependsOn, generation hash); this rebuild
+// preserves that identity per epoch and refreshes only the membership (standalone PodClique pod
+// counts and PCSG replica indices), which is what drifts when a child scales in or out. It returns
+// ErrCodeContinueReconcileAndRequeue when any standalone PodClique or PodCliqueScalingGroup has not
+// yet published its PodGangMapping, so a partial rebuild is not persisted. The only net-new entry is
+// a PCSG scale-out, which collapses into a single ScaleOut entry with a nil DependsOn. A status that
+// references an epoch absent from the PodGangMap is a contract violation and returns an error.
+// Entries left with no membership are dropped.
 func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
 	existingStandalonePCLQs []grovecorev1alpha1.PodClique,
 	existingPCSGs []grovecorev1alpha1.PodCliqueScalingGroup,
@@ -119,85 +122,86 @@ func buildEntriesFromPCLQAndPCSGStatuses(pcs *grovecorev1alpha1.PodCliqueSet,
 			fmt.Sprintf("cannot rebuild PodGangMap for replica %d or PodCliqueSet %v: PodGangMapping for one or more PCLQ/PCSG are not yet published", pcsReplicaIndex, client.ObjectKeyFromObject(pcs)))
 	}
 
-	// preserve epoch, DependsOn, and Role for the existing PGM entries keyed by PodGang name.
-	// For a new entry a fresh epoch, a nil DependsOn, and the Tail role will be set. These fields
-	// are decided when an entry is first created and must survive a rebuild from owner statuses, so
-	// they are preserved by PodGang name rather than recomputed.
-	type preservedEntryFields struct {
-		epoch     string
-		dependsOn []string
-		role      grovecorev1alpha1.PodGangEntryRole
-	}
-	existingByPGName := make(map[string]preservedEntryFields, len(existingPGM.Spec.Entries))
-	for _, entry := range existingPGM.Spec.Entries {
-		existingByPGName[entry.Name] = preservedEntryFields{
-			epoch:     entry.Labels[apicommon.LabelEpoch],
-			dependsOn: entry.DependsOn,
-			role:      entry.Role,
-		}
+	// Preserve each existing entry's identity, cleared of membership. Membership is re-added below
+	// from the current statuses.
+	entryByEpoch := make(map[string]*grovecorev1alpha1.PodGangEntry, len(existingPGM.Spec.Entries))
+	for i := range existingPGM.Spec.Entries {
+		existing := existingPGM.Spec.Entries[i]
+		entry := newPodGangEntry(existing.Epoch, existing.PodCliqueSetGenerationHash, existing.DependsOn)
+		entry.Role = existing.Role
+		entry.AnchorIndex = existing.AnchorIndex
+		entryByEpoch[existing.Epoch] = &entry
 	}
 
-	// newEntryEpoch is new epoch shared by all new entries created as a result of PCSG scale-out.
-	newEntryEpoch := strconv.FormatInt(clk.Now().UnixNano(), 10)
-	entryByName := make(map[string]*grovecorev1alpha1.PodGangEntry)
-	getOrCreateEntry := func(pgName string) *grovecorev1alpha1.PodGangEntry {
-		if entry, ok := entryByName[pgName]; ok {
-			return entry
-		}
-		var (
-			epoch     string
-			dependsOn []string
-			role      = grovecorev1alpha1.PodGangEntryRoleTail
-		)
-		if preserved, isExisting := existingByPGName[pgName]; isExisting {
-			epoch = preserved.epoch
-			dependsOn = preserved.dependsOn
-			role = preserved.role
-		} else {
-			epoch = newEntryEpoch
-		}
-		entry := newPodGangEntryWithName(pgName, *pcs.Status.CurrentGenerationHash, epoch, dependsOn)
-		entry.Role = role
-		entryByName[pgName] = &entry
-		return &entry
-	}
-
-	// sync PGM entries from standalone PCLQ.Status.PodGangMapping
+	// Standalone PodClique membership. The referenced epoch always names an existing entry, because
+	// PGM authored that entry before the PodClique status was seeded from it.
 	for i := range existingStandalonePCLQs {
 		cliqueName, err := utils.GetPodCliqueNameFromPodCliqueFQN(existingStandalonePCLQs[i].ObjectMeta)
 		if err != nil {
 			return nil, groveerr.WrapError(err, errCodeExtractPodCliqueName, component.OperationSync,
 				fmt.Sprintf("Error extracting PodClique name from FQN %s", existingStandalonePCLQs[i].Name))
 		}
-		for pgName, podCount := range existingStandalonePCLQs[i].Status.PodGangMapping {
-			entry := getOrCreateEntry(pgName)
+		for _, assignment := range existingStandalonePCLQs[i].Status.PodGangMapping {
+			entry := entryByEpoch[assignment.Epoch]
+			if entry == nil {
+				return nil, groveerr.New(errCodeStatusEpochNotInPodGangMap, component.OperationSync,
+					fmt.Sprintf("standalone PodClique %s status references epoch %q absent from PodGangMap for replica %d", existingStandalonePCLQs[i].Name, assignment.Epoch, pcsReplicaIndex))
+			}
 			if entry.PodCliques == nil {
 				entry.PodCliques = make(map[string]int32)
 			}
-			entry.PodCliques[cliqueName] = podCount
+			entry.PodCliques[cliqueName] = assignment.PodCount
 		}
 	}
 
-	// sync PGM entries from PCSG.Status.PodGangMapping
+	// PodCliqueScalingGroup membership. Anchor and Tail assignments name an existing entry by epoch.
+	// A ScaleOut assignment carries no epoch (all scale-out collapses into one ScaleOut entry): it
+	// reuses the existing ScaleOut entry, or opens one fresh entry with a nil DependsOn.
 	for i := range existingPCSGs {
 		pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(existingPCSGs[i].Name, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex})
 		if err != nil {
 			return nil, groveerr.WrapError(err, errCodeExtractPodCliqueName, component.OperationSync,
 				fmt.Sprintf("Error extracting scaling group name from FQN %s", existingPCSGs[i].Name))
 		}
-		for pgName, replicaIndices := range existingPCSGs[i].Status.PodGangMapping {
-			entry := getOrCreateEntry(pgName)
+		for _, assignment := range existingPCSGs[i].Status.PodGangMapping {
+			var entry *grovecorev1alpha1.PodGangEntry
+			if assignment.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut {
+				entry = getOrCreateScaleOutEntry(entryByEpoch, *pcs.Status.CurrentGenerationHash, clk)
+			} else {
+				entry = entryByEpoch[assignment.Epoch]
+				if entry == nil {
+					return nil, groveerr.New(errCodeStatusEpochNotInPodGangMap, component.OperationSync,
+						fmt.Sprintf("PodCliqueScalingGroup %s status references epoch %q absent from PodGangMap for replica %d", existingPCSGs[i].Name, assignment.Epoch, pcsReplicaIndex))
+				}
+			}
 			if entry.PCSGReplicaIndices == nil {
 				entry.PCSGReplicaIndices = make(map[string][]int32)
 			}
-			entry.PCSGReplicaIndices[pcsgConfigName] = replicaIndices
+			entry.PCSGReplicaIndices[pcsgConfigName] = assignment.ReplicaIndices
 		}
 	}
-	entries := make([]grovecorev1alpha1.PodGangEntry, 0, len(entryByName))
-	for _, entry := range entryByName {
+
+	entries := make([]grovecorev1alpha1.PodGangEntry, 0, len(entryByEpoch))
+	for _, entry := range entryByEpoch {
 		entries = append(entries, *entry)
 	}
 	return removeEmptyEntries(entries), nil
+}
+
+// getOrCreateScaleOutEntry returns the single ScaleOut entry, creating it with a nil DependsOn if
+// none exists yet. All PCSG scale-out replicas collapse into one ScaleOut entry, so there is at most
+// one. A scale-out is not part of any scheduling batch, hence the nil DependsOn.
+func getOrCreateScaleOutEntry(entryByEpoch map[string]*grovecorev1alpha1.PodGangEntry, pcsGenerationHash string, clk clock.Clock) *grovecorev1alpha1.PodGangEntry {
+	for _, entry := range entryByEpoch {
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut {
+			return entry
+		}
+	}
+	epoch := strconv.FormatInt(clk.Now().UnixNano(), 10)
+	entry := newPodGangEntry(epoch, pcsGenerationHash, nil)
+	entry.Role = grovecorev1alpha1.PodGangEntryRoleScaleOut
+	entryByEpoch[epoch] = &entry
+	return &entry
 }
 
 // canRebuildPGMFromStatuses returns true when every standalone PCLQ and every PCSG that the PCS
@@ -272,12 +276,12 @@ func reconstructEntriesFromExistingPodGangs(pcs *grovecorev1alpha1.PodCliqueSet,
 			// A scaled PodGang carries the base-podgang label pointing at its BPG. It depends on
 			// the BPG and is not the MPG.
 			pgEntry.Role = grovecorev1alpha1.PodGangEntryRoleTail
-			pgEntry.Labels = map[string]string{apicommon.LabelEpoch: spgEpoch}
+			pgEntry.Epoch = spgEpoch
 			pgEntry.DependsOn = []string{bpgEpoch}
 		} else {
 			// The base PodGang carries no base-podgang label. It is the MPG.
 			pgEntry.Role = grovecorev1alpha1.PodGangEntryRoleAnchor
-			pgEntry.Labels = map[string]string{apicommon.LabelEpoch: bpgEpoch}
+			pgEntry.Epoch = bpgEpoch
 		}
 		pgEntries = append(pgEntries, *pgEntry)
 	}
@@ -291,7 +295,6 @@ func reconstructEntriesFromExistingPodGangs(pcs *grovecorev1alpha1.PodCliqueSet,
 // de-duplicated per PCSG. Epoch and DependsOn are left unset; the caller assigns them.
 func buildEntryFromPodGang(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, pcsGenerationHash string, pg groveschedulerv1alpha1.PodGang) (*grovecorev1alpha1.PodGangEntry, error) {
 	pgmEntry := &grovecorev1alpha1.PodGangEntry{
-		Name:                       pg.Name,
 		PodCliqueSetGenerationHash: pcsGenerationHash,
 		PodCliques:                 make(map[string]int32),
 		PCSGReplicaIndices:         make(map[string][]int32),

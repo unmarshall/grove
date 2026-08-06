@@ -39,6 +39,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -337,8 +338,9 @@ func (sc *syncContext) getExpectedPodTemplateHash() string {
 	return sc.pclq.Labels[apicommon.LabelPodTemplateHash]
 }
 
-// checkAndRemovePodSchedulingGates removes scheduling gates from pods when their PodGang
-// membership is confirmed and all DependsOn PodGangs in the PodGangMap entry are scheduled.
+// checkAndRemovePodSchedulingGates removes the Grove PodGang scheduling gate from a pod once its
+// PodGang membership is confirmed (the pod appears in the PodGang's PodReferences) and every epoch
+// the pod's PodGangMap entry DependsOn has all of its PodGangs scheduled.
 func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr.Logger) ([]string, error) {
 	skippedScheduleGatedPods := make([]string, 0, len(sc.existingPCLQPods))
 
@@ -362,17 +364,24 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 		return skippedScheduleGatedPods, nil
 	}
 
-	entryByName := lo.KeyBy(sc.pgm.Spec.Entries, func(e grovecorev1alpha1.PodGangEntry) string { return e.Name })
-	pgCache := make(map[string]*groveschedulerv1alpha1.PodGang)
-	depScheduled := make(map[string]bool)
+	entryByEpoch := lo.KeyBy(sc.pgm.Spec.Entries, func(e grovecorev1alpha1.PodGangEntry) string { return e.Epoch })
+
+	// Fetch each distinct PodGang the gated pods reference once. Pods can be many but share a small
+	// set of PodGangs, so this keeps the GET count at the number of distinct PodGangs, not pods.
+	pgByName, err := r.fetchGatedPodPodGangs(sc.ctx, gatedPods, sc.pclq.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve, once per distinct DependsOn epoch, whether all PodGangs at that epoch are scheduled.
+	scheduledByEpoch, err := r.computeDependencyEpochScheduled(sc, pgByName)
+	if err != nil {
+		return nil, err
+	}
 
 	tasks := make([]utils.Task, 0, len(gatedPods))
 	for i, p := range gatedPods {
-		remove, err := r.shouldRemoveSchedulingGate(sc, logger, p, entryByName, pgCache, depScheduled)
-		if err != nil {
-			return nil, err
-		}
-		if !remove {
+		if !canRemoveSchedulingGate(logger, p, sc.pclq.Name, pgByName, entryByEpoch, scheduledByEpoch) {
 			skippedScheduleGatedPods = append(skippedScheduleGatedPods, p.Name)
 			continue
 		}
@@ -386,7 +395,7 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 				if !removePodGangSchedulingGate(p) {
 					return nil
 				}
-				if err := client.IgnoreNotFound(r.client.Patch(ctx, p, client.MergeFrom(podClone))); err != nil {
+				if err = client.IgnoreNotFound(r.client.Patch(ctx, p, client.MergeFrom(podClone))); err != nil {
 					return err
 				}
 				logger.Info("Removed Grove PodGang scheduling gate from pod", "podObjectKey", client.ObjectKeyFromObject(p))
@@ -410,78 +419,90 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 	return skippedScheduleGatedPods, nil
 }
 
-// shouldRemoveSchedulingGate returns true when all conditions for gate removal are met for p.
-// Returns a hard error only for controller bugs (missing LabelPodGang) or unexpected API failures.
-func (r _resource) shouldRemoveSchedulingGate(
-	sc *syncContext,
-	logger logr.Logger,
-	p *corev1.Pod,
-	entryByName map[string]grovecorev1alpha1.PodGangEntry,
-	pgCache map[string]*groveschedulerv1alpha1.PodGang,
-	depScheduled map[string]bool,
-) (bool, error) {
-	podObjectKey := client.ObjectKeyFromObject(p)
-
-	podGangName, ok := p.Labels[apicommon.LabelPodGang]
-	if !ok {
-		return false, groveerr.New(errCodeMissingPodGangLabelOnPod,
-			component.OperationSync,
-			fmt.Sprintf("gated pod %v is missing required label %s", podObjectKey, apicommon.LabelPodGang),
-		)
+// fetchGatedPodPodGangs fetches, once each, the distinct PodGangs named by the grove.io/podgang
+// label on the gated pods. A pod missing that label is a controller bug and returns a hard error.
+// A PodGang that does not exist yet is recorded as a nil value so callers can skip its pods.
+func (r _resource) fetchGatedPodPodGangs(ctx context.Context, gatedPods []*corev1.Pod, namespace string) (map[string]*groveschedulerv1alpha1.PodGang, error) {
+	pgByName := make(map[string]*groveschedulerv1alpha1.PodGang)
+	for _, pod := range gatedPods {
+		name, ok := pod.Labels[apicommon.LabelPodGang]
+		if !ok {
+			return nil, groveerr.New(errCodeMissingPodGangLabelOnPod, component.OperationSync,
+				fmt.Sprintf("gated pod %v is missing required label %s", client.ObjectKeyFromObject(pod), apicommon.LabelPodGang))
+		}
+		if _, seen := pgByName[name]; seen {
+			continue
+		}
+		pg, err := componentutils.GetPodGang(ctx, r.client, name, namespace)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				pgByName[name] = nil
+				continue
+			}
+			return nil, groveerr.WrapError(err, errCodeGetPodGang, component.OperationSync,
+				fmt.Sprintf("failed to get PodGang %v", client.ObjectKey{Namespace: namespace, Name: name}))
+		}
+		pgByName[name] = pg
 	}
-
-	entry, ok := entryByName[podGangName]
-	if !ok {
-		logger.Info("PodGangMap entry not found for pod's PodGang, skipping", "podObjectKey", podObjectKey, "podGangName", podGangName)
-		return false, nil
-	}
-
-	pg, err := r.getOrFetchPodGang(sc.ctx, pgCache, podGangName, sc.pclq.Namespace)
-	if err != nil {
-		return false, err
-	}
-	if pg == nil {
-		logger.Info("PodGang resource not found, skipping pod", "podObjectKey", podObjectKey, "podGangName", podGangName)
-		return false, nil
-	}
-
-	if !isPodInPodReferences(pg, sc.pclq.Name, p.Name) {
-		logger.Info("Pod not yet recorded in PodGang PodReferences, skipping", "podObjectKey", podObjectKey, "podGangName", podGangName)
-		return false, nil
-	}
-
-	depsScheduled, err := r.areDependenciesScheduled(sc.ctx, logger, entry.DependsOn, sc.pclq.Namespace, pgCache, depScheduled)
-	if err != nil {
-		return false, err
-	}
-	if !depsScheduled {
-		logger.Info("Dependencies not yet scheduled, skipping gate removal", "podObjectKey", podObjectKey, "dependsOn", entry.DependsOn)
-		return false, nil
-	}
-
-	return true, nil
+	return pgByName, nil
 }
 
-// getOrFetchPodGang returns a PodGang from the cache, fetching it from the API if not present.
-// Returns (nil, nil) when the PodGang does not exist.
-func (r _resource) getOrFetchPodGang(ctx context.Context, cache map[string]*groveschedulerv1alpha1.PodGang, name, namespace string) (*groveschedulerv1alpha1.PodGang, error) {
-	if pg, ok := cache[name]; ok {
-		return pg, nil
-	}
-	pg, err := componentutils.GetPodGang(ctx, r.client, name, namespace)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			cache[name] = nil
-			return nil, nil
+// computeDependencyEpochScheduled returns, for each epoch that the gated pods' PodGangs depend on,
+// whether that epoch is fully scheduled. A gated pod's PodGang maps to a PodGangMap entry (by the
+// PodGang's epoch label), and that entry's DependsOn lists the epochs whose PodGangs must be
+// scheduled before this pod's gate may be lifted. An epoch counts as scheduled only when every
+// PodGang created at that epoch reports LastScheduled non-nil. Each distinct dependency epoch is
+// resolved with a single List. The result is keyed by dependency epoch.
+func (r _resource) computeDependencyEpochScheduled(sc *syncContext, pgByName map[string]*groveschedulerv1alpha1.PodGang) (map[string]bool, error) {
+	entryByEpoch := lo.KeyBy(sc.pgm.Spec.Entries, func(e grovecorev1alpha1.PodGangEntry) string { return e.Epoch })
+	depEpochs := sets.New[string]()
+	for _, pg := range pgByName {
+		if pg == nil {
+			continue
 		}
-		return nil, groveerr.WrapError(err,
-			errCodeGetPodGang,
-			component.OperationSync,
-			fmt.Sprintf("failed to get PodGang %v", client.ObjectKey{Namespace: namespace, Name: name}),
-		)
+		if entry, ok := entryByEpoch[pg.Labels[apicommon.LabelEpoch]]; ok {
+			depEpochs.Insert(entry.DependsOn...)
+		}
 	}
-	cache[name] = pg
-	return pg, nil
+	scheduledByEpoch := make(map[string]bool, depEpochs.Len())
+	for _, epoch := range sets.List(depEpochs) {
+		scheduled, err := componentutils.AllPodGangsAtEpochEverScheduled(sc.ctx, r.client, sc.pcs.Namespace, sc.pcs.Name, int32(sc.pcsReplicaIndex), epoch)
+		if err != nil {
+			return nil, err
+		}
+		scheduledByEpoch[epoch] = scheduled
+	}
+	return scheduledByEpoch, nil
+}
+
+// canRemoveSchedulingGate returns true when pod's scheduling gate can be lifted: its PodGang exists and records the pod
+// in PodReferences, the PodGang's epoch resolves to a PodGangMap entry, and every epoch that entry
+// DependsOn is scheduled. It reads only prefetched maps, so it makes no API calls.
+func canRemoveSchedulingGate(logger logr.Logger, pod *corev1.Pod, pclqName string, pgByName map[string]*groveschedulerv1alpha1.PodGang, entryByEpoch map[string]grovecorev1alpha1.PodGangEntry, scheduledByEpoch map[string]bool) bool {
+	podObjectKey := client.ObjectKeyFromObject(pod)
+	podGangName := pod.Labels[apicommon.LabelPodGang] // presence guaranteed by fetchGatedPodPodGangs
+
+	pg := pgByName[podGangName]
+	if pg == nil {
+		logger.Info("PodGang resource not found, skipping pod", "podObjectKey", podObjectKey, "podGangName", podGangName)
+		return false
+	}
+	if !isPodInPodReferences(pg, pclqName, pod.Name) {
+		logger.Info("Pod not yet recorded in PodGang PodReferences, skipping", "podObjectKey", podObjectKey, "podGangName", podGangName)
+		return false
+	}
+	entry, ok := entryByEpoch[pg.Labels[apicommon.LabelEpoch]]
+	if !ok {
+		logger.Info("PodGangMap entry not found for pod's PodGang epoch, skipping", "podObjectKey", podObjectKey, "podGangName", podGangName)
+		return false
+	}
+	for _, depEpoch := range entry.DependsOn {
+		if !scheduledByEpoch[depEpoch] {
+			logger.Info("Dependency epoch not yet scheduled, skipping gate removal", "podObjectKey", podObjectKey, "dependsOn", entry.DependsOn, "pendingEpoch", depEpoch)
+			return false
+		}
+	}
+	return true
 }
 
 // isPodInPodReferences returns true if podName appears in the PodGroup for pclqFQN in pg.
@@ -497,60 +518,6 @@ func isPodInPodReferences(pg *groveschedulerv1alpha1.PodGang, pclqFQN, podName s
 		}
 	}
 	return false
-}
-
-// areDependenciesScheduled returns true when every PodGang in depNames has
-// ScheduledReplicas >= MinReplicas for each of its PodGroups.
-func (r _resource) areDependenciesScheduled(ctx context.Context, logger logr.Logger, depNames []string, namespace string, pgCache map[string]*groveschedulerv1alpha1.PodGang, depScheduled map[string]bool) (bool, error) {
-	for _, depName := range depNames {
-		if scheduled, seen := depScheduled[depName]; seen {
-			if !scheduled {
-				return false, nil
-			}
-			continue
-		}
-		pg, err := r.getOrFetchPodGang(ctx, pgCache, depName, namespace)
-		if err != nil {
-			return false, err
-		}
-		if pg == nil {
-			depScheduled[depName] = false
-			return false, nil
-		}
-		scheduled, err := r.isPodGangScheduled(ctx, logger, namespace, pg)
-		if err != nil {
-			return false, err
-		}
-		depScheduled[depName] = scheduled
-		if !scheduled {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-// isPodGangScheduled returns true when every PodGroup in the PodGang has
-// ScheduledReplicas >= MinReplicas in its corresponding PodClique.
-func (r _resource) isPodGangScheduled(ctx context.Context, logger logr.Logger, namespace string, pg *groveschedulerv1alpha1.PodGang) (bool, error) {
-	for _, podGroup := range pg.Spec.PodGroups {
-		pclq := &grovecorev1alpha1.PodClique{}
-		if err := r.client.Get(ctx, client.ObjectKey{Name: podGroup.Name, Namespace: namespace}, pclq); err != nil {
-			return false, groveerr.WrapError(err,
-				errCodeGetPodClique,
-				component.OperationSync,
-				fmt.Sprintf("failed to get PodClique %s in namespace %s for PodGang scheduled check", podGroup.Name, namespace),
-			)
-		}
-		if pclq.Status.ScheduledReplicas < podGroup.MinReplicas {
-			logger.Info("PodGang not scheduled: PodClique has insufficient scheduled replicas",
-				"podGangName", pg.Name,
-				"pclqName", podGroup.Name,
-				"scheduledReplicas", pclq.Status.ScheduledReplicas,
-				"minReplicas", podGroup.MinReplicas)
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // hasPodGangSchedulingGate checks if a pod has the PodGang scheduling gate
