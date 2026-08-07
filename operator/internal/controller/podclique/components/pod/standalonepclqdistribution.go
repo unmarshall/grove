@@ -38,6 +38,61 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// reconcileStandalonePCLQDistribution drives the desired-state sync for a standalone PodClique. It
+// updates pclq.Status.PodGangMapping to the desired pod-to-PodGang distribution, then reconciles
+// live pods to match.
+//
+// Why the desired distribution is recorded in status:
+// A resource's status usually carries observed state, and desired state usually lives in the spec.
+// This field is neither. It is a decision the controller derives and owns, and it is recorded in
+// status because it cannot be expressed in the spec nor reconstructed by observation. Kubernetes
+// sanctions status carrying controller-owned derived state of this kind, so this is not a misuse of
+// status. Three points make the case:
+//   - It is not user intent. The intent is Spec.Replicas = N. This field is the controller's derived
+//     placement decision, not a second copy of intent.
+//   - It cannot be reconstructed from what is observable. The needed placement is history-dependent,
+//     meaning the correct target can differ for two pasts that present identically today. If a pod is
+//     lost out of band, its replacement must go back into the PodGang the lost pod was in, but the
+//     spec, the PodGangMap, and the live pods together do not record which PodGang that was. Only the
+//     persisted per-PodGang count tells the reconciler to refill that PodGang rather than the most
+//     recent one.
+//   - It is single-writer and self-consistent. It is written and read by this same reconciler in
+//     lockstep with its own actions, so its correctness does not depend on the PodGangMap
+//     component's asynchronous update timing.
+//
+// Direction of authority:
+//   - Coherent update in progress: PGM drives. status.PodGangMapping is overwritten from PGM entries
+//     each reconcile.
+//   - Steady state (and RollingRecreate): status.PodGangMapping drives. A Spec.Replicas change is
+//     translated into a count mutation. Scale-out adds pods to the highest-AnchorIndex anchor.
+//     Scale-in drains anchors highest-AnchorIndex first for the required count. This decides only
+//     how many pods leave each PodGang, not which pods.
+//
+// After the desired mapping is persisted, live pods are reconciled to it via per-PodGang deltas. The
+// deficit is created and the excess deleted, with a deletion sorter (scoped to each PodGang) choosing
+// which pods to delete in this realize-vs-live phase.
+func (r _resource) reconcileStandalonePCLQDistribution(logger logr.Logger, sc *syncContext) error {
+	if requeueErr := guardAgainstStaleSpecDuringCoherentUpdate(sc); requeueErr != nil {
+		return requeueErr
+	}
+	desiredMapping, err := r.computeDesiredPodGangMapping(sc)
+	if err != nil {
+		return err
+	}
+	if err = r.patchPodGangMapping(sc, desiredMapping); err != nil {
+		return err
+	}
+
+	// Reconcile expectations against the live pod set so subsequent create/delete decisions
+	// account for in-flight operations from prior reconciles.
+	terminatingUIDs, nonTerminatingUIDs := getTerminatingAndNonTerminatingPodUIDs(sc.existingPCLQPods)
+	r.expectationsStore.SyncExpectations(sc.pclqExpectationsStoreKey, nonTerminatingUIDs, terminatingUIDs)
+
+	currentMapping := buildLivePodGangMapping(sc.existingPCLQPods)
+	deltas := computePerPodGangDeltas(assignmentsToCountByName(desiredMapping), currentMapping)
+	return r.applyPerPodGangDeltas(logger, sc, deltas)
+}
+
 // guardAgainstStaleSpecDuringCoherentUpdate requeues when this reconcile sees a fresh PodGangMap
 // but a stale PodClique. The PCS reconciler writes PGM (G0) before the PCLQ Spec (G2); a PGM
 // watch can fire before the PCLQ Spec watch, so the cache may have new MPGs in PGM while
@@ -99,61 +154,6 @@ func isPCLQUpdateEndedForCurrentPCSGeneration(pcs *grovecorev1alpha1.PodCliqueSe
 	return pclq.Status.UpdateProgress.PodCliqueSetGenerationHash == *pcs.Status.CurrentGenerationHash
 }
 
-// reconcileStandalonePCLQDistribution drives the desired-state sync for a standalone PodClique. It
-// updates pclq.Status.PodGangMapping to the desired pod-to-PodGang distribution, then reconciles
-// live pods to match.
-//
-// Why the desired distribution is recorded in status:
-// A resource's status usually carries observed state, and desired state usually lives in the spec.
-// This field is neither. It is a decision the controller derives and owns, and it is recorded in
-// status because it cannot be expressed in the spec nor reconstructed by observation. Kubernetes
-// sanctions status carrying controller-owned derived state of this kind, so this is not a misuse of
-// status. Three points make the case:
-//   - It is not user intent. The intent is Spec.Replicas = N. This field is the controller's derived
-//     placement decision, not a second copy of intent.
-//   - It cannot be reconstructed from what is observable. The needed placement is history-dependent,
-//     meaning the correct target can differ for two pasts that present identically today. If a pod is
-//     lost out of band, its replacement must go back into the PodGang the lost pod was in, but the
-//     spec, the PodGangMap, and the live pods together do not record which PodGang that was. Only the
-//     persisted per-PodGang count tells the reconciler to refill that PodGang rather than the most
-//     recent one.
-//   - It is single-writer and self-consistent. It is written and read by this same reconciler in
-//     lockstep with its own actions, so its correctness does not depend on the PodGangMap
-//     component's asynchronous update timing.
-//
-// Direction of authority:
-//   - Coherent update in progress: PGM drives. status.PodGangMapping is overwritten from PGM entries
-//     each reconcile.
-//   - Steady state (and RollingRecreate): status.PodGangMapping drives. A Spec.Replicas change is
-//     translated into a count mutation. Scale-out adds pods to the highest-AnchorIndex anchor.
-//     Scale-in drains anchors highest-AnchorIndex first for the required count. This decides only
-//     how many pods leave each PodGang, not which pods.
-//
-// After the desired mapping is persisted, live pods are reconciled to it via per-PodGang deltas. The
-// deficit is created and the excess deleted, with a deletion sorter (scoped to each PodGang) choosing
-// which pods to delete in this realize-vs-live phase.
-func (r _resource) reconcileStandalonePCLQDistribution(logger logr.Logger, sc *syncContext) error {
-	if requeueErr := guardAgainstStaleSpecDuringCoherentUpdate(sc); requeueErr != nil {
-		return requeueErr
-	}
-	desiredMapping, err := r.computeDesiredPodGangMapping(sc)
-	if err != nil {
-		return err
-	}
-	if err = r.patchPodGangMapping(sc, desiredMapping); err != nil {
-		return err
-	}
-
-	// Reconcile expectations against the live pod set so subsequent create/delete decisions
-	// account for in-flight operations from prior reconciles.
-	terminatingUIDs, nonTerminatingUIDs := getTerminatingAndNonTerminatingPodUIDs(sc.existingPCLQPods)
-	r.expectationsStore.SyncExpectations(sc.pclqExpectationsStoreKey, nonTerminatingUIDs, terminatingUIDs)
-
-	currentMapping := buildLivePodGangMapping(sc.existingPCLQPods)
-	deltas := computePerPodGangDeltas(assignmentsToCountByName(desiredMapping), currentMapping)
-	return r.applyPerPodGangDeltas(logger, sc, deltas)
-}
-
 // computeDesiredPodGangMapping returns the desired pod-to-PodGang assignments for this PodClique.
 //
 // During a coherent update the PodGangMap is authoritative and the assignments are rebuilt from PGM
@@ -184,6 +184,32 @@ func (r _resource) computeDesiredPodGangMapping(sc *syncContext) ([]grovecorev1a
 		r.reducePodsForScaleIn(sc, desired, -diff)
 	}
 	return desired, nil
+}
+
+// buildMappingFromPodGangMap constructs this standalone PodClique's pod-to-PodGang assignments from
+// the PCS replica's PodGangMap (cached on sc.pgm). Only anchor entries carry standalone PodClique pod
+// counts, so every assignment references an anchor PodGang. Entries that do not include this
+// PodClique's clique, or hold a zero count, are skipped. Returns an empty slice when the PodGangMap
+// has not yet been created (sc.pgm is nil).
+func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alpha1.PodGangPodCountAssignment {
+	if sc.pgm == nil {
+		return nil
+	}
+	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
+	hash := *sc.pcs.Status.CurrentGenerationHash
+	var assignments []grovecorev1alpha1.PodGangPodCountAssignment
+	for _, entry := range sc.pgm.Spec.Entries {
+		count, ok := entry.PodCliques[sc.cliqueName]
+		if !ok || count == 0 {
+			continue
+		}
+		assignments = append(assignments, grovecorev1alpha1.PodGangPodCountAssignment{
+			PodGangName: apicommon.GenerateAnchorPodGangName(rnr, hash, entry.AnchorIndex),
+			Epoch:       entry.Epoch,
+			PodCount:    count,
+		})
+	}
+	return assignments
 }
 
 // sumPodCounts returns the total pod count across all assignments.
@@ -260,32 +286,6 @@ func (r _resource) reducePodsForScaleIn(sc *syncContext, desired []grovecorev1al
 	}
 }
 
-// buildMappingFromPodGangMap constructs this standalone PodClique's pod-to-PodGang assignments from
-// the PCS replica's PodGangMap (cached on sc.pgm). Only anchor entries carry standalone PodClique pod
-// counts, so every assignment references an anchor PodGang. Entries that do not include this
-// PodClique's clique, or hold a zero count, are skipped. Returns an empty slice when the PodGangMap
-// has not yet been created (sc.pgm is nil).
-func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alpha1.PodGangPodCountAssignment {
-	if sc.pgm == nil {
-		return nil
-	}
-	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
-	hash := *sc.pcs.Status.CurrentGenerationHash
-	var assignments []grovecorev1alpha1.PodGangPodCountAssignment
-	for _, entry := range sc.pgm.Spec.Entries {
-		count, ok := entry.PodCliques[sc.cliqueName]
-		if !ok || count == 0 {
-			continue
-		}
-		assignments = append(assignments, grovecorev1alpha1.PodGangPodCountAssignment{
-			PodGangName: apicommon.GenerateAnchorPodGangName(rnr, hash, entry.AnchorIndex),
-			Epoch:       entry.Epoch,
-			PodCount:    count,
-		})
-	}
-	return assignments
-}
-
 // patchPodGangMapping persists the desired assignments to pclq.Status.PodGangMapping if they differ
 // from the current value. Assignments with a zero pod count are pruned so the stored mapping carries
 // only PodGangs that own at least one pod of this PodClique. The assignments are canonicalized (sorted
@@ -317,16 +317,6 @@ func (r _resource) patchPodGangMapping(sc *syncContext, desired []grovecorev1alp
 	return nil
 }
 
-// assignmentsToCountByName projects the assignments to a PodGang-name to pod-count map for delta
-// computation against the live pod distribution.
-func assignmentsToCountByName(assignments []grovecorev1alpha1.PodGangPodCountAssignment) map[string]int32 {
-	m := make(map[string]int32, len(assignments))
-	for i := range assignments {
-		m[assignments[i].PodGangName] = assignments[i].PodCount
-	}
-	return m
-}
-
 // buildLivePodGangMapping counts non-terminating live pods by their LabelPodGang.
 func buildLivePodGangMapping(pods []*corev1.Pod) map[string]int32 {
 	mapping := make(map[string]int32)
@@ -341,6 +331,16 @@ func buildLivePodGangMapping(pods []*corev1.Pod) map[string]int32 {
 		mapping[pgName]++
 	}
 	return mapping
+}
+
+// assignmentsToCountByName projects the assignments to a PodGang-name to pod-count map for delta
+// computation against the live pod distribution.
+func assignmentsToCountByName(assignments []grovecorev1alpha1.PodGangPodCountAssignment) map[string]int32 {
+	m := make(map[string]int32, len(assignments))
+	for i := range assignments {
+		m[assignments[i].PodGangName] = assignments[i].PodCount
+	}
+	return m
 }
 
 // computePerPodGangDeltas returns desired - current for every PodGang appearing in either map.
