@@ -31,7 +31,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -41,11 +40,16 @@ const (
 	testPCSName    = "workload1"
 	testPCSReplica = 0
 	testHash       = "abc12"
-	// PodGang names follow the unified GeneratePodGangName format: <pcsName>-<replicaIndex>-<uniqueSuffix>.
-	// DependsOn determines role: nil = MPG/BPG, non-nil = TailPG/SPG.
-	pg0 = "workload1-0-0"
-	pg1 = "workload1-0-1"
-	pg2 = "workload1-0-2"
+	// Epochs identify PodGangMap entries (numeric, unix-nano-like). An anchor entry has no
+	// DependsOn; a tail entry DependsOn the epoch of the anchor it follows.
+	epoch0 = "100"
+	epoch1 = "200"
+	epoch2 = "300"
+	// PodGang resource names a gated pod's grove.io/podgang label points at. The name is decoupled
+	// from the epoch; a PodGang carries its epoch in the grove.io/epoch label.
+	pg0 = "workload1-0-abc12-0"
+	pg1 = "workload1-0-abc12-1"
+	pg2 = "workload1-0-abc12-2"
 	// PCLQ FQN used as PodGroup name inside PodGang resources.
 	pclqFQN = "workload1-0-pca"
 )
@@ -63,9 +67,9 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			name: "pod in PodGang with no DependsOn — gate removed",
 			setupObjects: func() []client.Object {
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 1}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 1}},
 				})
-				pg := buildPodGangWithRef(pg0, "pod-0")
+				pg := buildPodGangWithRef(pg0, epoch0, "pod-0")
 				return []client.Object{pgm, pg}
 			},
 			gatedPods: func() []*corev1.Pod {
@@ -77,14 +81,12 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			name: "pod depends on unscheduled PodGang — gate skipped",
 			setupObjects: func() []client.Object {
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 1}},
-					{Name: pg1, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{pg0}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 1}},
+					{Epoch: epoch1, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{epoch0}},
 				})
-				pg1PG := buildPodGangWithRef(pg1, "pod-1")
-				pg0PG := testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclqFQN, MinReplicas: 1}}).Build()
-				pg0PCLQ := buildTestPodClique(pclqFQN, 1, 0) // scheduledReplicas=0 < minReplicas=1
-				return []client.Object{pgm, pg1PG, pg0PG, pg0PCLQ}
+				pg1PG := buildPodGangWithRef(pg1, epoch1, "pod-1")
+				pg0PG := buildDependencyPodGang(pg0, epoch0, false) // epoch0 not scheduled
+				return []client.Object{pgm, pg1PG, pg0PG}
 			},
 			gatedPods: func() []*corev1.Pod {
 				return []*corev1.Pod{withGate(buildGatedPod("pod-1", pg1))}
@@ -95,14 +97,12 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			name: "pod depends on scheduled PodGang — gate removed",
 			setupObjects: func() []client.Object {
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 1}},
-					{Name: pg1, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{pg0}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 1}},
+					{Epoch: epoch1, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{epoch0}},
 				})
-				pg1PG := buildPodGangWithRef(pg1, "pod-1")
-				pg0PG := testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclqFQN, MinReplicas: 1}}).Build()
-				pg0PCLQ := buildTestPodClique(pclqFQN, 1, 1) // scheduledReplicas=1 >= minReplicas=1
-				return []client.Object{pgm, pg1PG, pg0PG, pg0PCLQ}
+				pg1PG := buildPodGangWithRef(pg1, epoch1, "pod-1")
+				pg0PG := buildDependencyPodGang(pg0, epoch0, true) // epoch0 scheduled
+				return []client.Object{pgm, pg1PG, pg0PG}
 			},
 			gatedPods: func() []*corev1.Pod {
 				return []*corev1.Pod{withGate(buildGatedPod("pod-1", pg1))}
@@ -110,24 +110,17 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			expectedGateRemoved: []string{"pod-1"},
 		},
 		{
-			name: "pod depends on multiple PodGangs — one unscheduled — gate skipped",
+			name: "pod depends on multiple epochs — one unscheduled — gate skipped",
 			setupObjects: func() []client.Object {
-				// pg0 and pg1 each own a distinct PCLQ (different replica indices).
-				pclq0FQN := "workload1-0-pca"
-				pclq1FQN := "workload1-1-pca"
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 2}},
-					{Name: pg1, PodCliques: map[string]int32{"pca": 2}},
-					{Name: pg2, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{pg0, pg1}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 2}},
+					{Epoch: epoch1, PodCliques: map[string]int32{"pca": 2}},
+					{Epoch: epoch2, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{epoch0, epoch1}},
 				})
-				pg2PG := buildPodGangWithRef(pg2, "pod-tail")
-				pg0PG := testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclq0FQN, MinReplicas: 2}}).Build()
-				pg1PG := testutils.NewPodGangBuilder(pg1, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclq1FQN, MinReplicas: 2}}).Build()
-				pg0PCLQ := buildTestPodClique(pclq0FQN, 2, 2) // scheduled
-				pg1PCLQ := buildTestPodClique(pclq1FQN, 2, 1) // not yet scheduled
-				return []client.Object{pgm, pg2PG, pg0PG, pg1PG, pg0PCLQ, pg1PCLQ}
+				pg2PG := buildPodGangWithRef(pg2, epoch2, "pod-tail")
+				pg0PG := buildDependencyPodGang(pg0, epoch0, true)  // scheduled
+				pg1PG := buildDependencyPodGang(pg1, epoch1, false) // not yet scheduled
+				return []client.Object{pgm, pg2PG, pg0PG, pg1PG}
 			},
 			gatedPods: func() []*corev1.Pod {
 				return []*corev1.Pod{withGate(buildGatedPod("pod-tail", pg2))}
@@ -135,23 +128,17 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			expectedSkipped: []string{"pod-tail"},
 		},
 		{
-			name: "pod depends on multiple PodGangs — all scheduled — gate removed",
+			name: "pod depends on multiple epochs — all scheduled — gate removed",
 			setupObjects: func() []client.Object {
-				pclq0FQN := "workload1-0-pca"
-				pclq1FQN := "workload1-1-pca"
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 2}},
-					{Name: pg1, PodCliques: map[string]int32{"pca": 2}},
-					{Name: pg2, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{pg0, pg1}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 2}},
+					{Epoch: epoch1, PodCliques: map[string]int32{"pca": 2}},
+					{Epoch: epoch2, PodCliques: map[string]int32{"pca": 1}, DependsOn: []string{epoch0, epoch1}},
 				})
-				pg2PG := buildPodGangWithRef(pg2, "pod-tail")
-				pg0PG := testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclq0FQN, MinReplicas: 2}}).Build()
-				pg1PG := testutils.NewPodGangBuilder(pg1, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclq1FQN, MinReplicas: 2}}).Build()
-				pg0PCLQ := buildTestPodClique(pclq0FQN, 2, 2)
-				pg1PCLQ := buildTestPodClique(pclq1FQN, 2, 2)
-				return []client.Object{pgm, pg2PG, pg0PG, pg1PG, pg0PCLQ, pg1PCLQ}
+				pg2PG := buildPodGangWithRef(pg2, epoch2, "pod-tail")
+				pg0PG := buildDependencyPodGang(pg0, epoch0, true)
+				pg1PG := buildDependencyPodGang(pg1, epoch1, true)
+				return []client.Object{pgm, pg2PG, pg0PG, pg1PG}
 			},
 			gatedPods: func() []*corev1.Pod {
 				return []*corev1.Pod{withGate(buildGatedPod("pod-tail", pg2))}
@@ -162,10 +149,10 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			name: "pod not yet in PodReferences — gate skipped",
 			setupObjects: func() []client.Object {
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 1}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 1}},
 				})
-				pg := testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: pclqFQN, MinReplicas: 1}}).Build()
+				// PodGang exists at epoch0 but does not record pod-0 in PodReferences.
+				pg := buildDependencyPodGang(pg0, epoch0, true)
 				return []client.Object{pgm, pg}
 			},
 			gatedPods: func() []*corev1.Pod {
@@ -177,7 +164,7 @@ func TestCheckAndRemovePodSchedulingGates(t *testing.T) {
 			name: "pod missing LabelPodGang — hard error",
 			setupObjects: func() []client.Object {
 				pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-					{Name: pg0, PodCliques: map[string]int32{"pca": 1}},
+					{Epoch: epoch0, PodCliques: map[string]int32{"pca": 1}},
 				})
 				return []client.Object{pgm}
 			},
@@ -260,7 +247,7 @@ func TestCheckAndRemovePodSchedulingGates_ConcurrentExecution(t *testing.T) {
 	const numPods = 5
 
 	pgm := buildPGM([]grovecorev1alpha1.PodGangEntry{
-		{Name: pg0, PodCliques: map[string]int32{"pca": numPods}},
+		{Epoch: epoch0, PodCliques: map[string]int32{"pca": numPods}},
 	})
 
 	var gatedPods []*corev1.Pod
@@ -275,11 +262,14 @@ func TestCheckAndRemovePodSchedulingGates_ConcurrentExecution(t *testing.T) {
 		podRefs = append(podRefs, groveschedulerv1alpha1.NamespacedName{Namespace: testNamespace, Name: name})
 	}
 
-	pg := testutils.NewPodGangBuilder(pg0, testNamespace).
+	pgBuilder := testutils.NewPodGangBuilder(pg0, testNamespace).
 		WithPodGroups([]groveschedulerv1alpha1.PodGroup{
 			{Name: pclqFQN, MinReplicas: numPods, PodReferences: podRefs},
-		}).Build()
-	objects = append(objects, pg)
+		})
+	for k, v := range epochLabels(epoch0) {
+		pgBuilder = pgBuilder.WithLabel(k, v)
+	}
+	objects = append(objects, pgBuilder.Build())
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(buildTestScheme(t)).
@@ -339,88 +329,7 @@ func TestRemovePodGangSchedulingGate(t *testing.T) {
 	})
 }
 
-func TestIsPodGangScheduled(t *testing.T) {
-	tests := []struct {
-		name              string
-		podCliques        []testPodClique
-		expectedScheduled bool
-		expectError       bool
-	}{
-		{
-			name: "all PodCliques meet MinReplicas",
-			podCliques: []testPodClique{
-				{name: "workload1-0-pca", minAvailable: 2, scheduledReplicas: 2},
-				{name: "workload1-0-pcb", minAvailable: 1, scheduledReplicas: 3},
-			},
-			expectedScheduled: true,
-		},
-		{
-			name: "one PodClique below MinReplicas",
-			podCliques: []testPodClique{
-				{name: "workload1-0-pca", minAvailable: 2, scheduledReplicas: 2},
-				{name: "workload1-0-pcb", minAvailable: 3, scheduledReplicas: 2},
-			},
-			expectedScheduled: false,
-		},
-		{
-			name: "single PodClique meets MinReplicas",
-			podCliques: []testPodClique{
-				{name: "workload1-0-pca", minAvailable: 1, scheduledReplicas: 1},
-			},
-			expectedScheduled: true,
-		},
-		{
-			name:        "PodClique not found — error",
-			podCliques:  []testPodClique{},
-			expectError: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var objects []client.Object
-
-			podGroups := make([]groveschedulerv1alpha1.PodGroup, len(tc.podCliques))
-			for i, pclq := range tc.podCliques {
-				podGroups[i] = groveschedulerv1alpha1.PodGroup{Name: pclq.name, MinReplicas: pclq.minAvailable}
-				objects = append(objects, buildTestPodClique(pclq.name, pclq.minAvailable, pclq.scheduledReplicas))
-			}
-
-			var pg *groveschedulerv1alpha1.PodGang
-			if len(tc.podCliques) == 0 {
-				pg = testutils.NewPodGangBuilder(pg0, testNamespace).
-					WithPodGroups([]groveschedulerv1alpha1.PodGroup{{Name: "missing-pclq", MinReplicas: 1}}).Build()
-			} else {
-				pg = testutils.NewPodGangBuilder(pg0, testNamespace).WithPodGroups(podGroups).Build()
-			}
-			objects = append(objects, pg)
-
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(buildTestScheme(t)).
-				WithObjects(objects...).
-				Build()
-
-			r := &_resource{client: fakeClient}
-			result, err := r.isPodGangScheduled(context.Background(), logr.Discard(), testNamespace, pg)
-
-			if tc.expectError {
-				require.Error(t, err)
-				assert.False(t, result)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tc.expectedScheduled, result)
-			}
-		})
-	}
-}
-
 // Test helper types and functions
-
-type testPodClique struct {
-	name              string
-	minAvailable      int32
-	scheduledReplicas int32
-}
 
 func buildTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -450,8 +359,21 @@ func withGate(pod *corev1.Pod) *corev1.Pod {
 	return pod
 }
 
-func buildPodGangWithRef(pgName, podName string) *groveschedulerv1alpha1.PodGang {
-	return testutils.NewPodGangBuilder(pgName, testNamespace).
+// epochLabels are the labels a PodGang at the given epoch carries. AllPodGangsAtEpochEverScheduled
+// lists dependency PodGangs by these, and gate removal reads grove.io/epoch to resolve the pod's
+// PodGangMap entry.
+func epochLabels(epoch string) map[string]string {
+	return map[string]string{
+		apicommon.LabelPartOfKey:                testPCSName,
+		apicommon.LabelPodCliqueSetReplicaIndex: "0",
+		apicommon.LabelEpoch:                    epoch,
+	}
+}
+
+// buildPodGangWithRef builds the PodGang a gated pod belongs to: it records the pod in
+// PodReferences and carries the epoch label used to resolve the pod's PodGangMap entry.
+func buildPodGangWithRef(pgName, epoch, podName string) *groveschedulerv1alpha1.PodGang {
+	b := testutils.NewPodGangBuilder(pgName, testNamespace).
 		WithPodGroups([]groveschedulerv1alpha1.PodGroup{
 			{
 				Name:        pclqFQN,
@@ -460,15 +382,25 @@ func buildPodGangWithRef(pgName, podName string) *groveschedulerv1alpha1.PodGang
 					{Namespace: testNamespace, Name: podName},
 				},
 			},
-		}).Build()
+		})
+	for k, v := range epochLabels(epoch) {
+		b = b.WithLabel(k, v)
+	}
+	return b.Build()
 }
 
-func buildTestPodClique(name string, minAvailable, scheduledReplicas int32) *grovecorev1alpha1.PodClique {
-	return &grovecorev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-		Spec:       grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(minAvailable)},
-		Status:     grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: scheduledReplicas},
+// buildDependencyPodGang builds a PodGang at the given epoch, discoverable by
+// AllPodGangsAtEpochEverScheduled. When scheduled, Status.LastScheduled is set so the epoch counts
+// as scheduled.
+func buildDependencyPodGang(pgName, epoch string, scheduled bool) *groveschedulerv1alpha1.PodGang {
+	b := testutils.NewPodGangBuilder(pgName, testNamespace)
+	for k, v := range epochLabels(epoch) {
+		b = b.WithLabel(k, v)
 	}
+	if scheduled {
+		b = b.WithStatusLastScheduled(metav1.Now())
+	}
+	return b.Build()
 }
 
 func TestGetPCSReplicaIndexFromPCLQ(t *testing.T) {
