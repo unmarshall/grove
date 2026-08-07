@@ -116,7 +116,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcsg *grovecore
 	}
 	logger.Info("Starting PodCliqueScalingGroup Sync", "pcsgObjectKey", client.ObjectKeyFromObject(syncCtx.pcsg))
 	// Run the sync flow
-	if err = r.runSyncFlow(logger, syncCtx); err != nil {
+	if err = r.runSyncFlow(ctx, logger, syncCtx); err != nil {
 		return err
 	}
 	return nil

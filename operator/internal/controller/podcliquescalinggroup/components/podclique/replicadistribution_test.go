@@ -71,7 +71,7 @@ const (
 	tcsScaleOutPG1       = "simple1-0-100001"
 )
 
-// newSyncContextForMappingTests builds a syncContext usable by computeDesiredPCSGReplicaMapping
+// newSyncContextForMappingTests builds a syncState usable by computeDesiredPCSGReplicaMapping
 // and buildMappingFromPodGangMap. The PCS spec drives IsCoherentUpdateInProgress: when
 // coherentUpdateInProgress=true, UpdateProgress is set with no UpdateEndedAt (mirrors the live
 // definition in IsCoherentUpdateInProgress).
@@ -80,7 +80,7 @@ func newSyncContextForMappingTests(
 	pcsgStatusMapping []grovecorev1alpha1.PodGangReplicaAssignment,
 	pgmEntries []grovecorev1alpha1.PodGangEntry,
 	coherentUpdateInProgress bool,
-) *syncContext {
+) *syncState {
 	pcsg := &grovecorev1alpha1.PodCliqueScalingGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: tcsPCSGFQN, Namespace: "default"},
 		Spec:       grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: pcsgSpecReplicas},
@@ -101,7 +101,7 @@ func newSyncContextForMappingTests(
 	pgm := &grovecorev1alpha1.PodGangMap{
 		Spec: grovecorev1alpha1.PodGangMapSpec{Entries: pgmEntries},
 	}
-	return &syncContext{
+	return &syncState{
 		pcs:             pcs,
 		pcsg:            pcsg,
 		pcsgConfig:      &grovecorev1alpha1.PodCliqueScalingGroupConfig{Name: tcsPCSGConfigName},
@@ -291,7 +291,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 	cliqueNames := []string{"pcb", "pcc"}
 
 	t.Run("no desired and no live PCLQs is a no-op", func(t *testing.T) {
-		dels, creates, err := computePCSGCountDeltas(map[int]string{}, nil, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(map[int]string{}, nil, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels)
 		assert.Empty(t, creates)
@@ -305,7 +305,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 1, tcsMPG0, false),
 			pcsgPCLQ("pcc", 1, tcsMPG0, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(map[int]string{}, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(map[int]string{}, live, cliqueNames)
 		require.NoError(t, err)
 		sort.Ints(dels)
 		assert.Equal(t, []int{0, 1}, dels)
@@ -320,7 +320,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 1, tcsMPG1, false),
 			pcsgPCLQ("pcc", 1, tcsMPG1, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels)
 		assert.Empty(t, creates)
@@ -333,7 +333,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG0, false),
 			pcsgPCLQ("pcc", 0, tcsMPG0, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels)
 		assert.Equal(t, map[int]string{1: tcsMPG1}, creates)
@@ -347,7 +347,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG1, false),
 			pcsgPCLQ("pcc", 0, tcsMPG1, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Equal(t, []int{0}, dels)
 		assert.Equal(t, map[int]string{0: tcsMPG0}, creates)
@@ -361,7 +361,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 5, tcsMPG1, false),
 			pcsgPCLQ("pcc", 5, tcsMPG1, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Equal(t, []int{5}, dels)
 		assert.Empty(t, creates)
@@ -375,7 +375,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 		live := []grovecorev1alpha1.PodClique{
 			pcsgPCLQ("pcc", 0, tcsMPG0, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels, "the existing pcc must not be deleted")
 		assert.Equal(t, map[int]string{0: tcsMPG0}, creates, "pcb must be re-emitted for creation")
@@ -393,7 +393,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG1, true), // terminating, old label
 			pcsgPCLQ("pcc", 0, tcsMPG1, true),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels, "terminating PCLQs must not be re-flagged for deletion")
 		assert.Equal(t, map[int]string{0: tcsMPG0}, creates)
@@ -410,7 +410,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG1, true),  // terminating, old label
 			pcsgPCLQ("pcc", 0, tcsMPG0, false), // fresh, new label
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels, "the live pcc must not be deleted")
 		assert.Equal(t, map[int]string{0: tcsMPG0}, creates, "pcb must be re-emitted for creation")
@@ -426,7 +426,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG0, true), // terminating, correct label
 			pcsgPCLQ("pcc", 0, tcsMPG0, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		assert.Empty(t, dels)
 		assert.Equal(t, map[int]string{0: tcsMPG0}, creates)
@@ -453,7 +453,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 7, tcsMPG0, false), // obsolete (idx 7 not desired)
 			pcsgPCLQ("pcc", 7, tcsMPG0, false),
 		}
-		dels, creates, err := computePCSGCountDeltas(desired, live, cliqueNames)
+		dels, creates, err := computePCSGReplicaCreationsAndDeletions(desired, live, cliqueNames)
 		require.NoError(t, err)
 		sort.Ints(dels)
 		assert.Equal(t, []int{2, 7}, dels)
@@ -467,7 +467,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG0, false),
 			pcsgPCLQWithoutLabels("pcc", 0, apicommon.LabelPodGang), // strip podgang label
 		}
-		_, _, err := computePCSGCountDeltas(map[int]string{0: tcsMPG0}, live, cliqueNames)
+		_, _, err := computePCSGReplicaCreationsAndDeletions(map[int]string{0: tcsMPG0}, live, cliqueNames)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), apicommon.LabelPodGang)
 	})
@@ -476,7 +476,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 		live := []grovecorev1alpha1.PodClique{
 			pcsgPCLQWithoutLabels("pcb", 0, apicommon.LabelPodCliqueScalingGroupReplicaIndex),
 		}
-		_, _, err := computePCSGCountDeltas(map[int]string{0: tcsMPG0}, live, cliqueNames)
+		_, _, err := computePCSGReplicaCreationsAndDeletions(map[int]string{0: tcsMPG0}, live, cliqueNames)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), apicommon.LabelPodCliqueScalingGroupReplicaIndex)
 	})
@@ -487,7 +487,7 @@ func TestComputePCSGCountDeltas(t *testing.T) {
 			pcsgPCLQ("pcb", 0, tcsMPG0, false),
 			pcsgPCLQ("pcc", 0, tcsMPG1, false),
 		}
-		_, _, err := computePCSGCountDeltas(map[int]string{0: tcsMPG0}, live, cliqueNames)
+		_, _, err := computePCSGReplicaCreationsAndDeletions(map[int]string{0: tcsMPG0}, live, cliqueNames)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "divergent")
 	})
@@ -518,7 +518,7 @@ func pcsgPCLQ(cliqueName string, pcsgReplicaIndex int, podGangName string, termi
 }
 
 // pcsgPCLQWithoutLabels constructs a PCLQ fixture where the named label is missing. Used by
-// error-path tests that exercise the contract-violation branches of computePCSGCountDeltas.
+// error-path tests that exercise the contract-violation branches of computePCSGReplicaCreationsAndDeletions.
 func pcsgPCLQWithoutLabels(cliqueName string, pcsgReplicaIndex int, missingLabel string) grovecorev1alpha1.PodClique {
 	pclq := pcsgPCLQ(cliqueName, pcsgReplicaIndex, tcsMPG0, false)
 	delete(pclq.Labels, missingLabel)

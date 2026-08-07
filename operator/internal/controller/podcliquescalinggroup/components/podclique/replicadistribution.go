@@ -68,16 +68,16 @@ import (
 //     scale-in drains assignments by role.
 //
 // Each assignment records the entry epoch, role, anchor index, and this PCSG's replica indices. The
-// PodGang name is not stored; applyPCSGPerPodGangDeltas derives it from the replica index.
-func (r _resource) reconcilePCSGReplicaDistribution(logger logr.Logger, sc *syncContext) error {
-	desiredMapping, err := r.computeDesiredPCSGReplicaMapping(sc)
+// PodGang name is not stored; reconcilePCSGReplicasToDesiredMapping derives it from the replica index.
+func (r _resource) reconcilePCSGReplicaDistribution(ctx context.Context, logger logr.Logger, ss *syncState) error {
+	desiredMapping, err := r.computeDesiredPCSGReplicaMapping(ss)
 	if err != nil {
 		return err
 	}
-	if err = r.patchPCSGPodGangMapping(sc, desiredMapping); err != nil {
+	if err = r.patchPCSGPodGangMapping(ctx, ss, desiredMapping); err != nil {
 		return err
 	}
-	return r.applyPCSGPerPodGangDeltas(logger, sc, desiredMapping)
+	return r.reconcilePCSGReplicasToDesiredMapping(ctx, logger, ss, desiredMapping)
 }
 
 // computeDesiredPCSGReplicaMapping returns the desired per-PodGang replica assignments for this PCSG.
@@ -85,21 +85,21 @@ func (r _resource) reconcilePCSGReplicaDistribution(logger logr.Logger, sc *sync
 // During a coherent update the PodGangMap is authoritative and the assignments are rebuilt from PGM
 // entries. In steady state the existing status assignments are the source of truth and are adjusted
 // only when Spec.Replicas drifts from the assigned replica count.
-func (r _resource) computeDesiredPCSGReplicaMapping(sc *syncContext) ([]grovecorev1alpha1.PodGangReplicaAssignment, error) {
-	if componentutils.IsCoherentUpdateInProgress(sc.pcs) {
-		return r.buildMappingFromPodGangMap(sc), nil
+func (r _resource) computeDesiredPCSGReplicaMapping(ss *syncState) ([]grovecorev1alpha1.PodGangReplicaAssignment, error) {
+	if componentutils.IsCoherentUpdateInProgress(ss.pcs) {
+		return r.buildMappingFromPodGangMap(ss), nil
 	}
 
 	var desired []grovecorev1alpha1.PodGangReplicaAssignment
-	if len(sc.pcsg.Status.PodGangMapping) == 0 {
+	if len(ss.pcsg.Status.PodGangMapping) == 0 {
 		// Fresh PCSG — seed from the PodGangMap (created by the PCS reconciler from spec).
-		desired = r.buildMappingFromPodGangMap(sc)
+		desired = r.buildMappingFromPodGangMap(ss)
 	} else {
-		desired = cloneAssignments(sc.pcsg.Status.PodGangMapping)
+		desired = cloneAssignments(ss.pcsg.Status.PodGangMapping)
 	}
 
 	currentSum := sumReplicaIndices(desired)
-	diff := sc.pcsg.Spec.Replicas - currentSum
+	diff := ss.pcsg.Spec.Replicas - currentSum
 	switch {
 	case diff > 0:
 		// Scale-out adds the new replica indices [currentSum, Spec.Replicas) to the ScaleOut
@@ -118,10 +118,10 @@ func (r _resource) computeDesiredPCSGReplicaMapping(sc *syncContext) ([]grovecor
 // projected onto this PCSG. It carries the entry epoch, role, anchor index, and the replica indices
 // this PCSG contributes to that entry. The PodGang name is not stored. Consumers derive it from the
 // index. Entries that do not reference this PCSG are skipped.
-func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alpha1.PodGangReplicaAssignment {
+func (r _resource) buildMappingFromPodGangMap(ss *syncState) []grovecorev1alpha1.PodGangReplicaAssignment {
 	var assignments []grovecorev1alpha1.PodGangReplicaAssignment
-	for _, entry := range sc.podGangMap.Spec.Entries {
-		indices, ok := entry.PCSGReplicaIndices[sc.pcsgConfig.Name]
+	for _, entry := range ss.podGangMap.Spec.Entries {
+		indices, ok := entry.PCSGReplicaIndices[ss.pcsgConfig.Name]
 		if !ok || len(indices) == 0 {
 			continue
 		}
@@ -228,22 +228,22 @@ func dropEmptyAssignments(assignments []grovecorev1alpha1.PodGangReplicaAssignme
 // differ from the current value. The desired assignments are canonicalized (sorted by PodGang name,
 // each ReplicaIndices sorted) so the stored order is deterministic and a plain equality check avoids
 // waking other reconcilers via a no-op patch. An empty desired is normalized to nil.
-func (r _resource) patchPCSGPodGangMapping(sc *syncContext, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
+func (r _resource) patchPCSGPodGangMapping(ctx context.Context, ss *syncState, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
 	canonicalizeAssignments(desired)
 	if len(desired) == 0 {
 		desired = nil
 	}
-	if reflect.DeepEqual(sc.pcsg.Status.PodGangMapping, desired) {
+	if reflect.DeepEqual(ss.pcsg.Status.PodGangMapping, desired) {
 		return nil
 	}
-	patch := client.MergeFrom(sc.pcsg.DeepCopy())
-	sc.pcsg.Status.PodGangMapping = desired
-	if err := client.IgnoreNotFound(r.client.Status().Patch(sc.ctx, sc.pcsg, patch)); err != nil {
+	patch := client.MergeFrom(ss.pcsg.DeepCopy())
+	ss.pcsg.Status.PodGangMapping = desired
+	if err := client.IgnoreNotFound(r.client.Status().Patch(ctx, ss.pcsg, patch)); err != nil {
 		return groveerr.WrapError(err,
 			errCodeUpdateStatus,
 			component.OperationSync,
 			fmt.Sprintf("failed to patch PodGangMapping on PodCliqueScalingGroup %v",
-				client.ObjectKeyFromObject(sc.pcsg)))
+				client.ObjectKeyFromObject(ss.pcsg)))
 	}
 	return nil
 }
@@ -260,58 +260,63 @@ func canonicalizeAssignments(assignments []grovecorev1alpha1.PodGangReplicaAssig
 	})
 }
 
-// applyPCSGPerPodGangDeltas reconciles live PCLQs to the desired mapping. For each (pgName, indices)
-// pair in desired, every index `i` should have one PCLQ per CliqueName at FQN
-// <pcsgFQN>-<i>-<cliqueName> labeled with grove.io/podgang=<pgName>. Indices not in
-// ∪slices(desired) get their PCLQs deleted entirely.
+// reconcilePCSGReplicasToDesiredMapping reconciles the live PodCliques of this PodCliqueScalingGroup
+// to the desired replica assignments, in order:
+//  1. Derive each replica index's target PodGang name from the assignment role. An anchor
+//     assignment's indices map to the one anchor PodGang. A non-anchor assignment's indices each map
+//     to their own non-anchor PodGang.
+//  2. Compute which replica indices to create and which to delete.
+//  3. Apply deletions before creations, so the controller does not race itself at an index still
+//     held by a doomed PodClique.
+//  4. Sync the PodClique specs for the OnDelete strategy.
 //
-// PCLQs whose live PodGang label disagrees with status are deleted; the next reconcile creates
-// them under the correct PodGang. Deletes go before creates so the controller does not race
-// with itself in creating PCLQs at indices currently held by a doomed PCLQ.
-func (r _resource) applyPCSGPerPodGangDeltas(logger logr.Logger, sc *syncContext, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
-	hash := *sc.pcs.Status.CurrentGenerationHash
+// A replica index whose live PodGang label disagrees with the desired name is deleted and recreated
+// under the correct PodGang on the next reconcile. A replica index absent from every assignment is
+// obsolete and its PodCliques are deleted.
+func (r _resource) reconcilePCSGReplicasToDesiredMapping(ctx context.Context, logger logr.Logger, ss *syncState, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
+	hash := *ss.pcs.Status.CurrentGenerationHash
 	// Derive each replica index's PodGang name. An anchor assignment's indices all map to the anchor
 	// PodGang name. A non-anchor assignment's indices each map to their own non-anchor PodGang name.
 	desiredIndexToPG := make(map[int]string)
 	for i := range desired {
 		for _, idx := range desired[i].ReplicaIndices {
 			if desired[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-				desiredIndexToPG[int(idx)] = apicommon.GenerateAnchorPodGangName(sc.pcsResourceNameReplica, hash, desired[i].AnchorIndex)
+				desiredIndexToPG[int(idx)] = apicommon.GenerateAnchorPodGangName(ss.pcsResourceNameReplica, hash, desired[i].AnchorIndex)
 			} else {
-				desiredIndexToPG[int(idx)] = apicommon.GenerateNonAnchorPodGangName(sc.pcsResourceNameReplica, hash, sc.pcsgConfig.Name, idx)
+				desiredIndexToPG[int(idx)] = apicommon.GenerateNonAnchorPodGangName(ss.pcsResourceNameReplica, hash, ss.pcsgConfig.Name, idx)
 			}
 		}
 	}
 
-	deletions, creations, err := computePCSGCountDeltas(desiredIndexToPG, sc.existingPCLQs, sc.pcsg.Spec.CliqueNames)
+	deletions, creations, err := computePCSGReplicaCreationsAndDeletions(desiredIndexToPG, ss.existingPCLQs, ss.pcsg.Spec.CliqueNames)
 	if err != nil {
 		return groveerr.WrapError(err,
 			errCodeParsePodCliqueScalingGroupReplicaIndex,
 			component.OperationSync,
 			fmt.Sprintf("failed to compute PCSG replica deltas for PodCliqueScalingGroup %v",
-				client.ObjectKeyFromObject(sc.pcsg)))
+				client.ObjectKeyFromObject(ss.pcsg)))
 	}
 	logger.V(4).Info("pcsg indices for deletions and creations", "deletions", deletions, "creations", creations)
 	if len(deletions) > 0 {
-		if err := r.deletePCSGReplicas(logger, sc, deletions); err != nil {
+		if err = r.deletePCSGReplicas(ctx, logger, ss, deletions); err != nil {
 			return err
 		}
 	}
 	if len(creations) > 0 {
-		if err := r.createPCSGReplicas(logger, sc, creations); err != nil {
+		if err = r.createPCSGReplicas(ctx, logger, ss, creations); err != nil {
 			return err
 		}
 	}
-	if componentutils.IsOnDeleteStrategy(sc.pcs) {
-		if err := r.syncOnDeletePCLQSpecs(logger, sc, desiredIndexToPG); err != nil {
+	if componentutils.IsOnDeleteStrategy(ss.pcs) {
+		if err = r.syncOnDeletePCLQSpecs(ctx, logger, ss, desiredIndexToPG); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// computePCSGCountDeltas compares desiredIndexToPG (the authoritative replica index → PodGang
-// mapping from status) against the live PCLQs and returns:
+// computePCSGReplicaCreationsAndDeletions compares desiredIndexToPG (the authoritative replica index
+// → PodGang mapping from status) against the live PCLQs and returns:
 //   - deletions: replica indices whose live PCLQs should be deleted. Sources:
 //     1. Indices not in desiredIndexToPG (obsolete — index belongs to no PodGang).
 //     2. Indices whose live LabelPodGang disagrees with desired (the PCLQ will be recreated
@@ -321,56 +326,20 @@ func (r _resource) applyPCSGPerPodGangDeltas(logger logr.Logger, sc *syncContext
 //     stay in `creations` so the next reconcile creates the missing siblings; the existing
 //     PCLQs are left untouched (the Create attempt swallows AlreadyExists for the present ones).
 //
-// Terminating PCLQs are ignored entirely — they do not contribute to liveByIndex, and the
-// AlreadyExists swallow in doCreate handles the brief race window where the operator tries to
-// re-create an FQN whose old PCLQ is still terminating.
-//
-// All live PCLQs at one PCSG replica index must share the same LabelPodGang (Grove stamps it
-// once at creation and never updates it). A missing label or divergent labels at one index
-// indicate a contract violation and surface as an error.
-func computePCSGCountDeltas(desiredIndexToPG map[int]string, livePCLQs []grovecorev1alpha1.PodClique, pcsgCliqueNames []string) (deletionIndices []int, creations map[int]string, err error) {
+// The live PCLQs are indexed by indexLivePCSGReplicas, which skips terminating PCLQs and validates
+// the shared-PodGang-label contract. The AlreadyExists swallow in doCreate handles the brief race
+// window where the operator tries to re-create an FQN whose old PCLQ is still terminating.
+func computePCSGReplicaCreationsAndDeletions(desiredIndexToPG map[int]string, livePCLQs []grovecorev1alpha1.PodClique, pcsgCliqueNames []string) (deletionIndices []int, creations map[int]string, err error) {
+	livePodGangByIndex, liveCliquesByIndex, err := indexLivePCSGReplicas(livePCLQs)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	creations = make(map[int]string, len(desiredIndexToPG))
 	maps.Copy(creations, desiredIndexToPG)
 
-	// liveByIndex: PCSG replica index → the LabelPodGang shared by every PCLQ at that index.
-	liveByIndex := make(map[int]string)
-	// liveCliquesByIndex: PCSG replica index → set of clique names with a non-terminating PCLQ.
-	// Used to detect "half-populated" indices where some cliques exist and others don't.
-	liveCliquesByIndex := make(map[int]sets.Set[string])
-
-	for i := range livePCLQs {
-		if k8sutils.IsResourceTerminating(livePCLQs[i].ObjectMeta) {
-			continue
-		}
-		idx, parseErr := k8sutils.GetPodCliqueScalingGroupReplicaIndex(livePCLQs[i].ObjectMeta)
-		if parseErr != nil {
-			err = parseErr
-			return
-		}
-		pgLabel, ok := livePCLQs[i].Labels[apicommon.LabelPodGang]
-		if !ok {
-			err = fmt.Errorf("PodClique %s is missing required %s label", livePCLQs[i].Name, apicommon.LabelPodGang)
-			return
-		}
-		if existing, seen := liveByIndex[idx]; seen && existing != pgLabel {
-			err = fmt.Errorf("PodCliques at PCSG replica index %d have divergent %s labels: %q vs %q", idx, apicommon.LabelPodGang, existing, pgLabel)
-			return
-		}
-		liveByIndex[idx] = pgLabel
-
-		cliqueName, parseErr := utils.GetPodCliqueNameFromPodCliqueFQN(livePCLQs[i].ObjectMeta)
-		if parseErr != nil {
-			err = parseErr
-			return
-		}
-		if liveCliquesByIndex[idx] == nil {
-			liveCliquesByIndex[idx] = sets.New[string]()
-		}
-		liveCliquesByIndex[idx].Insert(cliqueName)
-	}
-
 	expectedCliques := sets.New(pcsgCliqueNames...)
-	for idx, livePodGangLabel := range liveByIndex {
+	for idx, livePodGangLabel := range livePodGangByIndex {
 		desiredPG, inDesired := desiredIndexToPG[idx]
 		if !inDesired || livePodGangLabel != desiredPG {
 			// Either the index is obsolete or its PodGang label disagrees with desired —
@@ -387,13 +356,51 @@ func computePCSGCountDeltas(desiredIndexToPG map[int]string, livePCLQs []groveco
 		}
 	}
 
-	return
+	return deletionIndices, creations, nil
+}
+
+// indexLivePCSGReplicas groups non-terminating live PCLQs by PCSG replica index. It returns, per
+// index, the LabelPodGang shared by every PCLQ at that index (livePodGangByIndex) and the set of
+// clique names present (liveCliquesByIndex, used to detect half-populated indices). All live PCLQs
+// at one index must share the same LabelPodGang, which Grove stamps once at creation and never
+// updates. A missing label or divergent labels at one index indicate a contract violation and
+// surface as an error. Terminating PCLQs are skipped.
+func indexLivePCSGReplicas(livePCLQs []grovecorev1alpha1.PodClique) (livePodGangByIndex map[int]string, liveCliquesByIndex map[int]sets.Set[string], err error) {
+	livePodGangByIndex = make(map[int]string, len(livePCLQs))
+	liveCliquesByIndex = make(map[int]sets.Set[string], len(livePCLQs))
+	for i := range livePCLQs {
+		if k8sutils.IsResourceTerminating(livePCLQs[i].ObjectMeta) {
+			continue
+		}
+		idx, parseErr := k8sutils.GetPodCliqueScalingGroupReplicaIndex(livePCLQs[i].ObjectMeta)
+		if parseErr != nil {
+			return nil, nil, parseErr
+		}
+		pgLabel, ok := livePCLQs[i].Labels[apicommon.LabelPodGang]
+		if !ok {
+			return nil, nil, fmt.Errorf("PodClique %s is missing required %s label", livePCLQs[i].Name, apicommon.LabelPodGang)
+		}
+		if existing, seen := livePodGangByIndex[idx]; seen && existing != pgLabel {
+			return nil, nil, fmt.Errorf("PodCliques at PCSG replica index %d have divergent %s labels: %q vs %q", idx, apicommon.LabelPodGang, existing, pgLabel)
+		}
+		livePodGangByIndex[idx] = pgLabel
+
+		cliqueName, parseErr := utils.GetPodCliqueNameFromPodCliqueFQN(livePCLQs[i].ObjectMeta)
+		if parseErr != nil {
+			return nil, nil, parseErr
+		}
+		if liveCliquesByIndex[idx] == nil {
+			liveCliquesByIndex[idx] = sets.New[string]()
+		}
+		liveCliquesByIndex[idx].Insert(cliqueName)
+	}
+	return livePodGangByIndex, liveCliquesByIndex, nil
 }
 
 // deletePCSGReplicas deletes all PCLQs belonging to the given PCSG replica indices.
-func (r _resource) deletePCSGReplicas(logger logr.Logger, sc *syncContext, replicaIndices []int) error {
-	deletionTasks := r.createDeleteTasks(logger, sc.pcs, sc.pcsg.Name, replicaIndices, "delete excess PCSG replicas")
-	return r.triggerDeletionOfPodCliques(sc.ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deletionTasks)
+func (r _resource) deletePCSGReplicas(ctx context.Context, logger logr.Logger, ss *syncState, replicaIndices []int) error {
+	deletionTasks := r.createDeleteTasks(logger, ss.pcs, ss.pcsg.Name, replicaIndices, "delete excess PCSG replicas")
+	return r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(ss.pcsg), deletionTasks)
 }
 
 // createPCSGReplicas creates the PCLQs for the given PCSG replica index → PodGang name
@@ -401,32 +408,32 @@ func (r _resource) deletePCSGReplicas(logger logr.Logger, sc *syncContext, repli
 // uses doCreate (a plain Create) since this path only handles PCLQs that don't yet exist; the
 // OnDelete strategy's "preserve existing replicas via CreateOrPatch" behavior is irrelevant for
 // fresh PCLQs.
-func (r _resource) createPCSGReplicas(logger logr.Logger, sc *syncContext, assignments map[int]string) error {
-	tasks := make([]utils.Task, 0, len(assignments)*len(sc.pcsg.Spec.CliqueNames))
+func (r _resource) createPCSGReplicas(ctx context.Context, logger logr.Logger, ss *syncState, assignments map[int]string) error {
+	tasks := make([]utils.Task, 0, len(assignments)*len(ss.pcsg.Spec.CliqueNames))
 	// Sort assignments by index for deterministic creation order.
 	indices := lo.Keys(assignments)
 	sort.Ints(indices)
 	for _, pcsgReplicaIndex := range indices {
 		podGangName := assignments[pcsgReplicaIndex]
-		for _, cliqueName := range sc.pcsg.Spec.CliqueNames {
-			pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: sc.pcsg.Name, Replica: pcsgReplicaIndex}, cliqueName)
-			pclqObjectKey := client.ObjectKey{Name: pclqFQN, Namespace: sc.pcsg.Namespace}
+		for _, cliqueName := range ss.pcsg.Spec.CliqueNames {
+			pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: ss.pcsg.Name, Replica: pcsgReplicaIndex}, cliqueName)
+			pclqObjectKey := client.ObjectKey{Name: pclqFQN, Namespace: ss.pcsg.Namespace}
 			pgName := podGangName
 			replicaIdx := pcsgReplicaIndex
 			tasks = append(tasks, utils.Task{
 				Name: fmt.Sprintf("CreatePodClique-%s", pclqFQN),
 				Fn: func(ctx context.Context) error {
-					return r.doCreate(ctx, logger, sc.pcs, sc.pcsg, replicaIdx, pclqObjectKey, pgName)
+					return r.doCreate(ctx, logger, ss.pcs, ss.pcsg, replicaIdx, pclqObjectKey, pgName)
 				},
 			})
 		}
 	}
-	if runResult := utils.RunConcurrently(sc.ctx, logger, tasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errCodeCreatePodCliques,
 			component.OperationSync,
 			fmt.Sprintf("Error creating PodCliques for PodCliqueScalingGroup: %v, run summary: %s",
-				client.ObjectKeyFromObject(sc.pcsg), runResult.GetSummary()))
+				client.ObjectKeyFromObject(ss.pcsg), runResult.GetSummary()))
 	}
 	return nil
 }
@@ -441,10 +448,10 @@ func (r _resource) createPCSGReplicas(logger logr.Logger, sc *syncContext, assig
 // Only PCLQs that belong to indices present in desiredIndexToPG are patched; PCLQs targeted for
 // deletion (absent from desiredIndexToPG) are left alone — they will be removed by
 // deletePCSGReplicas on this same reconcile.
-func (r _resource) syncOnDeletePCLQSpecs(logger logr.Logger, sc *syncContext, desiredIndexToPG map[int]string) error {
+func (r _resource) syncOnDeletePCLQSpecs(ctx context.Context, logger logr.Logger, ss *syncState, desiredIndexToPG map[int]string) error {
 	tasks := make([]utils.Task, 0)
-	for i := range sc.existingPCLQs {
-		pclq := &sc.existingPCLQs[i]
+	for i := range ss.existingPCLQs {
+		pclq := &ss.existingPCLQs[i]
 		if k8sutils.IsResourceTerminating(pclq.ObjectMeta) {
 			continue
 		}
@@ -459,7 +466,7 @@ func (r _resource) syncOnDeletePCLQSpecs(logger logr.Logger, sc *syncContext, de
 		if !inDesired {
 			continue
 		}
-		expectedHash, hasExpected := sc.expectedPCLQPodTemplateHashMap[pclq.Name]
+		expectedHash, hasExpected := ss.expectedPCLQPodTemplateHashMap[pclq.Name]
 		if !hasExpected {
 			continue
 		}
@@ -473,7 +480,7 @@ func (r _resource) syncOnDeletePCLQSpecs(logger logr.Logger, sc *syncContext, de
 		tasks = append(tasks, utils.Task{
 			Name: fmt.Sprintf("UpdatePodClique-%s", pclqObjectKey.Name),
 			Fn: func(ctx context.Context) error {
-				return r.doCreateOrUpdate(ctx, logger, sc.pcs, sc.pcsg, replicaIdx, pclqObjectKey, true, pgName)
+				return r.doCreateOrUpdate(ctx, logger, ss.pcs, ss.pcsg, replicaIdx, pclqObjectKey, true, pgName)
 			},
 		})
 	}
@@ -481,12 +488,12 @@ func (r _resource) syncOnDeletePCLQSpecs(logger logr.Logger, sc *syncContext, de
 		return nil
 	}
 	logger.Info("Patching PCSG-owned PodCliques to new spec for OnDelete strategy", "count", len(tasks))
-	if runResult := utils.RunConcurrently(sc.ctx, logger, tasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errCodeCreateOrUpdatePodCliques,
 			component.OperationSync,
 			fmt.Sprintf("Error updating PodCliques for OnDelete PodCliqueScalingGroup %v: %s",
-				client.ObjectKeyFromObject(sc.pcsg), runResult.GetSummary()))
+				client.ObjectKeyFromObject(ss.pcsg), runResult.GetSummary()))
 	}
 	return nil
 }
