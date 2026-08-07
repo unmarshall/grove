@@ -124,7 +124,7 @@ To realise the MVU model on top of Grove's existing scheduling primitives, Coher
 | Name              | Legacy / New | When created | What it holds |
 | ----------------- | ------------ | ------------ | ------------- |
 | **BPG** (Base PodGang)           | Legacy | Initial deployment of a `PodCliqueSet` that uses `RollingRecreate`. | One per PCS replica. Carries every replica of every standalone `PodClique` plus `MinAvailable` replicas of every `PodCliqueScalingGroup`. |
-| **SPG** (Scaled PodGang)         | Legacy / New | One per PCSG replica above `MinAvailable`. Created at initial deployment of a `PodCliqueSet` that uses `RollingRecreate` (legacy naming `<pcs-name>-<replica>-scaled-<n>`), or during steady-state PCSG scale-out after a coherent update (new naming `<pcs-name>-<replica>-<unix-nano>`). Structurally identical to a TPG but created outside an update window. | A single PCSG replica. |
+| **SPG** (Scaled PodGang)         | Legacy / New | One per PCSG replica above `MinAvailable`. Created at initial deployment of a `PodCliqueSet` that uses `RollingRecreate` (legacy naming `<pcs-name>-<replica>-scaled-<n>`), or during steady-state PCSG scale-out after a coherent update (new naming `<pcs-name>-<replica>-<generation-hash>-<pcsg-name>-<pcsg-replica-index>`). Structurally identical to a TPG but created outside an update window. | A single PCSG replica. |
 | **MPG** (Minimum-Viable PodGang) | New    | Initial deployment of a `PodCliqueSet` under `Coherent`, and again at the first sub-step of every MPG-bearing step of a coherent update. | At initial deployment, carries every replica of every standalone `PodClique` plus `MinAvailable` replicas of every `PodCliqueScalingGroup`. This is structurally identical to a BPG, with the same `DependsOn` semantics. At update time, starts at `MinAvailable` of every **in-scope** component and grows as later sub-steps of the same step subsume standalone PCLQ pods into it. The bootstrap MPG persists into steady state. Each MPG-bearing step of a coherent update generates a fresh MPG. |
 | **TPG** (Tail PodGang)           | New    | Initial deployment of a `PodCliqueSet` under `Coherent` (one per PCSG replica above `MinAvailable`, alongside the MPG), and during a coherent update in TPG sub-steps. | PCSG replicas above `MinAvailable`. Structurally identical to an SPG. At initial deployment its PGM entry's `DependsOn` is set to the MPG's epoch. During a coherent update its `DependsOn` is set to the immediately prior sub-step's epoch, so the scheduler places it only after the prior sub-step's PodGangs report `LastScheduled != nil`. |
 
@@ -279,45 +279,65 @@ type PodGangMapSpec struct {
     PodCliqueSetReplicaIndex int32 `json:"podCliqueSetReplicaIndex"`
     // Entries is the ordered list of desired PodGangs for this PodCliqueSet replica.
     // +listType=map
-    // +listMapKey=name
+    // +listMapKey=epoch
     Entries []PodGangEntry `json:"entries"`
 }
 
+// PodGangEntryRole classifies the role a PodGangMap entry plays in a PodCliqueSet replica.
+type PodGangEntryRole string
+
+const (
+    // Anchor marks the entry that carries the MinAvailable replicas (the MPG).
+    PodGangEntryRoleAnchor PodGangEntryRole = "Anchor"
+    // Tail marks a non-anchor entry holding a PodCliqueScalingGroup's replicas above MinAvailable.
+    PodGangEntryRoleTail PodGangEntryRole = "Tail"
+    // ScaleOut marks the entry holding PodCliqueScalingGroup replicas added by a steady-state scale-out.
+    PodGangEntryRoleScaleOut PodGangEntryRole = "ScaleOut"
+)
+
+// PodGangEntry describes one scheduling batch, identified by its epoch, that materializes into one
+// or more PodGangs. An Anchor entry materializes into a single MPG; a Tail or ScaleOut entry
+// materializes into one PodGang per (PodCliqueScalingGroup, replica index) it carries.
 type PodGangEntry struct {
-    // Name is the name of the PodGang this entry corresponds to.
-    Name string `json:"name"`
+    // Epoch records the scheduling batch this entry belongs to. The value is a monotonic unix-nano
+    // timestamp. It orders scheduling across entries and is referenced by DependsOn. Epoch is unique
+    // per entry within a PodGangMap, so it is also this entry's identity key.
+    Epoch string `json:"epoch"`
     // PodCliqueSetGenerationHash is the PCS generation hash that pods in this PodGang must match.
     PodCliqueSetGenerationHash string `json:"podCliqueSetGenerationHash"`
+    // Role classifies this entry (Anchor, Tail, or ScaleOut). Role is the durable marker that lets
+    // the entry structure be reconstructed from the entries alone.
+    Role PodGangEntryRole `json:"role"`
+    // AnchorIndex is the index of an anchor entry within its generation hash. Set only when Role is
+    // Anchor (0 otherwise). It starts at 0 per generation hash and forms the last segment of the
+    // anchor PodGang name.
+    // +optional
+    AnchorIndex int32 `json:"anchorIndex,omitempty"`
     // PodCliques maps standalone PodClique name to the number of pods that belong to this PodGang.
     // +optional
     PodCliques map[string]int32 `json:"podCliques,omitempty"`
-    // PCSGReplicaIndices maps PodCliqueScalingGroup config name to the PCSG replica indices
-    // that belong to this PodGang.
+    // PCSGReplicaIndices maps a PodCliqueScalingGroup config name to the PCSG replica indices this
+    // entry carries. For a non-anchor entry the materializer expands these into one PodGang per index.
     // +optional
     PCSGReplicaIndices map[string][]int32 `json:"pcsgReplicaIndices,omitempty"`
-    // Labels carries additional labels to stamp on the materialized PodGang resource — those
-    // beyond the labels the PodGang materialization adds by default. Today this carries the
-    // grove.io/epoch label used for scheduling-order semantics (see [Epoch-based scheduling order]).
+    // DependsOn lists the epochs whose PodGangs must be scheduled before this entry's PodGang
+    // becomes eligible for scheduling. Empty means no scheduling dependency (eligible immediately).
     // +optional
-    Labels map[string]string `json:"labels,omitempty"`
-    // DependsOn is the grove.io/epoch value of the PodGangs (in the same PCS replica) whose
-    // pods must be scheduled before this entry's PodGang becomes eligible for scheduling.
-    // Empty means the entry has no scheduling dependency and is eligible immediately.
-    // See [Epoch-based scheduling order] for the authoring rules.
-    // +optional
-    DependsOn *string `json:"dependsOn,omitempty"`
+    DependsOn []string `json:"dependsOn,omitempty"`
 }
 ```
 
-> **NOTE:** 
-> The `+listType=map` and `+listMapKey=name` annotations on `Entries` are load-bearing on the API contract:
+> **NOTE:**
+> The `+listType=map` and `+listMapKey=epoch` annotations on `Entries` change how the API server
+> merges updates and enforce entry uniqueness. Do not remove them:
 >
-> - **Server-side merge semantics.** Patches against `PodGangMap` are merged by entry name rather than replacing the entire `Entries` slice atomically. Each reconcile emits minimal per-entry patches, and changes to one entry never clobber unrelated entries.
-> - **Uniqueness of `Entries[*].Name`.** The API server rejects any object where two entries share the same name. This matches the operator's invariant that every PodGang name within a PCS replica is unique, and saves the PodGangMap component from having to defend against duplicates at runtime.
->
-> These annotations should be preserved on any future modification of the field.
+> - **Per-entry merge.** With these annotations the API server merges a patch entry-by-entry, keyed
+>   by epoch, instead of replacing the whole `Entries` slice. A reconcile can patch one entry
+>   without overwriting the others.
+> - **Unique epoch.** The API server rejects an object where two entries share the same epoch. Epoch
+>   is the entry's identity, so this guarantees every entry is uniquely addressable.
 
-The `Labels` field carries **additional** labels, the ones layered on top of the labels the PodGang component already adds when materialising a `PodGang` resource. Today this is used to stamp the `grove.io/epoch` label needed for scheduling-order semantics. Modelling these as an open map rather than per-label fields lets future iterations introduce more labels by populating the map and retire them by omitting them, without an API schema change.
+The materialized `PodGang` resource carries `grove.io/epoch` (from the entry's `Epoch`) and `grove.io/podgang-role` (from the entry's `Role`) labels, stamped by the PodGang materializer. The entry records role and epoch as typed fields, and these labels are derived from them at materialization time.
 
 The role of `PodGangMap` in the update flow, and the directionality flip between update and steady state, is described in [Coherent update behavior and flow](#coherent-update-behavior-and-flow).
 
@@ -397,30 +417,58 @@ The field is per-replica so that future configurable concurrency across replicas
 
 #### PodGangMapping on PodCliqueStatus and PodCliqueScalingGroupStatus
 
-Both `PodCliqueStatus` and `PodCliqueScalingGroupStatus` gain a `PodGangMapping` field that captures the per-PodGang composition for that owner. The shapes differ (PCLQ is keyed by PodGang and valued by pod count, while PCSG is keyed by PodGang and valued by the list of PCSG replica indices belonging to that PodGang), but the role each field plays in the design is identical.
+Both `PodCliqueStatus` and `PodCliqueScalingGroupStatus` gain a `PodGangMapping` field that records the per-PodGang composition for that PodClique or PodCliqueScalingGroup. Each `PodGangMapping` is a **projection of the PodGangMap entries onto that resource**. One PodGangMap entry materializes into one or more PodGangs (a 1:N relation), and the projection records only the slice of that fan-out this PodClique (or PodCliqueScalingGroup) contributes to, tagged with the entry's epoch. That epoch tag is what lets the PodGangMap component rebuild PodGangMap entries from these status fields in steady state, by grouping the projections back together by epoch. The projection carries the minimum needed for that rebuild, which is the entry epoch plus this resource's membership, and omits PodGangMap-only fields such as scheduling dependencies and the generation hash.
+
+`PodGangMapping` is a slice of assignments, one per PodGang the resource contributes to, rather than a map keyed by PodGang name. The PodCliqueScalingGroup side does not store the PodGang name, because it is derivable from the replica index and storing it per index would bloat the status on a large scale-out. The PodClique side keeps the name because a standalone PodClique spans few PodGangs.
 
 ```go
 type PodCliqueStatus struct {
     // ... existing fields ...
 
-    // PodGangMapping captures the desired state of per-PodGang pod distribution.
-    // During an update, this is derived from the PodGangMap resource — PodGangMap is the
-    // single source of truth during updates. In steady state (post-update) this field becomes
-    // the source of truth: scale-out and scale-in are reflected here, and PodGangMap is then
-    // synced from this field.
-    // Key is the PodGang name; value is the number of pods of this PodClique associated with
-    // that PodGang.
-    PodGangMapping map[string]int32 `json:"podGangMapping,omitempty"`
+    // PodGangMapping records how this PodClique's pods are distributed across PodGangs. During an
+    // update it is derived from the PodGangMap (the source of truth). In steady state it becomes
+    // the source of truth and the PodGangMap is rebuilt from it. A standalone PodClique's pods
+    // always belong to an anchor PodGang.
+    // +optional
+    PodGangMapping []PodGangPodCountAssignment `json:"podGangMapping,omitempty"`
+}
+
+// PodGangPodCountAssignment records the number of a standalone PodClique's pods carried by one
+// PodGangMap entry.
+type PodGangPodCountAssignment struct {
+    // PodGangName is the name of the PodGang that carries these pods.
+    PodGangName string `json:"podGangName"`
+    // Epoch is the epoch of the PodGangMap entry this assignment belongs to.
+    Epoch string `json:"epoch"`
+    // PodCount is the number of this PodClique's pods that belong to the PodGangMap entry.
+    PodCount int32 `json:"podCount"`
 }
 
 type PodCliqueScalingGroupStatus struct {
     // ... existing fields ...
 
-    // PodGangMapping captures the desired state of per-PodGang replica distribution.
-    // Same directionality semantics as PodCliqueStatus.PodGangMapping.
-    // Key is the PodGang name; value is the list of PCSG replica indices associated with
-    // that PodGang.
-    PodGangMapping map[string][]int32 `json:"podGangMapping,omitempty"`
+    // PodGangMapping records how this PodCliqueScalingGroup's replicas are distributed across
+    // PodGangs. Same directionality as PodCliqueStatus.PodGangMapping.
+    // +optional
+    PodGangMapping []PodGangReplicaAssignment `json:"podGangMapping,omitempty"`
+}
+
+// PodGangReplicaAssignment records the PodCliqueScalingGroup replica indices carried by one
+// PodGangMap entry. The PodGang name is not stored; it is derivable from the replica index.
+type PodGangReplicaAssignment struct {
+    // Epoch is the epoch of the PodGangMap entry this assignment belongs to. It is empty for a
+    // ScaleOut assignment (a single ScaleOut entry holds all scale-out replicas, so it is resolved
+    // by role rather than epoch; the epoch is authored by the PodGangMap writer).
+    // +optional
+    Epoch string `json:"epoch,omitempty"`
+    // Role classifies the PodGang as Anchor, Tail, or ScaleOut.
+    Role PodGangEntryRole `json:"role"`
+    // AnchorIndex is the index of the anchor PodGang. Meaningful only when Role is Anchor.
+    // +optional
+    AnchorIndex int32 `json:"anchorIndex,omitempty"`
+    // ReplicaIndices are this PodCliqueScalingGroup's replica indices that belong to the entry
+    // identified by (Epoch, Role).
+    ReplicaIndices []int32 `json:"replicaIndices"`
 }
 ```
 
@@ -429,10 +477,10 @@ It is the directionality flip already described in [PodGangMap as source of trut
 
 What forces the field to exist is steady-state scale-in, but the *reason* the decision must be local (and therefore stored on the owner's status) is different for PCLQ and PCSG:
 
-- **PodClique (standalone).** When `PodClique.Spec.Replicas` shrinks, the PodClique reconciler's pod component picks the pods to remove using a deletion sorter that considers pod-template-hash mismatch, readiness, age, and other heuristics over the live pod set. The chosen pods can come from any of the existing PodGangs and the pick is **non-deterministic from outside** the pod component. It depends on which pods exist at that instant. The pod component records the per-PodGang decrement in `PodCliqueStatus.PodGangMapping` during a scale-in, since only it knows which PodGang each removed pod was associated with.
-- **PodCliqueScalingGroup.** When `PodCliqueScalingGroup.Spec.Replicas` shrinks, the PodCliqueScalingGroup reconciler's PodClique component runs a deterministic tier walk over the existing PodGang names (legacy SPG entries first, then unified-naming entries), sorted by trailing PodGang-name suffix descending, and pops the highest replica index from each entry until the scale-in count is satisfied. So although the PCSG-side pick is fully deterministic, the work (selecting which entry to drain and which replica index to pop from it) still happens inside the PodCliqueScalingGroup reconciler. The PodCliqueScalingGroup reconciler records the resulting decrement in `PodCliqueScalingGroupStatus.PodGangMapping` so the PodGangMap component can rebuild PGM from it on the next reconcile.
+- **PodClique (standalone).** When `PodClique.Spec.Replicas` shrinks, the pod component first decides how many pods to remove and from which PodGang. It drains the anchor with the highest anchor index first, mirroring scale-out which grows that same anchor, and records the per-PodGang count decrement in `PodCliqueStatus.PodGangMapping`. Which specific pods are deleted is decided separately in the realize-vs-live phase by a deletion sorter over the live pod set (pod-template-hash mismatch, readiness, age). Splitting the decision this way keeps the persisted mapping deterministic while still deleting the least healthy pods.
+- **PodCliqueScalingGroup.** When `PodCliqueScalingGroup.Spec.Replicas` shrinks, the PodClique component drains replica indices in role order. ScaleOut assignments drain first, then Tail, then Anchor from the highest anchor index down, popping the highest replica index from each until the scale-in count is met. Draining ScaleOut and Tail before Anchor keeps the MinAvailable replicas intact, since those live on the anchor. The resulting decrement is recorded in `PodCliqueScalingGroupStatus.PodGangMapping` so the PodGangMap component can rebuild PGM from it on the next reconcile.
 
-In both cases the directionality contract is the same: the scale decision is made and persisted by the owning reconciler in its own `Status.PodGangMapping`. The PodGangMap component, in its steady-state path, gates on every standalone PCLQ and every PCSG having a non-empty `Status.PodGangMapping`, then reconstructs PGM entries from the union of those mappings. During a coherent update the directionality is reversed: the owning reconciler's pod / PodClique component overwrites `Status.PodGangMapping` from PGM each reconcile.
+In both cases the directionality contract is the same. The scale decision is made and persisted by the PodClique or PodCliqueScalingGroup reconciler in its own `Status.PodGangMapping`. The PodGangMap component, in its steady-state path, gates on every standalone PCLQ and every PCSG having a non-empty `Status.PodGangMapping`, then reconstructs PGM entries from the union of those mappings. During a coherent update the directionality is reversed. The PodClique or PodCliqueScalingGroup reconciler overwrites `Status.PodGangMapping` from PGM each reconcile.
 
 #### Labels on PodGang resources
 
@@ -613,7 +661,7 @@ The five failure points within a sub-step and their recovery on the next reconci
 | Sub-step 2.4 (PodGangs exist but `InFlightEpoch` not written) | PodGangs at `E` exist on cluster, `InFlightEpoch` unset on PCS status | Orchestrator detects PodGangs at the latest epoch in PGM with no matching `InFlightEpoch`, repopulates `InFlightEpoch = E` from PGM, and re-enters the gate. The wait is not skipped. The orchestrator never advances past a sub-step without observing the gate predicates pass under that epoch. |
 | Sub-step 2.5 (gate satisfied, `InFlightEpoch` not cleared) | PodGangs at `E` Ready, `InFlightEpoch` still set to `E` | Gate predicates re-evaluate to true on next reconcile (cached `LastReady` is monotonic and survives the crash). Orchestrator clears `InFlightEpoch`. |
 
-The load-bearing rule is **populate-from-PGM, then re-enter the gate** (row 2.4). The orchestrator never treats "`InFlightEpoch` unset + PodGangs at fresh epoch present" as "advance immediately". It always reconstructs `InFlightEpoch` from the latest epoch in PGM and waits on the gate. This makes a crash between sub-step 2.3 and 2.4 indistinguishable from a normal sub-step in progress.
+The key rule is **populate-from-PGM, then re-enter the gate** (row 2.4). The orchestrator never treats "`InFlightEpoch` unset + PodGangs at fresh epoch present" as "advance immediately". It always reconstructs `InFlightEpoch` from the latest epoch in PGM and waits on the gate. This makes a crash between sub-step 2.3 and 2.4 indistinguishable from a normal sub-step in progress.
 
 The reverse failure (`InFlightEpoch` set but no matching PodGangs at that epoch) cannot occur because the order `PGM → PodGangs → InFlightEpoch` makes the `InFlightEpoch` write strictly the last on the path.
 
@@ -704,7 +752,7 @@ sequenceDiagram
 
 ##### Steady-state standalone PCLQ scale-out
 
-On scale-out, the PCLQ reconciler adds the new replicas to the PodGang with the largest unix-nano suffix in `Status.PodGangMapping` (i.e. the most recently created PodGang). No new PodGang is created. The existing PodGang absorbs the additional pods. The PodGangMap component reflects the updated mapping in PGM, and the PodGang component updates the PodGang's `PodReferences` once the new pods are created.
+On scale-out, the PCLQ reconciler adds the new replicas to the anchor with the highest anchor index in `Status.PodGangMapping`, which is the most recently created anchor. No new PodGang is created. The existing anchor PodGang absorbs the additional pods. The PodGangMap component reflects the updated mapping in PGM, and the PodGang component updates the PodGang's `PodReferences` once the new pods are created.
 
 ```mermaid
 sequenceDiagram
@@ -828,7 +876,7 @@ Two pieces of metadata express this rule:
 The ordering is enforced at pod creation. The pod-component decides per entry whether the pod needs a scheduling gate at all:
 
 - **`DependsOn` is empty.** The entry has no inter-PodGang ordering to satisfy. Pods are created without a scheduling gate and become eligible for the scheduler immediately.
-- **`DependsOn` is set.** Pods are created schedule-gated. The pod-component lists PodGangs in the same replica whose `grove.io/epoch` equals `DependsOn`, and removes the gate only after every listed PodGang reports `LastScheduled != nil`.
+- **`DependsOn` is set.** Pods are created schedule-gated. For each epoch in the entry's `DependsOn`, the pod-component lists PodGangs in the same replica whose `grove.io/epoch` equals that epoch, and removes the gate only after every such PodGang reports `LastScheduled != nil`.
 
 `DependsOn` is set as follows:
 
@@ -844,27 +892,23 @@ A "batch" is the set of PodGangs that share an epoch and a `DependsOn` value. Ba
 
 The rule guarantees:
 
-- **Coherent update.** Each sub-step's PodGangs ungate only after the prior sub-step's PodGangs report `LastScheduled != nil`. The orchestrator's per-sub-step gate has typically already advanced past the prior sub-step (the orchestrator gates on `LastReady != nil`, which is stricter than `LastScheduled != nil`), so this pod-component check passes immediately. The check is still load-bearing for the cases below.
+- **Coherent update.** Each sub-step's PodGangs ungate only after the prior sub-step's PodGangs report `LastScheduled != nil`. The orchestrator's per-sub-step gate has typically already advanced past the prior sub-step (the orchestrator gates on `LastReady != nil`, which is stricter than `LastScheduled != nil`), so this pod-component check passes immediately. The check still matters for the cases below.
 - **Initial PCS deployment.** TPG pods ungate only after the MPG reports `LastScheduled != nil`. The TPGs' `DependsOn` points at the MPG's epoch. (For pre-existing PCS that bootstrapped with BPG/SPG, the same rule applies with BPG in place of MPG.) The orchestrator is not in the loop here. The pod-component check is the sole enforcement of MPG-before-TPG ordering.
 - **Gang-termination recreate.** Same as initial deployment. When a gang is recreated, its dependency on the PodGang it was originally created against is preserved.
 - **Steady-state PCSG scale-out.** New SPG entries carry `DependsOn = nil`, so their pods have no inter-PodGang ordering to satisfy. The scheduling gate is removed as soon as the pod is otherwise eligible.
 
 #### PodGang naming convention
 
-With the introduction of coherent updates, all PodGangs follow a consistent naming convention:
+PodGang names are derived from the PodGangMap entry they materialize from, not from a timestamp. The epoch is not part of the name; a PodGang records its epoch in the `grove.io/epoch` label.
 
-```
-<pcs-name>-<pcs-replica-index>-<unix-nano>
-```
+- **Anchor PodGang (MPG):** `<pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<anchor-index>`.
+- **Non-anchor PodGang (TPG / SPG):** `<pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<pcsg-name>-<pcsg-replica-index>`, one per `(pcsg, index)` the entry carries.
 
-where `unix-nano` is the value returned by `time.Now().UnixNano()` at the time the name is generated, rendered as a decimal integer. The PCS replica index segment is preserved so consumers (and `kubectl`) can identify the owning replica without consulting labels.
+The generation-hash segment ties a PodGang to the PCS spec version its pods run, so PodGangs from different generations never collide during a coherent update. The anchor index distinguishes multiple anchors of the same generation. The `(pcsg, index)` suffix distinguishes non-anchor PodGangs. Because the name is a pure function of the entry's stable fields, any reconciler can derive it without reading the PodGang back. The PodGangMap writer authors it once and every other reconciler recomputes the same name.
 
-Existing PodGangs (BasePodGangs and ScaledPodGangs) on a `PodCliqueSet` that pre-dates this change continue to retain their original names. When a coherent update begins, it drains pods from the old-named BPG/SPGs into newly generated MPGs and TPGs that follow the new convention. Once an old-named PodGang has no remaining pods, it is garbage-collected. Over the course of one or more coherent updates, every PodGang on the `PodCliqueSet` ends up under the new convention. New `PodCliqueSet` deployments use the new convention for all PodGangs from t=0.
+Existing PodGangs (BasePodGangs and ScaledPodGangs) on a `PodCliqueSet` that pre-dates this change retain their original names. When a coherent update begins, it drains pods from the old-named BPG/SPGs into newly generated MPGs and TPGs under the derivable convention. Once an old-named PodGang has no remaining pods, it is garbage-collected. Over one or more coherent updates every PodGang ends up under the new convention. New `PodCliqueSet` deployments use it from t=0.
 
-**Uniqueness guarantee.** Two cases must be safe:
-
-- **Across reconcile calls.** The next reconcile that generates a PodGang name reads `time.Now().UnixNano()` afresh, which is monotonically advanced by at least the wall-clock elapsed time on every supported platform. Two reconcile calls separated by any normal reconcile interval cannot collide.
-- **Within a single reconcile call.** A single reconcile call may need to generate K PodGang names at once (e.g. one MPG plus several TPGs in a single coherent-update sub-step). To guarantee uniqueness within that call, the i-th PodGang's name is salted with `+i` on top of its nano timestamp. This avoids any dependency on the host clock's nanosecond resolution being fine enough to advance between successive reads within the call.
+**Uniqueness.** Names are unique by construction. Within a generation hash each anchor has a distinct anchor index, and each non-anchor PodGang has a distinct `(pcsg, index)`. Across generations the hash segment differs. No timestamp or salt is needed.
 
 #### Illustration by example
 

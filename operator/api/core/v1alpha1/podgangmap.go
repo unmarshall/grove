@@ -76,7 +76,9 @@ const (
 	PodGangEntryRoleScaleOut PodGangEntryRole = "ScaleOut"
 )
 
-// PodGangEntry describes the desired composition of a single PodGang.
+// PodGangEntry describes one scheduling batch, identified by its epoch, that materializes into one
+// or more PodGangs. An Anchor entry materializes into a single anchor PodGang; a Tail or ScaleOut
+// entry materializes into one PodGang per (PodCliqueScalingGroup, replica index) it carries.
 type PodGangEntry struct {
 	// Epoch records the scheduling batch this entry belongs to. The value is a monotonic unix-nano
 	// timestamp. It orders scheduling across entries and is referenced by DependsOn. Epoch is unique
