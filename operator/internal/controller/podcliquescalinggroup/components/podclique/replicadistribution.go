@@ -43,14 +43,32 @@ import (
 // PodCliqueScalingGroup. It updates pcsg.Status.PodGangMapping to the desired per-PodGang replica
 // assignments and then reconciles live PodCliques to match.
 //
+// Why the desired distribution is recorded in status:
+// A resource's status usually carries observed state, and desired state usually lives in the spec.
+// This field is neither. It is a decision the controller derives and owns, and it is recorded in
+// status because it cannot be expressed in the spec nor reconstructed by observation. Kubernetes
+// sanctions status carrying controller-owned derived state of this kind, so this is not a misuse of
+// status. Three points make the case:
+//   - It is not user intent. The intent is Spec.Replicas = N. This field is the controller's derived
+//     placement decision, not a second copy of intent.
+//   - It cannot be reconstructed from what is observable. The needed placement is history-dependent,
+//     meaning the correct target can differ for two pasts that present identically today. If a PCSG
+//     replica is lost out of band, its replacement must go back into the PodGang the lost replica
+//     was in, but the spec, the PodGangMap, and the live PodCliques together do not record which
+//     PodGang that was. Only the persisted replica indices tell the reconciler to refill that
+//     PodGang rather than the most recent one.
+//   - It is single-writer and self-consistent. It is written and read by this same reconciler in
+//     lockstep with its own actions, so its correctness does not depend on the PodGangMap
+//     component's asynchronous update timing.
+//
 // Direction of authority:
 //   - Coherent update in progress: the PodGangMap drives. status.PodGangMapping is rebuilt from PGM
 //     entries each reconcile.
 //   - Steady state: status.PodGangMapping drives. A scale-out appends new ScaleOut assignments and a
 //     scale-in drains assignments by role.
 //
-// Each assignment records its PodGang name, so applyPCSGPerPodGangDeltas recovers desired PodClique
-// placement directly from status without scanning live PodClique labels.
+// Each assignment records the entry epoch, role, anchor index, and this PCSG's replica indices. The
+// PodGang name is not stored; applyPCSGPerPodGangDeltas derives it from the replica index.
 func (r _resource) reconcilePCSGReplicaDistribution(logger logr.Logger, sc *syncContext) error {
 	desiredMapping, err := r.computeDesiredPCSGReplicaMapping(sc)
 	if err != nil {

@@ -99,20 +99,39 @@ func isPCLQUpdateEndedForCurrentPCSGeneration(pcs *grovecorev1alpha1.PodCliqueSe
 	return pclq.Status.UpdateProgress.PodCliqueSetGenerationHash == *pcs.Status.CurrentGenerationHash
 }
 
-// reconcileStandalonePCLQDistribution drives the desired-state-driven sync flow for a standalone
-// PodClique. It updates pclq.Status.PodGangMapping to the desired pod-to-PodGang distribution,
-// then reconciles live pods to match.
+// reconcileStandalonePCLQDistribution drives the desired-state sync for a standalone PodClique. It
+// updates pclq.Status.PodGangMapping to the desired pod-to-PodGang distribution, then reconciles
+// live pods to match.
+//
+// Why the desired distribution is recorded in status:
+// A resource's status usually carries observed state, and desired state usually lives in the spec.
+// This field is neither. It is a decision the controller derives and owns, and it is recorded in
+// status because it cannot be expressed in the spec nor reconstructed by observation. Kubernetes
+// sanctions status carrying controller-owned derived state of this kind, so this is not a misuse of
+// status. Three points make the case:
+//   - It is not user intent. The intent is Spec.Replicas = N. This field is the controller's derived
+//     placement decision, not a second copy of intent.
+//   - It cannot be reconstructed from what is observable. The needed placement is history-dependent,
+//     meaning the correct target can differ for two pasts that present identically today. If a pod is
+//     lost out of band, its replacement must go back into the PodGang the lost pod was in, but the
+//     spec, the PodGangMap, and the live pods together do not record which PodGang that was. Only the
+//     persisted per-PodGang count tells the reconciler to refill that PodGang rather than the most
+//     recent one.
+//   - It is single-writer and self-consistent. It is written and read by this same reconciler in
+//     lockstep with its own actions, so its correctness does not depend on the PodGangMap
+//     component's asynchronous update timing.
 //
 // Direction of authority:
-//   - Coherent update in progress: PGM drives. status.PodGangMapping is overwritten from PGM
-//     entries each reconcile.
-//   - Steady state (and RollingRecreate): status.PodGangMapping drives. Spec.Replicas changes
-//     are translated into mapping mutations: scale-out adds to the highest-index PodGang;
-//     scale-in runs the deletion sorter and decrements per chosen pod's LabelPodGang.
+//   - Coherent update in progress: PGM drives. status.PodGangMapping is overwritten from PGM entries
+//     each reconcile.
+//   - Steady state (and RollingRecreate): status.PodGangMapping drives. A Spec.Replicas change is
+//     translated into a count mutation. Scale-out adds pods to the highest-AnchorIndex anchor.
+//     Scale-in drains anchors highest-AnchorIndex first for the required count. This decides only
+//     how many pods leave each PodGang, not which pods.
 //
-// After the desired mapping is persisted in the PCLQ status, live pods are reconciled to the desired distribution
-// via per-PodGang deltas: create the deficit, delete the excess (deletion sorter scoped to
-// each PodGang).
+// After the desired mapping is persisted, live pods are reconciled to it via per-PodGang deltas. The
+// deficit is created and the excess deleted, with a deletion sorter (scoped to each PodGang) choosing
+// which pods to delete in this realize-vs-live phase.
 func (r _resource) reconcileStandalonePCLQDistribution(logger logr.Logger, sc *syncContext) error {
 	if requeueErr := guardAgainstStaleSpecDuringCoherentUpdate(sc); requeueErr != nil {
 		return requeueErr
