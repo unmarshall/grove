@@ -186,8 +186,8 @@ func (r _resource) computeExpectedPodGangs(ctx context.Context, sc *syncContext)
 }
 
 // buildPodGangInfosFromEntry translates a PodGangMap entry into the PodGangs it materializes into.
-// An Anchor entry (the MPG) yields one PodGang named entry.Name. It carries the standalone
-// PodCliques and the PCSG replica indices the entry holds.
+// An Anchor entry yields one PodGang, whose name is derived from the entry's generation hash and
+// anchor index. It carries the standalone PodCliques and the PCSG replica indices the entry holds.
 // A non-anchor entry (Tail or ScaleOut) yields one PodGang per (PCSG, index) in
 // entry.PCSGReplicaIndices. It carries no standalone PodCliques.
 func (r _resource) buildPodGangInfosFromEntry(sc *syncContext, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry) ([]*podGangInfo, error) {
