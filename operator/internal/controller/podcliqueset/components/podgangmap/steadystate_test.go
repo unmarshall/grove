@@ -23,6 +23,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
@@ -50,10 +51,10 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		entries := buildBootstrapEntries(pcs, 0, clk)
+		entries := buildBootstrapEntries(pcs, clk)
 		require.Len(t, entries, 2)
 
-		mpg := mpgEntry(t, entries)
+		mpg := anchorEntry(t, entries)
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, mpg.Role)
 		assert.Nil(t, mpg.DependsOn)
 		assert.Equal(t, testHash, mpg.PodCliqueSetGenerationHash)
@@ -65,12 +66,12 @@ func TestBuildBootstrapEntries(t *testing.T) {
 		tail := tails[0]
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}}, tail.PCSGReplicaIndices)
 		assert.Empty(t, tail.PodCliques)
-		assert.Equal(t, []string{mpg.Labels[apicommon.LabelEpoch]}, tail.DependsOn)
+		assert.Equal(t, []string{mpg.Epoch}, tail.DependsOn)
 
 		// Epoch is the batch identity: mpg and tail carry distinct epochs, tail = mpg+1.
-		assert.NotEqual(t, mpg.Labels[apicommon.LabelEpoch], tail.Labels[apicommon.LabelEpoch])
-		assert.Equal(t, "1000", mpg.Labels[apicommon.LabelEpoch])
-		assert.Equal(t, "1001", tail.Labels[apicommon.LabelEpoch])
+		assert.NotEqual(t, mpg.Epoch, tail.Epoch)
+		assert.Equal(t, "1000", mpg.Epoch)
+		assert.Equal(t, "1001", tail.Epoch)
 	})
 
 	t.Run("PCSG total equals minAvailable emits no non-mpg entry", func(t *testing.T) {
@@ -79,9 +80,9 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		entries := buildBootstrapEntries(pcs, 0, clk)
+		entries := buildBootstrapEntries(pcs, clk)
 		require.Len(t, entries, 1)
-		mpg := mpgEntry(t, entries)
+		mpg := anchorEntry(t, entries)
 		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, mpg.PCSGReplicaIndices)
 	})
 
@@ -91,9 +92,9 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		entries := buildBootstrapEntries(pcs, 0, clk)
+		entries := buildBootstrapEntries(pcs, clk)
 		require.Len(t, entries, 1)
-		mpg := mpgEntry(t, entries)
+		mpg := anchorEntry(t, entries)
 		assert.Equal(t, map[string]int32{"frontend": 3}, mpg.PodCliques)
 		assert.Empty(t, mpg.PCSGReplicaIndices)
 	})
@@ -105,13 +106,13 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		entries := buildBootstrapEntries(pcs, 0, clk)
+		entries := buildBootstrapEntries(pcs, clk)
 		tails := tpgEntries(entries)
 		require.Len(t, tails, 1)
 
 		tail := tails[0]
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2}, "decode": {1}}, tail.PCSGReplicaIndices)
-		assert.Equal(t, []string{mpgEntry(t, entries).Labels[apicommon.LabelEpoch]}, tail.DependsOn)
+		assert.Equal(t, []string{anchorEntry(t, entries).Epoch}, tail.DependsOn)
 	})
 }
 
@@ -123,10 +124,10 @@ func TestBuildBootstrapMPG(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		mpg := buildBootstrapMPGEntry(pcs, 0, "epoch-0")
+		mpg := buildBootstrapMPGEntry(pcs, "epoch-0")
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, mpg.Role)
 		assert.Nil(t, mpg.DependsOn)
-		assert.Equal(t, "epoch-0", mpg.Labels[apicommon.LabelEpoch])
+		assert.Equal(t, "epoch-0", mpg.Epoch)
 		assert.Equal(t, map[string]int32{"frontend": 4}, mpg.PodCliques)
 		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, mpg.PCSGReplicaIndices)
 	})
@@ -137,7 +138,7 @@ func TestBuildBootstrapMPG(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		mpg := buildBootstrapMPGEntry(pcs, 0, "epoch-0")
+		mpg := buildBootstrapMPGEntry(pcs, "epoch-0")
 		assert.Empty(t, mpg.PodCliques)
 		assert.Equal(t, map[string][]int32{"prefill": {0}}, mpg.PCSGReplicaIndices)
 	})
@@ -150,11 +151,11 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		tpgEntry, ok := buildBootstrapTPGEntry(pcs, 0, "tpg-epoch", "mpg-epoch")
+		tpgEntry, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
 		require.True(t, ok)
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, tpgEntry.Role)
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}}, tpgEntry.PCSGReplicaIndices)
-		assert.Equal(t, "tpg-epoch", tpgEntry.Labels[apicommon.LabelEpoch])
+		assert.Equal(t, "tpg-epoch", tpgEntry.Epoch)
 		assert.Equal(t, []string{"mpg-epoch"}, tpgEntry.DependsOn)
 	})
 
@@ -165,7 +166,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		tpgEntry, ok := buildBootstrapTPGEntry(pcs, 0, "tpg-epoch", "mpg-epoch")
+		tpgEntry, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
 		require.True(t, ok)
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}, "decode": {1, 2}}, tpgEntry.PCSGReplicaIndices)
 	})
@@ -176,7 +177,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		_, ok := buildBootstrapTPGEntry(pcs, 0, "tpg-epoch", "mpg-epoch")
+		_, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
 		assert.False(t, ok)
 	})
 
@@ -186,7 +187,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		_, ok := buildBootstrapTPGEntry(pcs, 0, "tpg-epoch", "mpg-epoch")
+		_, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
 		assert.False(t, ok)
 	})
 }
@@ -202,72 +203,137 @@ func TestBuildEntriesFromPCLQAndPCSGStatuses(t *testing.T) {
 			Build()
 	}
 	// standalone PCLQ FQN is <pcs>-<replica>-<clique>.
-	newFrontendPCLQ := func(mapping map[string]int32) grovecorev1alpha1.PodClique {
+	newFrontendPCLQ := func(mapping []grovecorev1alpha1.PodGangPodCountAssignment) grovecorev1alpha1.PodClique {
 		return *testutils.NewPodCliqueBuilder(testPCSName, "uid", "frontend", testNamespace, 0).
 			WithPodGangMapping(mapping).Build()
 	}
-	newPrefillPCSG := func(mapping map[string][]int32) grovecorev1alpha1.PodCliqueScalingGroup {
+	newPrefillPCSG := func(mapping []grovecorev1alpha1.PodGangReplicaAssignment) grovecorev1alpha1.PodCliqueScalingGroup {
 		return *testutils.NewPodCliqueScalingGroupBuilder("my-pcs-0-prefill", testNamespace, testPCSName, 0).
 			WithPodGangMapping(mapping).Build()
 	}
 
-	t.Run("rebuilds entries from published owner mappings", func(t *testing.T) {
+	// Epochs used to seed existingPGM and address entries by identity.
+	anchorEpoch, tailEpoch, scaleOutEpoch := "e-anchor", "e-tail", "e-scaleout"
+
+	t.Run("refreshes membership for existing epochs, preserving identity", func(t *testing.T) {
 		pcs := newPCS()
-		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(map[string]int32{"pg-a": 2, "pg-b": 3})}
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-a": {0}, "pg-c": {1, 2}})}
-		existingPGM := &grovecorev1alpha1.PodGangMap{}
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{
+			{Epoch: anchorEpoch, PodCount: 2},
+		})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+			{Epoch: tailEpoch, Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{1, 2}},
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+			{Epoch: tailEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleTail, DependsOn: []string{anchorEpoch}},
+		}}}
 
 		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
-		byName := entriesByName(entries)
-		require.Len(t, byName, 3)
-		assert.Equal(t, int32(2), byName["pg-a"].PodCliques["frontend"])
-		assert.Equal(t, []int32{0}, byName["pg-a"].PCSGReplicaIndices["prefill"])
-		assert.Equal(t, int32(3), byName["pg-b"].PodCliques["frontend"])
-		assert.Equal(t, []int32{1, 2}, byName["pg-c"].PCSGReplicaIndices["prefill"])
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
+		require.Len(t, byEpoch, 2)
+		assert.Equal(t, int32(2), byEpoch[anchorEpoch].PodCliques["frontend"])
+		assert.Equal(t, []int32{0}, byEpoch[anchorEpoch].PCSGReplicaIndices["prefill"])
+		assert.Equal(t, []int32{1, 2}, byEpoch[tailEpoch].PCSGReplicaIndices["prefill"])
 	})
 
 	t.Run("preserves epoch, DependsOn and Role of existing entries", func(t *testing.T) {
 		pcs := newPCS()
-		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(map[string]int32{"pg-a": 2})}
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-a": {0}})}
-		existingPGM := &grovecorev1alpha1.PodGangMap{
-			Spec: grovecorev1alpha1.PodGangMapSpec{
-				Entries: []grovecorev1alpha1.PodGangEntry{{
-					Name:      "pg-a",
-					Role:      grovecorev1alpha1.PodGangEntryRoleAnchor,
-					Labels:    map[string]string{apicommon.LabelEpoch: "orig-epoch"},
-					DependsOn: []string{"dep-epoch"},
-				}},
-			},
-		}
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: 0, DependsOn: []string{"dep-epoch"}},
+		}}}
 
 		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
-		pgA := entriesByName(entries)["pg-a"]
-		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, pgA.Role)
-		assert.Equal(t, "orig-epoch", pgA.Labels[apicommon.LabelEpoch])
-		assert.Equal(t, []string{"dep-epoch"}, pgA.DependsOn)
+		anchor := componentutils.IndexPodGangEntriesByEpoch(entries)[anchorEpoch]
+		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, anchor.Role)
+		assert.Equal(t, anchorEpoch, anchor.Epoch)
+		assert.Equal(t, []string{"dep-epoch"}, anchor.DependsOn)
 	})
 
-	t.Run("new scale-out entry gets fresh epoch, nil DependsOn, not mpg", func(t *testing.T) {
+	t.Run("net-new scale-out gets fresh epoch, nil DependsOn, ScaleOut role", func(t *testing.T) {
 		pcs := newPCS()
-		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(map[string]int32{"pg-a": 2})}
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-new": {5}})}
-		existingPGM := &grovecorev1alpha1.PodGangMap{} // pg-new not present
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+			{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5}}, // empty epoch
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+		}}}
 
 		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
-		pgNew := entriesByName(entries)["pg-new"]
-		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, pgNew.Role)
-		assert.Nil(t, pgNew.DependsOn)
-		assert.Equal(t, "5000", pgNew.Labels[apicommon.LabelEpoch])
+		// fresh epoch is the fake clock's unix-nano (5000).
+		scaleOut := componentutils.IndexPodGangEntriesByEpoch(entries)["5000"]
+		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleScaleOut, scaleOut.Role)
+		assert.Nil(t, scaleOut.DependsOn)
+		assert.Equal(t, []int32{5}, scaleOut.PCSGReplicaIndices["prefill"])
+	})
+
+	t.Run("scale-out appends to existing ScaleOut entry, keeping its epoch", func(t *testing.T) {
+		pcs := newPCS()
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+			{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5, 6}}, // empty epoch
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+			{Epoch: scaleOutEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut},
+		}}}
+
+		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
+		require.NoError(t, err)
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
+		// reused the existing ScaleOut epoch, not a fresh clock epoch.
+		require.Contains(t, byEpoch, scaleOutEpoch)
+		assert.NotContains(t, byEpoch, "5000")
+		assert.Equal(t, []int32{5, 6}, byEpoch[scaleOutEpoch].PCSGReplicaIndices["prefill"])
+	})
+
+	t.Run("scale-in shrinks a PCSG's replica indices at an existing epoch", func(t *testing.T) {
+		pcs := newPCS()
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+			{Epoch: tailEpoch, Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{1, 2}}, // was 1,2,3
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+			{Epoch: tailEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleTail, DependsOn: []string{anchorEpoch}, PCSGReplicaIndices: map[string][]int32{"prefill": {1, 2, 3}}},
+		}}}
+
+		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
+		require.NoError(t, err)
+		assert.Equal(t, []int32{1, 2}, componentutils.IndexPodGangEntriesByEpoch(entries)[tailEpoch].PCSGReplicaIndices["prefill"])
+	})
+
+	t.Run("PCSG status epoch absent from PodGangMap is a hard error", func(t *testing.T) {
+		pcs := newPCS()
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: "unknown-epoch", Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{1}},
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+		}}}
+
+		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
+		assertErrorCode(t, err, errCodeStatusEpochNotInPodGangMap)
 	})
 
 	t.Run("unpublished PCLQ mapping triggers requeue error", func(t *testing.T) {
 		pcs := newPCS()
 		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(nil)} // empty mapping
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-a": {0}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+		})}
 
 		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, &grovecorev1alpha1.PodGangMap{}, 0, clk)
 		assertErrorCode(t, err, groveerr.ErrCodeContinueReconcileAndRequeue)
@@ -275,7 +341,7 @@ func TestBuildEntriesFromPCLQAndPCSGStatuses(t *testing.T) {
 
 	t.Run("fewer observed PCSGs than spec triggers requeue error", func(t *testing.T) {
 		pcs := newPCS()
-		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(map[string]int32{"pg-a": 2})}
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
 		var pcsgs []grovecorev1alpha1.PodCliqueScalingGroup // spec declares 1 PCSG, none observed
 
 		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, &grovecorev1alpha1.PodGangMap{}, 0, clk)
@@ -284,25 +350,36 @@ func TestBuildEntriesFromPCLQAndPCSGStatuses(t *testing.T) {
 
 	t.Run("drops entries that end up empty", func(t *testing.T) {
 		pcs := newPCS()
-		// pg-empty is referenced by the PCSG with an empty index slice.
-		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ(map[string]int32{"pg-a": 2})}
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-a": {0}, "pg-empty": {}})}
+		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+			{Epoch: tailEpoch, Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: []int32{}}, // drained empty
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+			{Epoch: tailEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleTail, DependsOn: []string{anchorEpoch}},
+		}}}
 
-		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, &grovecorev1alpha1.PodGangMap{}, 0, clk)
+		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
-		_, hasEmpty := entriesByName(entries)["pg-empty"]
-		assert.False(t, hasEmpty)
+		_, hasTail := componentutils.IndexPodGangEntriesByEpoch(entries)[tailEpoch]
+		assert.False(t, hasTail)
 	})
 
 	t.Run("unparseable PCLQ FQN yields extract-name error", func(t *testing.T) {
 		pcs := newPCS()
 		badPCLQ := grovecorev1alpha1.PodClique{
 			ObjectMeta: metav1.ObjectMeta{Name: "not-a-valid-fqn", Namespace: testNamespace},
-			Status:     grovecorev1alpha1.PodCliqueStatus{PodGangMapping: map[string]int32{"pg-a": 1}},
+			Status:     grovecorev1alpha1.PodCliqueStatus{PodGangMapping: []grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 1}}},
 		}
-		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG(map[string][]int32{"pg-a": {0}})}
+		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
+			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
+		})}
+		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+		}}}
 
-		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, []grovecorev1alpha1.PodClique{badPCLQ}, pcsgs, &grovecorev1alpha1.PodGangMap{}, 0, clk)
+		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, []grovecorev1alpha1.PodClique{badPCLQ}, pcsgs, existingPGM, 0, clk)
 		assertErrorCode(t, err, errCodeExtractPodCliqueName)
 	})
 }
@@ -315,9 +392,9 @@ func TestCanRebuildPGMFromStatuses(t *testing.T) {
 		Build()
 
 	publishedPCLQ := *testutils.NewPodCliqueBuilder(testPCSName, "uid", "frontend", testNamespace, 0).
-		WithPodGangMapping(map[string]int32{"pg-a": 2}).Build()
+		WithPodGangMapping([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: "e0", PodCount: 2}}).Build()
 	publishedPCSG := *testutils.NewPodCliqueScalingGroupBuilder("my-pcs-0-prefill", testNamespace, testPCSName, 0).
-		WithPodGangMapping(map[string][]int32{"pg-a": {0}}).Build()
+		WithPodGangMapping([]grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "e0", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}}}).Build()
 	unpublishedPCLQ := *testutils.NewPodCliqueBuilder(testPCSName, "uid", "frontend", testNamespace, 0).Build()
 	unpublishedPCSG := *testutils.NewPodCliqueScalingGroupBuilder("my-pcs-0-prefill", testNamespace, testPCSName, 0).Build()
 
@@ -366,14 +443,14 @@ func TestCanRebuildPGMFromStatuses(t *testing.T) {
 func TestRemoveEmptyEntries(t *testing.T) {
 	t.Run("drops all-empty entry, keeps others", func(t *testing.T) {
 		entries := []grovecorev1alpha1.PodGangEntry{
-			{Name: "empty", PodCliques: map[string]int32{"a": 0}, PCSGReplicaIndices: map[string][]int32{"p": {}}},
-			{Name: "has-pods", PodCliques: map[string]int32{"a": 1}},
-			{Name: "has-indices", PCSGReplicaIndices: map[string][]int32{"p": {0}}},
+			{Epoch: "empty", PodCliques: map[string]int32{"a": 0}, PCSGReplicaIndices: map[string][]int32{"p": {}}},
+			{Epoch: "has-pods", PodCliques: map[string]int32{"a": 1}},
+			{Epoch: "has-indices", PCSGReplicaIndices: map[string][]int32{"p": {0}}},
 		}
 		result := removeEmptyEntries(entries)
-		byName := entriesByName(result)
-		require.Len(t, byName, 2)
-		_, hasEmpty := byName["empty"]
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(result)
+		require.Len(t, byEpoch, 2)
+		_, hasEmpty := byEpoch["empty"]
 		assert.False(t, hasEmpty)
 	})
 
@@ -405,20 +482,20 @@ func TestReconstructEntriesFromExistingPodGangs(t *testing.T) {
 	t.Run("BPG becomes mpg E0, SPG depends on E0 at E1", func(t *testing.T) {
 		entries, err := reconstructEntriesFromExistingPodGangs(pcs, []groveschedulerv1alpha1.PodGang{*bpg, *spg}, 0, clk)
 		require.NoError(t, err)
-		byName := entriesByName(entries)
 
-		base := byName["my-pcs-0"]
-		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, base.Role)
+		base := anchorEntry(t, entries)
 		assert.Nil(t, base.DependsOn)
 		assert.Equal(t, int32(2), base.PodCliques["frontend"])
 
-		scaled := byName["my-pcs-0-prefill-1"]
+		tails := tpgEntries(entries)
+		require.Len(t, tails, 1)
+		scaled := tails[0]
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, scaled.Role)
 		require.Len(t, scaled.DependsOn, 1)
-		assert.Equal(t, base.Labels[apicommon.LabelEpoch], scaled.DependsOn[0])
+		assert.Equal(t, base.Epoch, scaled.DependsOn[0])
 		assert.Equal(t, []int32{1}, scaled.PCSGReplicaIndices["prefill"])
 		// E1 > E0.
-		assert.Greater(t, scaled.Labels[apicommon.LabelEpoch], base.Labels[apicommon.LabelEpoch])
+		assert.Greater(t, scaled.Epoch, base.Epoch)
 	})
 
 	t.Run("BPG only yields a single mpg", func(t *testing.T) {
@@ -542,26 +619,17 @@ func assertErrorCode(t *testing.T, err error, code grovecorev1alpha1.ErrorCode) 
 	assert.Equal(t, code, groveErr.Code)
 }
 
-// entriesByName indexes entries by their PodGang name for order-independent assertions.
-func entriesByName(entries []grovecorev1alpha1.PodGangEntry) map[string]grovecorev1alpha1.PodGangEntry {
-	byName := make(map[string]grovecorev1alpha1.PodGangEntry, len(entries))
-	for _, e := range entries {
-		byName[e.Name] = e
-	}
-	return byName
-}
-
-// mpgEntry returns the single entry with the Anchor role, failing if not exactly one.
-func mpgEntry(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) grovecorev1alpha1.PodGangEntry {
+// anchorEntry returns the single entry with the Anchor role, failing if not exactly one.
+func anchorEntry(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) grovecorev1alpha1.PodGangEntry {
 	t.Helper()
-	var mpgs []grovecorev1alpha1.PodGangEntry
+	var anchorPGs []grovecorev1alpha1.PodGangEntry
 	for _, e := range entries {
 		if e.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-			mpgs = append(mpgs, e)
+			anchorPGs = append(anchorPGs, e)
 		}
 	}
-	require.Len(t, mpgs, 1, "expected exactly one mpg entry")
-	return mpgs[0]
+	require.Len(t, anchorPGs, 1, "expected exactly one mpg entry")
+	return anchorPGs[0]
 }
 
 // tpgEntries returns the entries with the Tail role.

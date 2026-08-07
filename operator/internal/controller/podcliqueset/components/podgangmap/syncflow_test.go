@@ -159,17 +159,17 @@ func TestAnyReplicaLacksPGMEntries(t *testing.T) {
 	}{
 		{
 			name: "true when a replica has no PGM",
-			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "e0")},
+			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "100")},
 			want: true,
 		},
 		{
 			name: "true when a PGM has no entries",
-			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "e0"), 1: *emptyPGM},
+			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "100"), 1: *emptyPGM},
 			want: true,
 		},
 		{
 			name: "false when all replicas have entries",
-			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "e0"), 1: *pgmWithEpochEntry(1, "e0")},
+			pgms: map[int]grovecorev1alpha1.PodGangMap{0: *pgmWithEpochEntry(0, "100"), 1: *pgmWithEpochEntry(1, "100")},
 			want: false,
 		},
 	}
@@ -224,8 +224,8 @@ func TestTakeSnapshot(t *testing.T) {
 	t.Run("groups children by replica and skips mvuTemplate when no update in flight", func(t *testing.T) {
 		pcs := pcsWithCoherentUpdateStrategy(testHash).Build()
 		cl := newFakeClient(pcs,
-			standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2}),
-			pgmWithEpochEntry(0, "e0"),
+			standalonePCLQWithMapping("frontend", 0, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", Epoch: "100", PodCount: 2}}),
+			pgmWithEpochEntry(0, "100"),
 		)
 		r := newResource(cl)
 
@@ -284,10 +284,10 @@ func TestReconcileEntriesWhenPGMEmpty(t *testing.T) {
 
 func TestReconcileSteadyStateEntries(t *testing.T) {
 	pcs := pcsWithCoherentUpdateStrategy(testHash).Build()
-	pclq := standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2})
-	pcsg := prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}})
+	pclq := standalonePCLQWithMapping("frontend", 0, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", Epoch: "100", PodCount: 2}})
+	pcsg := prefillPCSGWithMapping(0, []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "100", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}}})
 	existingPGM := testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
+		WithEntries(testutils.NewPodGangEntryBuilder(testHash, "100").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build()
 	cl := newFakeClient(pcs, pclq, pcsg, existingPGM)
 	r := newResource(cl)
 	snap := snapshotFor(pcs,
@@ -303,10 +303,10 @@ func TestReconcileSteadyStateEntries(t *testing.T) {
 
 func TestReconcileCoherentUpdateEntries(t *testing.T) {
 	pcs := pcsWithCoherentUpdateInProgress(testHash)
-	pclq := standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2})
-	pcsg := prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}})
+	pclq := standalonePCLQWithMapping("frontend", 0, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", Epoch: "100", PodCount: 2}})
+	pcsg := prefillPCSGWithMapping(0, []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "100", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}}})
 	pgm := testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", "old-hash", "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+		WithEntries(testutils.NewPodGangEntryBuilder("old-hash", "100").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"frontend": 2}).WithPCSGReplicaIndices(map[string][]int32{"prefill": {0}}).Build()).Build()
 	cl := newFakeClient(pcs, pclq, pcsg, pgm)
 	r := newResource(cl)
@@ -320,8 +320,8 @@ func TestCreateOrPatchPodGangMapSpec(t *testing.T) {
 	pcs := pcsWithCoherentUpdateStrategy(testHash).Build()
 	r := newResource(newFakeClient(pcs))
 	entries := []grovecorev1alpha1.PodGangEntry{
-		testutils.NewPodGangEntryBuilder("pg-b", testHash, "e1").Build(),
-		testutils.NewPodGangEntryBuilder("pg-a", testHash, "e0").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "200").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "100").Build(),
 	}
 	pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0})
 
@@ -329,16 +329,16 @@ func TestCreateOrPatchPodGangMapSpec(t *testing.T) {
 
 	pgm := getPGM(t, r.client, 0)
 	require.Len(t, pgm.Spec.Entries, 2)
-	assert.Equal(t, "pg-a", pgm.Spec.Entries[0].Name, "entries sorted by name")
-	assert.Equal(t, "pg-b", pgm.Spec.Entries[1].Name)
+	assert.Equal(t, "100", pgm.Spec.Entries[0].Epoch, "entries sorted by epoch")
+	assert.Equal(t, "200", pgm.Spec.Entries[1].Epoch)
 	assert.Equal(t, int32(0), pgm.Spec.PodCliqueSetReplicaIndex)
 	assert.True(t, metav1.IsControlledBy(pgm, pcs))
 }
 
 func TestDeleteOrphanedPodGangMaps(t *testing.T) {
 	pcs := pcsWithCoherentUpdateStrategy(testHash).WithReplicas(1).Build()
-	live := pgmWithEpochEntry(0, "e0")
-	orphan := pgmWithEpochEntry(1, "e0") // replica index 1 >= replicas 1
+	live := pgmWithEpochEntry(0, "100")
+	orphan := pgmWithEpochEntry(1, "100") // replica index 1 >= replicas 1
 	cl := newFakeClient(pcs, live, orphan)
 	r := newResource(cl)
 	snap := &syncSnapshot{
@@ -354,18 +354,10 @@ func TestDeleteOrphanedPodGangMaps(t *testing.T) {
 }
 
 func TestNewPodGangEntry(t *testing.T) {
-	entry := newPodGangEntry(apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}, "epoch-1", testHash, []string{"dep"})
-	assert.Equal(t, "my-pcs-0-epoch-1", entry.Name)
+	entry := newPodGangEntry("epoch-1", testHash, []string{"dep"})
+	assert.Equal(t, "epoch-1", entry.Epoch)
 	assert.Equal(t, testHash, entry.PodCliqueSetGenerationHash)
-	assert.Equal(t, "epoch-1", entry.Labels[apicommon.LabelEpoch])
 	assert.Equal(t, []string{"dep"}, entry.DependsOn)
-}
-
-func TestNewPodGangEntryWithName(t *testing.T) {
-	entry := newPodGangEntryWithName("explicit-name", testHash, "epoch-1", nil)
-	assert.Equal(t, "explicit-name", entry.Name)
-	assert.Equal(t, "epoch-1", entry.Labels[apicommon.LabelEpoch])
-	assert.Nil(t, entry.DependsOn)
 }
 
 func TestRunSyncFlow(t *testing.T) {
@@ -400,10 +392,10 @@ func TestRunSyncFlow(t *testing.T) {
 			name: "steady-state replica rebuilds entries",
 			pcs:  pcsWithCoherentUpdateStrategy(testHash).Build(),
 			objects: []client.Object{
-				standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2}),
-				prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}}),
+				standalonePCLQWithMapping("frontend", 0, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", Epoch: "100", PodCount: 2}}),
+				prefillPCSGWithMapping(0, []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "100", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}}}),
 				testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, 0).
-					WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, "e0").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build(),
+					WithEntries(testutils.NewPodGangEntryBuilder(testHash, "100").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()).Build(),
 			},
 			assert: func(t *testing.T, cl client.Client) {
 				pgm := getPGM(t, cl, 0)
@@ -414,10 +406,10 @@ func TestRunSyncFlow(t *testing.T) {
 			name: "orphaned PGM beyond replica count is deleted",
 			pcs:  pcsWithCoherentUpdateStrategy(testHash).WithReplicas(1).Build(),
 			objects: []client.Object{
-				standalonePCLQWithMapping("frontend", 0, map[string]int32{"pg-0": 2}),
-				prefillPCSGWithMapping(0, map[string][]int32{"pg-0": {0}}),
-				pgmWithEpochEntry(0, "e0"),
-				pgmWithEpochEntry(1, "e0"),
+				standalonePCLQWithMapping("frontend", 0, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "pg-0", Epoch: "100", PodCount: 2}}),
+				prefillPCSGWithMapping(0, []grovecorev1alpha1.PodGangReplicaAssignment{{Epoch: "100", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}}}),
+				pgmWithEpochEntry(0, "100"),
+				pgmWithEpochEntry(1, "100"),
 			},
 			assert: func(t *testing.T, cl client.Client) {
 				assert.True(t, pgmExists(cl, 0), "live replica PGM kept")
@@ -468,10 +460,10 @@ func pcsWithCoherentUpdateInProgress(hash string) *grovecorev1alpha1.PodCliqueSe
 // Its Spec.Replicas is the total pod count across the mapping, so live replicas stay consistent with
 // the mapping the test declares. Status.ReadyReplicas is seeded to the full replica count so the
 // coherent-update MaxUnavailable budget gate treats it as fully available.
-func standalonePCLQWithMapping(clique string, pcsReplicaIndex int32, mapping map[string]int32) *grovecorev1alpha1.PodClique {
+func standalonePCLQWithMapping(clique string, pcsReplicaIndex int32, mapping []grovecorev1alpha1.PodGangPodCountAssignment) *grovecorev1alpha1.PodClique {
 	var replicas int32
-	for _, count := range mapping {
-		replicas += count
+	for _, a := range mapping {
+		replicas += a.PodCount
 	}
 	return testutils.NewPodCliqueBuilder(testPCSName, testPCSUID, clique, testNamespace, pcsReplicaIndex).
 		WithReplicas(replicas).WithPodGangMapping(mapping).WithStatusReadyReplicas(replicas).Build()
@@ -480,10 +472,10 @@ func standalonePCLQWithMapping(clique string, pcsReplicaIndex int32, mapping map
 // prefillPCSGWithMapping builds the prefill PodCliqueScalingGroup for the given replica with a
 // PodGangMapping. Status.AvailableReplicas is seeded from the mapping's replica-index count so the
 // coherent-update MaxUnavailable budget gate treats it as fully available.
-func prefillPCSGWithMapping(pcsReplicaIndex int, mapping map[string][]int32) *grovecorev1alpha1.PodCliqueScalingGroup {
+func prefillPCSGWithMapping(pcsReplicaIndex int, mapping []grovecorev1alpha1.PodGangReplicaAssignment) *grovecorev1alpha1.PodCliqueScalingGroup {
 	var available int32
-	for _, indices := range mapping {
-		available += int32(len(indices))
+	for _, a := range mapping {
+		available += int32(len(a.ReplicaIndices))
 	}
 	return testutils.NewPodCliqueScalingGroupBuilder("my-pcs-0-prefill", testNamespace, testPCSName, pcsReplicaIndex).
 		WithPodGangMapping(mapping).WithStatusAvailableReplicas(available).Build()
@@ -492,7 +484,7 @@ func prefillPCSGWithMapping(pcsReplicaIndex int, mapping map[string][]int32) *gr
 // pgmWithEpochEntry builds a PodGangMap for the given replica carrying a single entry at the given epoch.
 func pgmWithEpochEntry(replicaIndex int, epoch string) *grovecorev1alpha1.PodGangMap {
 	return testutils.NewPodGangMapBuilder(testPCSName, testNamespace, testPCSUID, replicaIndex).
-		WithEntries(testutils.NewPodGangEntryBuilder("pg-0", testHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+		WithEntries(testutils.NewPodGangEntryBuilder(testHash, epoch).WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 			WithPodCliques(map[string]int32{"frontend": 1}).Build()).Build()
 }
 

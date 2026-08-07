@@ -106,6 +106,16 @@ func GetPodGangMapEntriesForPCSG(entries []grovecorev1alpha1.PodGangEntry, pcsgN
 	return result
 }
 
+// IndexPodGangEntriesByEpoch indexes entries by their epoch, the entry's identity. Epochs are unique
+// per entry, so the map has one entry per input element.
+func IndexPodGangEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) map[string]grovecorev1alpha1.PodGangEntry {
+	byEpoch := make(map[string]grovecorev1alpha1.PodGangEntry, len(entries))
+	for _, entry := range entries {
+		byEpoch[entry.Epoch] = entry
+	}
+	return byEpoch
+}
+
 // LatestEpochForGenerationHash returns the largest epoch among the entries whose
 // PodCliqueSetGenerationHash equals generationHash. It returns nil when no entry matches (nothing has
 // been emitted for that generation). Epochs are unix-nano strings; they are compared numerically so

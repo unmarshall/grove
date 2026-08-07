@@ -364,7 +364,7 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 		return skippedScheduleGatedPods, nil
 	}
 
-	entryByEpoch := lo.KeyBy(sc.pgm.Spec.Entries, func(e grovecorev1alpha1.PodGangEntry) string { return e.Epoch })
+	entryByEpoch := componentutils.IndexPodGangEntriesByEpoch(sc.pgm.Spec.Entries)
 
 	// Fetch each distinct PodGang the gated pods reference once. Pods can be many but share a small
 	// set of PodGangs, so this keeps the GET count at the number of distinct PodGangs, not pods.
@@ -454,7 +454,7 @@ func (r _resource) fetchGatedPodPodGangs(ctx context.Context, gatedPods []*corev
 // PodGang created at that epoch reports LastScheduled non-nil. Each distinct dependency epoch is
 // resolved with a single List. The result is keyed by dependency epoch.
 func (r _resource) computeDependencyEpochScheduled(sc *syncContext, pgByName map[string]*groveschedulerv1alpha1.PodGang) (map[string]bool, error) {
-	entryByEpoch := lo.KeyBy(sc.pgm.Spec.Entries, func(e grovecorev1alpha1.PodGangEntry) string { return e.Epoch })
+	entryByEpoch := componentutils.IndexPodGangEntriesByEpoch(sc.pgm.Spec.Entries)
 	depEpochs := sets.New[string]()
 	for _, pg := range pgByName {
 		if pg == nil {

@@ -23,6 +23,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
@@ -404,18 +405,19 @@ func TestEntriesAfterSubStep(t *testing.T) {
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		planner.mvu.standalonePCLQs = map[string]int32{"frontend": 1}
 		planner.entries = []grovecorev1alpha1.PodGangEntry{
-			oldHashMPGEntryWithPods("old-hash", "old-e", map[string]int32{"frontend": 1}, map[string][]int32{"prefill": {0, 1, 2, 3}}),
+			oldHashMPGEntryWithPods("old-hash", "100", map[string]int32{"frontend": 1}, map[string][]int32{"prefill": {0, 1, 2, 3}}),
 		}
 		ss := subStep{
-			epoch:                     "new-e",
+			epoch:                     "200",
 			mpgPCSGReplicaIndices:     map[string][]int32{"prefill": {0, 1}},
 			drainStandalonePCLQCounts: map[string]int32{"frontend": 1},
 			drainPCSGReplicaIndices:   map[string][]int32{"prefill": {0, 1}},
 		}
-		result := planner.entriesAfterSubStep(ss)
+		result, err := planner.entriesAfterSubStep(ss)
+		require.NoError(t, err)
 
-		byName := entriesByName(result)
-		old := byName["old-hash-old-e"]
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(result)
+		old := byEpoch["100"]
 		assert.Equal(t, []int32{2, 3}, old.PCSGReplicaIndices["prefill"], "old floor drained")
 		var newMPG grovecorev1alpha1.PodGangEntry
 		for _, e := range result {
@@ -432,9 +434,11 @@ func TestEntriesAfterSubStep(t *testing.T) {
 		planner := plannerForReplicasMinAvail(t,
 			map[string]int32{"prefill": 8}, map[string]int32{"prefill": 2}, map[string]int32{"prefill": 2})
 		planner.entries = []grovecorev1alpha1.PodGangEntry{
-			oldHashMPGEntryWithPods("old-hash", "old-e", nil, map[string][]int32{"prefill": {0, 1, 2, 3}}),
+			oldHashMPGEntryWithPods("old-hash", "100", nil, map[string][]int32{"prefill": {0, 1, 2, 3}}),
 		}
-		_ = planner.entriesAfterSubStep(subStep{epoch: "new-e", drainPCSGReplicaIndices: map[string][]int32{"prefill": {0}}})
+		got, err := planner.entriesAfterSubStep(subStep{epoch: "200", drainPCSGReplicaIndices: map[string][]int32{"prefill": {0}}})
+		require.NoError(t, err)
+		_ = got
 		assert.Equal(t, []int32{0, 1, 2, 3}, planner.entries[0].PCSGReplicaIndices["prefill"])
 	})
 }
@@ -446,9 +450,9 @@ func TestDrainStandalonePCLQs(t *testing.T) {
 			oldHashMPGEntryWithPods("v2-hash", "200", map[string]int32{"frontend": 3}, nil),
 		}
 		drainStandalonePCLQs(entries, testHash, map[string]int32{"frontend": 3})
-		byName := entriesByName(entries)
-		assert.Equal(t, int32(0), byName["v1-hash-100"].PodCliques["frontend"])
-		assert.Equal(t, int32(2), byName["v2-hash-200"].PodCliques["frontend"])
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
+		assert.Equal(t, int32(0), byEpoch["100"].PodCliques["frontend"])
+		assert.Equal(t, int32(2), byEpoch["200"].PodCliques["frontend"])
 	})
 
 	t.Run("new-hash mpgs untouched", func(t *testing.T) {
@@ -466,9 +470,9 @@ func TestDrainPCSGIndices(t *testing.T) {
 		mpgEntryWithPods("200", nil, map[string][]int32{"prefill": {0, 1, 2}}),
 	}
 	drainPCSGIndices(entries, testHash, map[string][]int32{"prefill": {1}})
-	byName := entriesByName(entries)
-	assert.Equal(t, []int32{0, 2}, byName["old-hash-100"].PCSGReplicaIndices["prefill"])
-	assert.Equal(t, []int32{0, 1, 2}, byName["200"].PCSGReplicaIndices["prefill"], "new-hash untouched")
+	byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
+	assert.Equal(t, []int32{0, 2}, byEpoch["100"].PCSGReplicaIndices["prefill"])
+	assert.Equal(t, []int32{0, 1, 2}, byEpoch["200"].PCSGReplicaIndices["prefill"], "new-hash untouched")
 }
 
 func TestSubsumeIntoMPG(t *testing.T) {
@@ -556,16 +560,16 @@ func TestRemoveIndices(t *testing.T) {
 }
 
 func TestParseEpoch(t *testing.T) {
-	t.Run("parses numeric label", func(t *testing.T) {
+	t.Run("parses numeric epoch", func(t *testing.T) {
 		v, err := parseEpoch(mpgEntryAt("1748266985000000000", nil))
 		require.NoError(t, err)
 		assert.Equal(t, int64(1748266985000000000), v)
 	})
-	t.Run("missing label yields error", func(t *testing.T) {
-		_, err := parseEpoch(grovecorev1alpha1.PodGangEntry{Name: "x", Labels: map[string]string{}})
-		assertErrorCode(t, err, errCodeMissingEpochLabel)
+	t.Run("empty epoch yields error", func(t *testing.T) {
+		_, err := parseEpoch(grovecorev1alpha1.PodGangEntry{})
+		assertErrorCode(t, err, errCodeInvalidEpochLabel)
 	})
-	t.Run("non-numeric label yields error", func(t *testing.T) {
+	t.Run("non-numeric epoch yields error", func(t *testing.T) {
 		_, err := parseEpoch(mpgEntryAt("nope", nil))
 		assertErrorCode(t, err, errCodeInvalidEpochLabel)
 	})
@@ -639,9 +643,9 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 		// V3 planning proceeds (a new current-hash entry appears) and older generations remain present
 		// as drain targets (not wiped by the current-generation reconstruction).
 		assert.True(t, hasNewHashMPG(got))
-		byName := entriesByName(got)
-		_, v1Present := byName["v1-100"]
-		_, v2Present := byName["v2-200"]
+		byEpoch := componentutils.IndexPodGangEntriesByEpoch(got)
+		_, v1Present := byEpoch["100"]
+		_, v2Present := byEpoch["200"]
 		assert.True(t, v1Present || v2Present, "older-generation entries remain until drained")
 	})
 
@@ -750,25 +754,25 @@ func TestMaxUnavailabilityBudgetViolated(t *testing.T) {
 
 // mpgEntryAt builds a current-hash MPG entry at the given epoch with the given PCSG indices.
 func mpgEntryAt(epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder("mpg-"+epoch, testHash, epoch).
+	return testutils.NewPodGangEntryBuilder(testHash, epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
 // mpgEntryWithPods builds a current-hash MPG entry at the given epoch with pod counts and indices.
 func mpgEntryWithPods(epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder(epoch, testHash, epoch).
+	return testutils.NewPodGangEntryBuilder(testHash, epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
 // oldHashMPGEntryAt builds an old-generation MPG entry.
 func oldHashMPGEntryAt(hash, epoch string, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder(hash+"-"+epoch, hash, epoch).
+	return testutils.NewPodGangEntryBuilder(hash, epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 
 // oldHashMPGEntryWithPods builds an old-generation MPG entry with pod counts and indices.
 func oldHashMPGEntryWithPods(hash, epoch string, pods map[string]int32, pcsgIndices map[string][]int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder(hash+"-"+epoch, hash, epoch).
+	return testutils.NewPodGangEntryBuilder(hash, epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithPodCliques(pods).WithPCSGReplicaIndices(pcsgIndices).Build()
 }
 

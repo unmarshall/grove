@@ -90,9 +90,9 @@ func TestBuildResource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-pcs-0", Namespace: testNamespace},
 	}
 	entries := []grovecorev1alpha1.PodGangEntry{
-		testutils.NewPodGangEntryBuilder(testHash, "e2").Build(),
-		testutils.NewPodGangEntryBuilder(testHash, "e0").Build(),
-		testutils.NewPodGangEntryBuilder(testHash, "e1").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "300").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "100").Build(),
+		testutils.NewPodGangEntryBuilder(testHash, "200").Build(),
 	}
 
 	require.NoError(t, r.buildResource(pgm, pcs, 0, entries))
@@ -104,5 +104,5 @@ func TestBuildResource(t *testing.T) {
 	for i, e := range pgm.Spec.Entries {
 		epochs[i] = e.Epoch
 	}
-	assert.Equal(t, []string{"e0", "e1", "e2"}, epochs, "entries sorted by epoch")
+	assert.Equal(t, []string{"100", "200", "300"}, epochs, "entries sorted by epoch")
 }
