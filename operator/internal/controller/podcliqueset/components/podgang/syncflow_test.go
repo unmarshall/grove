@@ -43,6 +43,8 @@ import (
 )
 
 const testGenerationHash = "testhash"
+const testAnchorEpoch = "1000"
+const testTailEpoch = "1001"
 
 // TestVerifyAllPodsCreated tests verifyAllPodsCreated with minimal sc + podGangInfo (no PCS/prepareSyncFlow).
 // It covers both the PCLQ existence check and getPodsPendingCreationOrAssociation logic (Replicas and podgang label).
@@ -255,7 +257,7 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
-	pgName := "test-pcs-0-testhash-0"
+	pgName := testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)
 	pclqName := "test-pcs-0-worker"
 
 	makePCS := func() *grovecorev1alpha1.PodCliqueSet {
@@ -499,8 +501,8 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 		}
 		pclq0Name := "test-pcs-0-worker"
 		pclq1Name := "test-pcs-1-worker"
-		pg0Name := "test-pcs-0-testhash-0"
-		pg1Name := "test-pcs-1-testhash-0"
+		pg0Name := testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)
+		pg1Name := testutils.AnchorPodGangName("test-pcs", 1, testAnchorEpoch)
 		pclq0 := &grovecorev1alpha1.PodClique{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: pclq0Name, Namespace: ns, UID: "pclq0-uid",
@@ -612,7 +614,7 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 			},
 			pcsgConfigs:               nil,
 			expectedNumPodGangs:       2,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0", "test-pcs-1-testhash-0"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch), testutils.AnchorPodGangName("test-pcs", 1, testAnchorEpoch)},
 			expectedScaledPodGangFQNs: []string{},
 		},
 		{
@@ -636,8 +638,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-testhash-scaling-group-1", "test-pcs-0-testhash-scaling-group-2"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)},
+			expectedScaledPodGangFQNs: []string{testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 1), testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 2)},
 		},
 		{
 			name:        "PCS with mixed standalone PCLQ and PCSG",
@@ -667,8 +669,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-testhash-sg-2", "test-pcs-0-testhash-sg-3"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)},
+			expectedScaledPodGangFQNs: []string{testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg", 2), testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg", 3)},
 		},
 		{
 			name:        "Multiple PCS replicas with PCSG",
@@ -691,10 +693,10 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:      4,
-			expectedBasePodGangNames: []string{"test-pcs-0-testhash-0", "test-pcs-1-testhash-0"},
+			expectedBasePodGangNames: []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch), testutils.AnchorPodGangName("test-pcs", 1, testAnchorEpoch)},
 			expectedScaledPodGangFQNs: []string{
-				"test-pcs-0-testhash-worker-sg-1",
-				"test-pcs-1-testhash-worker-sg-1",
+				testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "worker-sg", 1),
+				testutils.NonAnchorPodGangName("test-pcs", 1, testTailEpoch, "worker-sg", 1),
 			},
 		},
 		{
@@ -718,7 +720,7 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				},
 			},
 			expectedNumPodGangs:       1,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)},
 			expectedScaledPodGangFQNs: []string{},
 		},
 		{
@@ -733,8 +735,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				{Name: "sg-b", Replicas: ptr.To(int32(2)), MinAvailable: ptr.To(int32(1)), CliqueNames: []string{"worker-b"}},
 			},
 			expectedNumPodGangs:       4,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-testhash-sg-a-1", "test-pcs-0-testhash-sg-a-2", "test-pcs-0-testhash-sg-b-1"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)},
+			expectedScaledPodGangFQNs: []string{testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg-a", 1), testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg-a", 2), testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg-b", 1)},
 		},
 		{
 			name:        "Multiple cliques in one PCSG",
@@ -747,8 +749,8 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 				{Name: "sg", Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(1)), CliqueNames: []string{"worker", "helper"}},
 			},
 			expectedNumPodGangs:       3,
-			expectedBasePodGangNames:  []string{"test-pcs-0-testhash-0"},
-			expectedScaledPodGangFQNs: []string{"test-pcs-0-testhash-sg-1", "test-pcs-0-testhash-sg-2"},
+			expectedBasePodGangNames:  []string{testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)},
+			expectedScaledPodGangFQNs: []string{testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg", 1), testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "sg", 2)},
 		},
 	}
 
@@ -878,7 +880,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: &grovecorev1alpha1.TopologyLevel{Domain: "zone", Key: "topology.kubernetes.io/zone"},
 				},
 			},
@@ -901,7 +903,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						preferredKey: topologyLevelHost.Key,
 					},
@@ -929,7 +931,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						requiredKey:  topologyLevelZone.Key,
 						preferredKey: topologyLevelHost.Key,
@@ -958,7 +960,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						requiredKey: topologyLevelRack.Key,
 					},
@@ -986,7 +988,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyPackConstraint: &expectedTopologyPackConstraint{
 						preferredKey: topologyLevelRack.Key,
 					},
@@ -1018,7 +1020,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: nil,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-worker": topologyLevelHost,
@@ -1051,7 +1053,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					pclqPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-worker": {preferredKey: topologyLevelHost.Key},
 					},
@@ -1083,7 +1085,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 1,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-worker": topologyLevelHost,
@@ -1126,7 +1128,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-0-decode-leader": topologyLevelHost,
@@ -1137,7 +1139,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-testhash-scaling-group-1",
+					fqn:           testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 1),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1182,13 +1184,13 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn: "test-pcs-0-testhash-0",
+					fqn: testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					pcsgPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-scaling-group-0": {preferredKey: topologyLevelRack.Key},
 					},
 				},
 				{
-					fqn: "test-pcs-0-testhash-scaling-group-1",
+					fqn: testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 1),
 					pcsgPackConstraints: map[string]expectedTopologyPackConstraint{
 						"test-pcs-0-scaling-group-1": {preferredKey: topologyLevelRack.Key},
 					},
@@ -1237,7 +1239,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-router":                        topologyLevelZone,
@@ -1249,7 +1251,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-testhash-scaling-group-1",
+					fqn:           testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 1),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1336,7 +1338,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			expectedNumPodGangs: 2,
 			expectedPodGangTopologyConstraints: []expectedPodGangTopologyConstraints{
 				{
-					fqn:           "test-pcs-0-testhash-0",
+					fqn:           testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-0-decode-leader": topologyLevelHost,
@@ -1344,7 +1346,7 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 					},
 				},
 				{
-					fqn:           "test-pcs-0-testhash-scaling-group-1",
+					fqn:           testutils.NonAnchorPodGangName("test-pcs", 0, testTailEpoch, "scaling-group", 1),
 					topologyLevel: &topologyLevelZone,
 					pclqConstraints: map[string]grovecorev1alpha1.TopologyLevel{
 						"test-pcs-0-scaling-group-1-decode-leader": topologyLevelHost,
@@ -1400,13 +1402,13 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			err := r.computeExpectedPodGangs(t.Context(), sc)
 			require.NoError(t, err)
 
-			basePodGangFQN := apicommon.GenerateAnchorPodGangName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, *pcs.Status.CurrentGenerationHash, 0)
-			computedBasePodGangs := lo.Filter(sc.expectedPodGangs, func(pg *podGangInfo, _ int) bool {
-				return pg.fqn == basePodGangFQN
+			anchorPodGangFQN := testutils.AnchorPodGangName(pcs.Name, 0, testAnchorEpoch)
+			computedAnchorPodGangs := lo.Filter(sc.expectedPodGangs, func(pg *podGangInfo, _ int) bool {
+				return pg.fqn == anchorPodGangFQN
 			})
 
-			require.NotNil(t, computedBasePodGangs)
-			require.Equal(t, len(computedBasePodGangs), 1)
+			require.NotNil(t, computedAnchorPodGangs)
+			require.Equal(t, len(computedAnchorPodGangs), 1)
 			require.Equal(t, tc.expectedNumPodGangs, len(sc.expectedPodGangs))
 
 			if !tc.tasEnabled {
@@ -1536,7 +1538,7 @@ func TestPrepareSyncFlowTopologyResolution(t *testing.T) {
 func TestCreateOrUpdatePodGangs_ClearsStaleTopologyStateOnExistingPodGang(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
-	pgName := "test-pcs-0-testhash-0"
+	pgName := testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)
 	pclqName := "test-pcs-0-worker"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
 
@@ -1686,7 +1688,7 @@ func TestBuildResourceTopologyAnnotation(t *testing.T) {
 	ns := "default"
 	pcsName := "test-pcs"
 	pcsLabels := apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName)
-	pgName := "test-pcs-0-testhash-0"
+	pgName := testutils.AnchorPodGangName("test-pcs", 0, testAnchorEpoch)
 	pclqName := "test-pcs-0-worker"
 	topologyName := "my-topology"
 
@@ -2425,8 +2427,8 @@ func buildTestPodGangMaps(pcs *grovecorev1alpha1.PodCliqueSet) []*grovecorev1alp
 			}
 		}
 
-		mpgEpoch := "1000"
-		tpgEpoch := "1001"
+		mpgEpoch := testAnchorEpoch
+		tpgEpoch := testTailEpoch
 		entries := []grovecorev1alpha1.PodGangEntry{{
 			Epoch:                      mpgEpoch,
 			PodCliqueSetGenerationHash: generationHash,

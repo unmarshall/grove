@@ -103,21 +103,20 @@ func CreatePodGangNameFromPCSGFQN(pcsgFQN string, scaledPodGangIndex int) string
 }
 
 // GenerateAnchorPodGangName generates the name of an anchor PodGang.
-// Format: <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<anchor-index>.
-// anchorIndex is 0 for the single anchor of a generation. A coherent update that creates additional
-// anchors of the same generation hash uses the next index. The PodGangMap writer authors the anchor
-// name once. Every other reconciler reads it and never recomputes it.
-func GenerateAnchorPodGangName(pcsNameReplica ResourceNameReplica, pcsGenerationHash string, anchorIndex int32) string {
-	return fmt.Sprintf("%s-%d-%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash, anchorIndex)
+// Format: <pcs-name>-<pcs-replica-index>-<epoch>.
+// The PodGangMap writer authors the anchor name once. Every other reconciler reads it and never
+// recomputes it.
+func GenerateAnchorPodGangName(pcsNameReplica ResourceNameReplica, epoch string) string {
+	return fmt.Sprintf("%s-%d-%s", pcsNameReplica.Name, pcsNameReplica.Replica, epoch)
 }
 
 // GenerateNonAnchorPodGangName generates the name of a non-anchor PodGang.
-// Format: <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>-<pcsg-name>-<pcsg-replica-index>.
-// One non-anchor PodGang exists per PodCliqueScalingGroup replica index. The name is deterministic
-// and carries no epoch. The pcsgName segment keeps replica indices of different PodCliqueScalingGroups
-// from colliding. Each PodCliqueScalingGroup numbers its replicas from 0.
-func GenerateNonAnchorPodGangName(pcsNameReplica ResourceNameReplica, pcsGenerationHash, pcsgName string, pcsgReplicaIndex int32) string {
-	return fmt.Sprintf("%s-%d-%s-%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash, pcsgName, pcsgReplicaIndex)
+// Format: <pcs-name>-<pcs-replica-index>-<epoch>-<pcsg-name>-<pcsg-replica-index>.
+// One non-anchor PodGang exists per PodCliqueScalingGroup replica index within an epoch. The pcsgName
+// segment keeps replica indices of different PodCliqueScalingGroups from colliding. Each
+// PodCliqueScalingGroup numbers its replicas from 0.
+func GenerateNonAnchorPodGangName(pcsNameReplica ResourceNameReplica, epoch, pcsgName string, pcsgReplicaIndex int32) string {
+	return fmt.Sprintf("%s-%d-%s-%s-%d", pcsNameReplica.Name, pcsNameReplica.Replica, epoch, pcsgName, pcsgReplicaIndex)
 }
 
 // GeneratePodGangMapName generates a PodGangMap resource name for a PodCliqueSet replica.
@@ -128,13 +127,13 @@ func GeneratePodGangMapName(pcsNameReplica ResourceNameReplica) string {
 
 // ExtractPCSGNameAndIndexFromPodGangName parses a non-anchor PodGang name back into its
 // PodCliqueScalingGroup name and replica index. It is the inverse of GenerateNonAnchorPodGangName.
-// It builds the known <pcs-name>-<pcs-replica-index>-<pcs-generation-hash>- prefix and strips it
-// first. The remainder is split on the last dash into the PodCliqueScalingGroup name and the integer
-// index. Stripping the known prefix first keeps the split correct even when the PodCliqueScalingGroup
-// name contains dashes. It returns an error when podGangName does not carry the prefix or the index
-// is not an integer.
-func ExtractPCSGNameAndIndexFromPodGangName(podGangName string, pcsNameReplica ResourceNameReplica, pcsGenerationHash string) (pcsgName string, index int32, err error) {
-	prefix := fmt.Sprintf("%s-%d-%s-", pcsNameReplica.Name, pcsNameReplica.Replica, pcsGenerationHash)
+// It builds the known <pcs-name>-<pcs-replica-index>-<epoch>- prefix and strips it first. The
+// remainder is split on the last dash into the PodCliqueScalingGroup name and the integer index.
+// Stripping the known prefix first keeps the split correct even when the PodCliqueScalingGroup name
+// contains dashes. It returns an error when podGangName does not carry the prefix or the index is not
+// an integer.
+func ExtractPCSGNameAndIndexFromPodGangName(podGangName string, pcsNameReplica ResourceNameReplica, epoch string) (pcsgName string, index int32, err error) {
+	prefix := fmt.Sprintf("%s-%d-%s-", pcsNameReplica.Name, pcsNameReplica.Replica, epoch)
 	if !strings.HasPrefix(podGangName, prefix) {
 		return "", 0, fmt.Errorf("PodGang name %q does not carry the expected prefix %q", podGangName, prefix)
 	}

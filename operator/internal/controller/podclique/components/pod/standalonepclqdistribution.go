@@ -196,7 +196,6 @@ func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alph
 		return nil
 	}
 	rnr := apicommon.ResourceNameReplica{Name: sc.pcs.Name, Replica: sc.pcsReplicaIndex}
-	hash := *sc.pcs.Status.CurrentGenerationHash
 	var assignments []grovecorev1alpha1.PodGangPodCountAssignment
 	for _, entry := range sc.pgm.Spec.Entries {
 		count, ok := entry.PodCliques[sc.cliqueName]
@@ -204,7 +203,7 @@ func (r _resource) buildMappingFromPodGangMap(sc *syncContext) []grovecorev1alph
 			continue
 		}
 		assignments = append(assignments, grovecorev1alpha1.PodGangPodCountAssignment{
-			PodGangName: apicommon.GenerateAnchorPodGangName(rnr, hash, entry.AnchorIndex),
+			PodGangName: apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch),
 			Epoch:       entry.Epoch,
 			PodCount:    count,
 		})

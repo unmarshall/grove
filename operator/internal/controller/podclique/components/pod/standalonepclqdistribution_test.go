@@ -24,6 +24,7 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
+	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -159,8 +160,8 @@ func TestBuildMappingFromPodGangMap(t *testing.T) {
 		}
 		return sc
 	}
-	anchorName := func(anchorIndex int32) string {
-		return apicommon.GenerateAnchorPodGangName(apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}, hash, anchorIndex)
+	anchorName := func(epoch string) string {
+		return testutils.AnchorPodGangName(testPCSName, 0, epoch)
 	}
 
 	t.Run("nil PGM returns empty mapping", func(t *testing.T) {
@@ -175,8 +176,8 @@ func TestBuildMappingFromPodGangMap(t *testing.T) {
 			grovecorev1alpha1.PodGangEntry{Epoch: "200", AnchorIndex: 1, PodCliques: map[string]int32{"pca": 3}},
 		))
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 3},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 3},
 		}, got)
 	})
 
@@ -187,7 +188,7 @@ func TestBuildMappingFromPodGangMap(t *testing.T) {
 			grovecorev1alpha1.PodGangEntry{Epoch: "200", AnchorIndex: 1, PodCliques: map[string]int32{"pcb": 5}},
 		))
 		assert.Equal(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
 		}, got)
 	})
 
@@ -198,7 +199,7 @@ func TestBuildMappingFromPodGangMap(t *testing.T) {
 			grovecorev1alpha1.PodGangEntry{Epoch: "200", AnchorIndex: 1, PodCliques: map[string]int32{"pca": 1}},
 		))
 		assert.Equal(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 1},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 1},
 		}, got)
 	})
 }
@@ -210,8 +211,7 @@ func TestBuildMappingFromPodGangMap(t *testing.T) {
 func TestComputeDesiredPodGangMapping(t *testing.T) {
 	const clique = "pca"
 	const hash = "gen"
-	rnr := apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}
-	anchorName := func(idx int32) string { return apicommon.GenerateAnchorPodGangName(rnr, hash, idx) }
+	anchorName := func(epoch string) string { return testutils.AnchorPodGangName(testPCSName, 0, epoch) }
 
 	mkPCS := func(updateInProgress bool) *grovecorev1alpha1.PodCliqueSet {
 		pcs := &grovecorev1alpha1.PodCliqueSet{
@@ -253,8 +253,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 		got, err := r.computeDesiredPodGangMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 3},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 3},
 		}, got)
 		// input status not mutated.
 		assert.Equal(t, []grovecorev1alpha1.PodGangPodCountAssignment{{PodGangName: "stale", Epoch: "stale", PodCount: 99}}, sc.pclq.Status.PodGangMapping)
@@ -271,8 +271,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 		got, err := r.computeDesiredPodGangMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 1},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 2},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 1},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 2},
 		}, got)
 	})
 
@@ -287,8 +287,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 	t.Run("steady state, status non-empty, no spec-diff — returns status clone", func(t *testing.T) {
 		r := &_resource{}
 		status := []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 3},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 3},
 		}
 		sc := &syncContext{cliqueName: clique, pcsReplicaIndex: 0, pcs: mkPCS(false), pclq: mkPCLQ(5, status)}
 		got, err := r.computeDesiredPodGangMapping(sc)
@@ -302,8 +302,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 	t.Run("steady state scale-out — increments highest-AnchorIndex anchor", func(t *testing.T) {
 		r := &_resource{}
 		status := []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 3},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 3},
 		}
 		sc := &syncContext{
 			cliqueName: clique, pcsReplicaIndex: 0,
@@ -314,8 +314,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 		got, err := r.computeDesiredPodGangMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 5},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 5},
 		}, got)
 	})
 
@@ -334,8 +334,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 	t.Run("steady state scale-in — drains highest-AnchorIndex anchor first", func(t *testing.T) {
 		r := &_resource{}
 		status := []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 3},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 3},
 		}
 		sc := &syncContext{
 			cliqueName: clique, pcsReplicaIndex: 0,
@@ -346,8 +346,8 @@ func TestComputeDesiredPodGangMapping(t *testing.T) {
 		got, err := r.computeDesiredPodGangMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangPodCountAssignment{
-			{PodGangName: anchorName(0), Epoch: "100", PodCount: 2},
-			{PodGangName: anchorName(1), Epoch: "200", PodCount: 1},
+			{PodGangName: anchorName("100"), Epoch: "100", PodCount: 2},
+			{PodGangName: anchorName("200"), Epoch: "200", PodCount: 1},
 		}, got)
 	})
 }
@@ -554,9 +554,8 @@ func TestReconcileStandalonePCLQDistribution_CoherentRealign(t *testing.T) {
 	// Pods already match the PGM-derived desired distribution so no create/delete tasks run —
 	// the test focuses on the status realignment, the core behavior of the coherent branch.
 	const hash = "gen"
-	rnr := apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}
-	anchor0 := apicommon.GenerateAnchorPodGangName(rnr, hash, 0)
-	anchor1 := apicommon.GenerateAnchorPodGangName(rnr, hash, 1)
+	anchor0 := testutils.AnchorPodGangName(testPCSName, 0, "100")
+	anchor1 := testutils.AnchorPodGangName(testPCSName, 0, "200")
 	pclq := &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            pclqFQN,

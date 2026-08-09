@@ -104,13 +104,31 @@ func (r _resource) computeDesiredPCSGReplicaMapping(ss *syncState) ([]grovecorev
 	case diff > 0:
 		// Scale-out adds the new replica indices [currentSum, Spec.Replicas) to the ScaleOut
 		// assignment. The index set is contiguous, so a new replica takes the next index up. The
-		// PodGang name is not stored (consumers derive it from the index) and the epoch is left empty
-		// (assigned by the PodGangMap writer, see PodGangReplicaAssignment.Epoch).
-		desired = appendToOrCreateScaleOutEntry(desired, lo.RangeFrom(currentSum, int(diff)))
+		// PodGang name is not stored (consumers derive it from the index). The epoch is the pre-created
+		// ScaleOut entry's epoch read from the PodGangMap.
+		scaleOutEpoch, err := scaleOutEpochFromPGM(ss)
+		if err != nil {
+			return nil, err
+		}
+		desired = appendToScaleOutAssignment(desired, lo.RangeFrom(currentSum, int(diff)), scaleOutEpoch)
 	case diff < 0:
 		drainAssignmentsForScaleIn(desired, int(-diff))
 	}
 	return dropEmptyAssignments(desired), nil
+}
+
+// scaleOutEpochFromPGM returns the epoch of the current-generation ScaleOut entry in the PodGangMap.
+// The PodGangMap pre-creates exactly one ScaleOut entry per PCS replica whenever the PodCliqueSet has
+// any PodCliqueScalingGroup, so a scale-out never mints an epoch, it attaches to this one. Absence is
+// a contract violation and returns an error.
+func scaleOutEpochFromPGM(ss *syncState) (string, error) {
+	currentHash := *ss.pcs.Status.CurrentGenerationHash
+	for _, entry := range ss.podGangMap.Spec.Entries {
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut && entry.PodCliqueSetGenerationHash == currentHash {
+			return entry.Epoch, nil
+		}
+	}
+	return "", fmt.Errorf("no ScaleOut entry for generation %s in PodGangMap of PodCliqueSet %s replica %d", currentHash, ss.pcs.Name, ss.pcsReplicaIndex)
 }
 
 // buildMappingFromPodGangMap constructs the per-PodGangMap-entry replica assignments for this PCSG
@@ -154,17 +172,19 @@ func sumReplicaIndices(assignments []grovecorev1alpha1.PodGangReplicaAssignment)
 	return total
 }
 
-// appendToOrCreateScaleOutEntry adds the given PCSG replica indices to the ScaleOut assignment,
-// creating that assignment if none exists. It returns the resulting slice.
-func appendToOrCreateScaleOutEntry(pgReplicaAssignments []grovecorev1alpha1.PodGangReplicaAssignment, pcsgIndices []int32) []grovecorev1alpha1.PodGangReplicaAssignment {
+// appendToScaleOutAssignment adds the given PodCliqueScalingGroup replica indices to the ScaleOut
+// assignment, creating that assignment with the given scaleOutEpoch if this PodCliqueScalingGroup has
+// no ScaleOut assignment yet. The epoch is the PodGangMap's pre-created ScaleOut entry epoch, so the
+// assignment always carries a real epoch. It returns the resulting slice.
+func appendToScaleOutAssignment(pgReplicaAssignments []grovecorev1alpha1.PodGangReplicaAssignment, pcsgIndices []int32, scaleOutEpoch string) []grovecorev1alpha1.PodGangReplicaAssignment {
 	for i := range pgReplicaAssignments {
 		if pgReplicaAssignments[i].Role == grovecorev1alpha1.PodGangEntryRoleScaleOut {
 			pgReplicaAssignments[i].ReplicaIndices = append(pgReplicaAssignments[i].ReplicaIndices, pcsgIndices...)
 			return pgReplicaAssignments
 		}
 	}
-	// no scale-out assignment exists. create a new scale-out assignment.
 	scaleOutAssignment := grovecorev1alpha1.PodGangReplicaAssignment{
+		Epoch:          scaleOutEpoch,
 		Role:           grovecorev1alpha1.PodGangEntryRoleScaleOut,
 		ReplicaIndices: pcsgIndices,
 	}
@@ -274,16 +294,15 @@ func canonicalizeAssignments(assignments []grovecorev1alpha1.PodGangReplicaAssig
 // under the correct PodGang on the next reconcile. A replica index absent from every assignment is
 // obsolete and its PodCliques are deleted.
 func (r _resource) reconcilePCSGReplicasToDesiredMapping(ctx context.Context, logger logr.Logger, ss *syncState, desired []grovecorev1alpha1.PodGangReplicaAssignment) error {
-	hash := *ss.pcs.Status.CurrentGenerationHash
 	// Derive each replica index's PodGang name. An anchor assignment's indices all map to the anchor
 	// PodGang name. A non-anchor assignment's indices each map to their own non-anchor PodGang name.
 	desiredIndexToPG := make(map[int]string)
 	for i := range desired {
 		for _, idx := range desired[i].ReplicaIndices {
 			if desired[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-				desiredIndexToPG[int(idx)] = apicommon.GenerateAnchorPodGangName(ss.pcsResourceNameReplica, hash, desired[i].AnchorIndex)
+				desiredIndexToPG[int(idx)] = apicommon.GenerateAnchorPodGangName(ss.pcsResourceNameReplica, desired[i].Epoch)
 			} else {
-				desiredIndexToPG[int(idx)] = apicommon.GenerateNonAnchorPodGangName(ss.pcsResourceNameReplica, hash, ss.pcsgConfig.Name, idx)
+				desiredIndexToPG[int(idx)] = apicommon.GenerateNonAnchorPodGangName(ss.pcsResourceNameReplica, desired[i].Epoch, ss.pcsgConfig.Name, idx)
 			}
 		}
 	}

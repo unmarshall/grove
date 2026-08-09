@@ -117,8 +117,8 @@ func anchorAssignment(epoch string, idx int32, replicaIndices ...int32) grovecor
 func tailAssignment(epoch string, replicaIndices ...int32) grovecorev1alpha1.PodGangReplicaAssignment {
 	return grovecorev1alpha1.PodGangReplicaAssignment{Epoch: epoch, Role: grovecorev1alpha1.PodGangEntryRoleTail, ReplicaIndices: replicaIndices}
 }
-func scaleOutAssignment(replicaIndices ...int32) grovecorev1alpha1.PodGangReplicaAssignment {
-	return grovecorev1alpha1.PodGangReplicaAssignment{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: replicaIndices}
+func scaleOutAssignment(epoch string, replicaIndices ...int32) grovecorev1alpha1.PodGangReplicaAssignment {
+	return grovecorev1alpha1.PodGangReplicaAssignment{Epoch: epoch, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: replicaIndices}
 }
 
 func TestBuildMappingFromPodGangMap(t *testing.T) {
@@ -204,16 +204,19 @@ func TestComputeDesiredPCSGReplicaMapping(t *testing.T) {
 	})
 
 	t.Run("scale-out — appends new replica indices to a ScaleOut assignment", func(t *testing.T) {
-		// Spec=6, status sums to 4 (anchor0:[0,1], anchor1:[2,3]) → diff=+2 → a ScaleOut
-		// assignment claims the next contiguous indices [4, 5].
+		// Spec=6, status sums to 4 (anchor0:[0,1], anchor1:[2,3]) → diff=+2 → the next contiguous
+		// indices [4, 5] attach to the pre-created ScaleOut entry, taking its epoch from the PodGangMap.
 		status := []grovecorev1alpha1.PodGangReplicaAssignment{anchorAssignment("100", 0, 0, 1), anchorAssignment("200", 1, 2, 3)}
-		sc := newSyncContextForMappingTests(6, status, nil, false)
+		pgmEntries := []grovecorev1alpha1.PodGangEntry{
+			{Epoch: "300", Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, PodCliqueSetGenerationHash: tcsHash},
+		}
+		sc := newSyncContextForMappingTests(6, status, pgmEntries, false)
 		got, err := r.computeDesiredPCSGReplicaMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangReplicaAssignment{
 			anchorAssignment("100", 0, 0, 1),
 			anchorAssignment("200", 1, 2, 3),
-			scaleOutAssignment(4, 5),
+			scaleOutAssignment("300", 4, 5),
 		}, got)
 	})
 
@@ -223,15 +226,18 @@ func TestComputeDesiredPCSGReplicaMapping(t *testing.T) {
 		status := []grovecorev1alpha1.PodGangReplicaAssignment{
 			anchorAssignment("100", 0, 0, 1),
 			anchorAssignment("200", 1, 2, 3),
-			scaleOutAssignment(4),
+			scaleOutAssignment("300", 4),
 		}
-		sc := newSyncContextForMappingTests(6, status, nil, false)
+		pgmEntries := []grovecorev1alpha1.PodGangEntry{
+			{Epoch: "300", Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, PodCliqueSetGenerationHash: tcsHash},
+		}
+		sc := newSyncContextForMappingTests(6, status, pgmEntries, false)
 		got, err := r.computeDesiredPCSGReplicaMapping(sc)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []grovecorev1alpha1.PodGangReplicaAssignment{
 			anchorAssignment("100", 0, 0, 1),
 			anchorAssignment("200", 1, 2, 3),
-			scaleOutAssignment(4, 5),
+			scaleOutAssignment("300", 4, 5),
 		}, got)
 	})
 
@@ -242,7 +248,7 @@ func TestComputeDesiredPCSGReplicaMapping(t *testing.T) {
 			anchorAssignment("100", 0, 0, 1),
 			anchorAssignment("200", 1, 2, 3),
 			tailAssignment("300", 4),
-			scaleOutAssignment(5),
+			scaleOutAssignment("400", 5),
 		}
 		sc := newSyncContextForMappingTests(4, status, nil, false)
 		got, err := r.computeDesiredPCSGReplicaMapping(sc)

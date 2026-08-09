@@ -597,7 +597,7 @@ func (p *subStepPlanner) entriesAfterSubStep(ss subStep) ([]grovecorev1alpha1.Po
 		entries = append(entries, newEntry)
 	}
 
-	return removeEmptyEntries(entries), nil
+	return removeEmptyEntries(entries, currentHash), nil
 }
 
 // clonePodGangEntries returns a deep copy of the entries so the working set can be mutated without

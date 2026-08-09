@@ -128,3 +128,21 @@ func createEmptyPodGang(name, namespace string) *groveschedulerv1alpha1.PodGang 
 		Spec: groveschedulerv1alpha1.PodGangSpec{},
 	}
 }
+
+// AnchorPodGangName returns the name of the anchor PodGang for the given PodCliqueSet replica and
+// epoch, using the production name generator. Do NOT use this in tests that verify the name
+// generators themselves (for example TestGenerateAnchorPodGangName), which must assert against
+// literal expected names, otherwise the assertion becomes circular. Use it only where a PodGang name
+// is an incidental identifier.
+func AnchorPodGangName(pcsName string, replica int, epoch string) string {
+	return apicommon.GenerateAnchorPodGangName(apicommon.ResourceNameReplica{Name: pcsName, Replica: replica}, epoch)
+}
+
+// NonAnchorPodGangName returns the name of a non-anchor PodGang for the given PodCliqueSet replica,
+// epoch, PodCliqueScalingGroup name and PCSG replica index, using the production name generator. Do
+// NOT use this in tests that verify the name generators themselves (for example
+// TestGenerateNonAnchorPodGangName), which must assert against literal expected names, otherwise the
+// assertion becomes circular. Use it only where a PodGang name is an incidental identifier.
+func NonAnchorPodGangName(pcsName string, replica int, epoch, pcsgName string, index int32) string {
+	return apicommon.GenerateNonAnchorPodGangName(apicommon.ResourceNameReplica{Name: pcsName, Replica: replica}, epoch, pcsgName, index)
+}

@@ -124,12 +124,7 @@ type PodCliqueScalingGroupStatus struct {
 // indices this PodCliqueScalingGroup contributes. The PodGang name is not stored. It is derivable from
 // the replica index, so storing it per index would bloat the status on a large scale-out.
 type PodGangReplicaAssignment struct {
-	// Epoch is the epoch of the PodGangMap entry this assignment belongs to. It is empty for a
-	// ScaleOut assignment. Today a single PodGangMap entry captures all of a PodCliqueScalingGroup's
-	// scale-out replicas, so the ScaleOut assignment is resolved by role rather than epoch, and the
-	// PodCliqueScalingGroup reconciler leaves the epoch unset (the epoch is authored by the PodGangMap
-	// writer and the steady-state sync is one way). If this ever moves to a model with more than one
-	// ScaleOut entry, the PodCliqueScalingGroup reconciler will backfill this epoch from the PodGangMap.
+	// Epoch is the epoch of the PodGangMap entry this assignment belongs to.
 	// +optional
 	Epoch string `json:"epoch,omitempty"`
 	// Role classifies the PodGang as Anchor, Tail, or ScaleOut.

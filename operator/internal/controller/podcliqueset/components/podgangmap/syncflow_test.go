@@ -265,8 +265,14 @@ func TestReconcileEntriesWhenPGMEmpty(t *testing.T) {
 			name:     "reconstructs from legacy PodGangs when present",
 			podGangs: []groveschedulerv1alpha1.PodGang{*testutils.NewPodGangBuilder("my-pcs-0", testNamespace).WithPodGroup("my-pcs-0-frontend", 2).Build()},
 			assert: func(t *testing.T, pgm *grovecorev1alpha1.PodGangMap) {
-				require.Len(t, pgm.Spec.Entries, 1)
-				assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, pgm.Spec.Entries[0].Role)
+				// Anchor reconstructed from the legacy PodGang, plus a pre-created empty ScaleOut entry
+				// because the PodCliqueSet has a PodCliqueScalingGroup.
+				require.Len(t, pgm.Spec.Entries, 2)
+				anchor := anchorEntry(t, pgm.Spec.Entries)
+				assert.Empty(t, tailEntries(pgm.Spec.Entries))
+				scaleOut := scaleOutEntry(t, pgm.Spec.Entries)
+				assert.Empty(t, scaleOut.PCSGReplicaIndices)
+				assert.Equal(t, []string{anchor.Epoch}, scaleOut.DependsOn)
 			},
 		},
 	}
@@ -384,8 +390,13 @@ func TestRunSyncFlow(t *testing.T) {
 			},
 			assert: func(t *testing.T, cl client.Client) {
 				pgm := getPGM(t, cl, 0)
-				require.Len(t, pgm.Spec.Entries, 1)
-				assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, pgm.Spec.Entries[0].Role)
+				// Anchor reconstructed from the legacy PodGang, plus a pre-created empty ScaleOut entry
+				// because the PodCliqueSet has a PodCliqueScalingGroup.
+				require.Len(t, pgm.Spec.Entries, 2)
+				anchor := anchorEntry(t, pgm.Spec.Entries)
+				scaleOut := scaleOutEntry(t, pgm.Spec.Entries)
+				assert.Empty(t, scaleOut.PCSGReplicaIndices)
+				assert.Equal(t, []string{anchor.Epoch}, scaleOut.DependsOn)
 			},
 		},
 		{

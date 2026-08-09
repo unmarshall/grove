@@ -52,7 +52,7 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			Build()
 
 		entries := buildBootstrapEntries(pcs, clk)
-		require.Len(t, entries, 2)
+		require.Len(t, entries, 3)
 
 		mpg := anchorEntry(t, entries)
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, mpg.Role)
@@ -61,29 +61,42 @@ func TestBuildBootstrapEntries(t *testing.T) {
 		assert.Equal(t, map[string]int32{"frontend": 5}, mpg.PodCliques)
 		assert.Equal(t, map[string][]int32{"prefill": {0}}, mpg.PCSGReplicaIndices)
 
-		tails := tpgEntries(entries)
+		tails := tailEntries(entries)
 		require.Len(t, tails, 1)
 		tail := tails[0]
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}}, tail.PCSGReplicaIndices)
 		assert.Empty(t, tail.PodCliques)
 		assert.Equal(t, []string{mpg.Epoch}, tail.DependsOn)
 
-		// Epoch is the batch identity: mpg and tail carry distinct epochs, tail = mpg+1.
-		assert.NotEqual(t, mpg.Epoch, tail.Epoch)
+		// A ScaleOut entry is pre-created empty, depending on the anchor epoch, so a future scale-out
+		// attaches to it without minting an epoch.
+		scaleOut := scaleOutEntry(t, entries)
+		assert.Equal(t, testHash, scaleOut.PodCliqueSetGenerationHash)
+		assert.Empty(t, scaleOut.PodCliques)
+		assert.Empty(t, scaleOut.PCSGReplicaIndices)
+		assert.Equal(t, []string{mpg.Epoch}, scaleOut.DependsOn)
+
+		// Epoch is the batch identity: anchor, tail and scale-out carry distinct, ordered epochs.
 		assert.Equal(t, "1000", mpg.Epoch)
 		assert.Equal(t, "1001", tail.Epoch)
+		assert.Equal(t, "1002", scaleOut.Epoch)
 	})
 
-	t.Run("PCSG total equals minAvailable emits no non-mpg entry", func(t *testing.T) {
+	t.Run("PCSG total equals minAvailable emits no tail entry but a pre-created ScaleOut entry", func(t *testing.T) {
 		pcs := testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, "uid").
 			WithScalingGroupConfig("prefill", []string{"pworker"}, 2, 2).
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
 		entries := buildBootstrapEntries(pcs, clk)
-		require.Len(t, entries, 1)
+		require.Len(t, entries, 2)
 		mpg := anchorEntry(t, entries)
 		assert.Equal(t, map[string][]int32{"prefill": {0, 1}}, mpg.PCSGReplicaIndices)
+		assert.Empty(t, tailEntries(entries))
+
+		scaleOut := scaleOutEntry(t, entries)
+		assert.Empty(t, scaleOut.PCSGReplicaIndices)
+		assert.Equal(t, []string{mpg.Epoch}, scaleOut.DependsOn)
 	})
 
 	t.Run("standalone only, no PCSGs", func(t *testing.T) {
@@ -93,6 +106,7 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			Build()
 
 		entries := buildBootstrapEntries(pcs, clk)
+		// No PodCliqueScalingGroup, so only the anchor entry, no tail and no pre-created ScaleOut entry.
 		require.Len(t, entries, 1)
 		mpg := anchorEntry(t, entries)
 		assert.Equal(t, map[string]int32{"frontend": 3}, mpg.PodCliques)
@@ -107,7 +121,7 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			Build()
 
 		entries := buildBootstrapEntries(pcs, clk)
-		tails := tpgEntries(entries)
+		tails := tailEntries(entries)
 		require.Len(t, tails, 1)
 
 		tail := tails[0]
@@ -116,7 +130,7 @@ func TestBuildBootstrapEntries(t *testing.T) {
 	})
 }
 
-func TestBuildBootstrapMPG(t *testing.T) {
+func TestBuildBootstrapAnchorEntry(t *testing.T) {
 	t.Run("carries standalone full counts and PCSG floor indices", func(t *testing.T) {
 		pcs := testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, "uid").
 			WithStandaloneCliqueReplicas("frontend", 4).
@@ -124,7 +138,7 @@ func TestBuildBootstrapMPG(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		mpg := buildBootstrapMPGEntry(pcs, "epoch-0")
+		mpg := buildBootstrapAnchorEntry(pcs, "epoch-0")
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, mpg.Role)
 		assert.Nil(t, mpg.DependsOn)
 		assert.Equal(t, "epoch-0", mpg.Epoch)
@@ -138,20 +152,20 @@ func TestBuildBootstrapMPG(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		mpg := buildBootstrapMPGEntry(pcs, "epoch-0")
+		mpg := buildBootstrapAnchorEntry(pcs, "epoch-0")
 		assert.Empty(t, mpg.PodCliques)
 		assert.Equal(t, map[string][]int32{"prefill": {0}}, mpg.PCSGReplicaIndices)
 	})
 }
 
-func TestBuildBootstrapTPGEntry(t *testing.T) {
+func TestBuildBootstrapTailEntry(t *testing.T) {
 	t.Run("one entry carrying a PCSG's indices above minAvailable", func(t *testing.T) {
 		pcs := testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, "uid").
 			WithScalingGroupConfig("prefill", []string{"pworker"}, 4, 1).
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		tpgEntry, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
+		tpgEntry, ok := buildBootstrapTailEntry(pcs, "tpg-epoch", "mpg-epoch")
 		require.True(t, ok)
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, tpgEntry.Role)
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}}, tpgEntry.PCSGReplicaIndices)
@@ -166,7 +180,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		tpgEntry, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
+		tpgEntry, ok := buildBootstrapTailEntry(pcs, "tpg-epoch", "mpg-epoch")
 		require.True(t, ok)
 		assert.Equal(t, map[string][]int32{"prefill": {1, 2, 3}, "decode": {1, 2}}, tpgEntry.PCSGReplicaIndices)
 	})
@@ -177,7 +191,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		_, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
+		_, ok := buildBootstrapTailEntry(pcs, "tpg-epoch", "mpg-epoch")
 		assert.False(t, ok)
 	})
 
@@ -187,7 +201,7 @@ func TestBuildBootstrapTPGEntry(t *testing.T) {
 			WithStatusCurrentGenerationHash(ptr.To(testHash)).
 			Build()
 
-		_, ok := buildBootstrapTPGEntry(pcs, "tpg-epoch", "mpg-epoch")
+		_, ok := buildBootstrapTailEntry(pcs, "tpg-epoch", "mpg-epoch")
 		assert.False(t, ok)
 	})
 }
@@ -232,10 +246,15 @@ func TestBuildEntriesFromPCLQAndPCSGStatuses(t *testing.T) {
 		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
 		byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
-		require.Len(t, byEpoch, 2)
+		// Anchor and Tail identities preserved and membership refreshed, plus the pre-created ScaleOut
+		// lane the rebuild adds because the PodCliqueSet has a PodCliqueScalingGroup and none existed.
+		require.Len(t, byEpoch, 3)
 		assert.Equal(t, int32(2), byEpoch[anchorEpoch].PodCliques["frontend"])
 		assert.Equal(t, []int32{0}, byEpoch[anchorEpoch].PCSGReplicaIndices["prefill"])
 		assert.Equal(t, []int32{1, 2}, byEpoch[tailEpoch].PCSGReplicaIndices["prefill"])
+		scaleOut := scaleOutEntry(t, entries)
+		assert.Empty(t, scaleOut.PCSGReplicaIndices)
+		assert.Equal(t, []string{anchorEpoch}, scaleOut.DependsOn)
 	})
 
 	t.Run("preserves epoch, DependsOn and Role of existing entries", func(t *testing.T) {
@@ -256,45 +275,40 @@ func TestBuildEntriesFromPCLQAndPCSGStatuses(t *testing.T) {
 		assert.Equal(t, []string{"dep-epoch"}, anchor.DependsOn)
 	})
 
-	t.Run("net-new scale-out gets fresh epoch, nil DependsOn, ScaleOut role", func(t *testing.T) {
+	t.Run("scale-out assignment referencing an epoch absent from the PodGangMap is an error", func(t *testing.T) {
 		pcs := newPCS()
 		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
 		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
 			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
-			{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5}}, // empty epoch
+			{Epoch: "unknown", Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5}},
 		})}
 		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
 			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 		}}}
 
-		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
-		require.NoError(t, err)
-		// fresh epoch is the fake clock's unix-nano (5000).
-		scaleOut := componentutils.IndexPodGangEntriesByEpoch(entries)["5000"]
-		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleScaleOut, scaleOut.Role)
-		assert.Nil(t, scaleOut.DependsOn)
-		assert.Equal(t, []int32{5}, scaleOut.PCSGReplicaIndices["prefill"])
+		_, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
+		assertErrorCode(t, err, errCodeStatusEpochNotInPodGangMap)
 	})
 
-	t.Run("scale-out appends to existing ScaleOut entry, keeping its epoch", func(t *testing.T) {
+	t.Run("scale-out attaches to the pre-created ScaleOut entry, keeping its epoch and DependsOn", func(t *testing.T) {
 		pcs := newPCS()
 		pclqs := []grovecorev1alpha1.PodClique{newFrontendPCLQ([]grovecorev1alpha1.PodGangPodCountAssignment{{Epoch: anchorEpoch, PodCount: 2}})}
 		pcsgs := []grovecorev1alpha1.PodCliqueScalingGroup{newPrefillPCSG([]grovecorev1alpha1.PodGangReplicaAssignment{
 			{Epoch: anchorEpoch, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, ReplicaIndices: []int32{0}},
-			{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5, 6}}, // empty epoch
+			{Epoch: scaleOutEpoch, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, ReplicaIndices: []int32{5, 6}},
 		})}
 		existingPGM := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
 			{Epoch: anchorEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
-			{Epoch: scaleOutEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut},
+			{Epoch: scaleOutEpoch, PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, DependsOn: []string{anchorEpoch}},
 		}}}
 
 		entries, err := buildEntriesFromPCLQAndPCSGStatuses(pcs, pclqs, pcsgs, existingPGM, 0, clk)
 		require.NoError(t, err)
 		byEpoch := componentutils.IndexPodGangEntriesByEpoch(entries)
-		// reused the existing ScaleOut epoch, not a fresh clock epoch.
 		require.Contains(t, byEpoch, scaleOutEpoch)
-		assert.NotContains(t, byEpoch, "5000")
 		assert.Equal(t, []int32{5, 6}, byEpoch[scaleOutEpoch].PCSGReplicaIndices["prefill"])
+		// The pre-created entry's identity is preserved: same epoch, DependsOn on the anchor.
+		assert.Equal(t, []string{anchorEpoch}, byEpoch[scaleOutEpoch].DependsOn)
 	})
 
 	t.Run("scale-in shrinks a PCSG's replica indices at an existing epoch", func(t *testing.T) {
@@ -447,15 +461,32 @@ func TestRemoveEmptyEntries(t *testing.T) {
 			{Epoch: "has-pods", PodCliques: map[string]int32{"a": 1}},
 			{Epoch: "has-indices", PCSGReplicaIndices: map[string][]int32{"p": {0}}},
 		}
-		result := removeEmptyEntries(entries)
+		result := removeEmptyEntries(entries, testHash)
 		byEpoch := componentutils.IndexPodGangEntriesByEpoch(result)
 		require.Len(t, byEpoch, 2)
 		_, hasEmpty := byEpoch["empty"]
 		assert.False(t, hasEmpty)
 	})
 
+	t.Run("keeps an empty ScaleOut entry of the current generation", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{
+			{Epoch: "scaleout", PodCliqueSetGenerationHash: testHash, Role: grovecorev1alpha1.PodGangEntryRoleScaleOut},
+		}
+		result := removeEmptyEntries(entries, testHash)
+		require.Len(t, result, 1)
+		assert.Equal(t, "scaleout", result[0].Epoch)
+	})
+
+	t.Run("drops an empty ScaleOut entry of an old generation", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{
+			{Epoch: "scaleout", PodCliqueSetGenerationHash: "old-hash", Role: grovecorev1alpha1.PodGangEntryRoleScaleOut},
+		}
+		result := removeEmptyEntries(entries, testHash)
+		assert.Empty(t, result)
+	})
+
 	t.Run("empty input yields empty output", func(t *testing.T) {
-		assert.Empty(t, removeEmptyEntries(nil))
+		assert.Empty(t, removeEmptyEntries(nil, testHash))
 	})
 }
 
@@ -487,7 +518,7 @@ func TestReconstructEntriesFromExistingPodGangs(t *testing.T) {
 		assert.Nil(t, base.DependsOn)
 		assert.Equal(t, int32(2), base.PodCliques["frontend"])
 
-		tails := tpgEntries(entries)
+		tails := tailEntries(entries)
 		require.Len(t, tails, 1)
 		scaled := tails[0]
 		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleTail, scaled.Role)
@@ -498,11 +529,17 @@ func TestReconstructEntriesFromExistingPodGangs(t *testing.T) {
 		assert.Greater(t, scaled.Epoch, base.Epoch)
 	})
 
-	t.Run("BPG only yields a single mpg", func(t *testing.T) {
+	t.Run("BPG only yields an anchor and a pre-created empty ScaleOut entry", func(t *testing.T) {
 		entries, err := reconstructEntriesFromExistingPodGangs(pcs, []groveschedulerv1alpha1.PodGang{*bpg}, 0, clk)
 		require.NoError(t, err)
-		require.Len(t, entries, 1)
-		assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, entries[0].Role)
+		require.Len(t, entries, 2)
+
+		anchor := anchorEntry(t, entries)
+		assert.Empty(t, tailEntries(entries))
+
+		scaleOut := scaleOutEntry(t, entries)
+		assert.Empty(t, scaleOut.PCSGReplicaIndices)
+		assert.Equal(t, []string{anchor.Epoch}, scaleOut.DependsOn)
 	})
 
 	t.Run("unparseable PodGroup name yields reconstruction error", func(t *testing.T) {
@@ -632,13 +669,26 @@ func anchorEntry(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) groveco
 	return anchorPGs[0]
 }
 
-// tpgEntries returns the entries with the Tail role.
-func tpgEntries(entries []grovecorev1alpha1.PodGangEntry) []grovecorev1alpha1.PodGangEntry {
+// tailEntries returns the entries with the Tail role.
+func tailEntries(entries []grovecorev1alpha1.PodGangEntry) []grovecorev1alpha1.PodGangEntry {
 	var out []grovecorev1alpha1.PodGangEntry
 	for _, e := range entries {
-		if e.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+		if e.Role == grovecorev1alpha1.PodGangEntryRoleTail {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// scaleOutEntry returns the single entry with the ScaleOut role, failing if not exactly one.
+func scaleOutEntry(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) grovecorev1alpha1.PodGangEntry {
+	t.Helper()
+	var scaleOutPGs []grovecorev1alpha1.PodGangEntry
+	for _, e := range entries {
+		if e.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut {
+			scaleOutPGs = append(scaleOutPGs, e)
+		}
+	}
+	require.Len(t, scaleOutPGs, 1, "expected exactly one scale-out entry")
+	return scaleOutPGs[0]
 }

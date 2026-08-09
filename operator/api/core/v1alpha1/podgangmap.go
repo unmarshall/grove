@@ -80,9 +80,13 @@ const (
 // or more PodGangs. An Anchor entry materializes into a single anchor PodGang; a Tail or ScaleOut
 // entry materializes into one PodGang per (PodCliqueScalingGroup, replica index) it carries.
 type PodGangEntry struct {
-	// Epoch records the scheduling batch this entry belongs to. The value is a monotonic unix-nano
-	// timestamp. It orders scheduling across entries and is referenced by DependsOn. Epoch is unique
-	// per entry within a PodGangMap, so it is also this entry's identity key.
+	// Epoch is the identity of this entry and the group of PodGangs materialized from it. It serves
+	// two purposes. First, identity, it is unique across entries within a PodGangMap and is the
+	// listMapKey, and every PodGang materialized from this entry carries it as the grove.io/epoch
+	// label so those PodGangs are grouped by it. Second, ordering, DependsOn references epochs, and
+	// comparing epochs orders entries so scheduling dependencies can be expressed and the most recent
+	// anchor found. The value is a monotonic unix-nano integer used only as a distinct, orderable key.
+	// It is not interpreted as a wall-clock time.
 	Epoch string `json:"epoch"`
 	// PodCliqueSetGenerationHash is the PodCliqueSet generation hash that pods in this PodGang
 	// must match. Used by PodClique and PodCliqueScalingGroup reconcilers to create pods at the
