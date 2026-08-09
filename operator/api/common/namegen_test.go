@@ -115,37 +115,6 @@ func TestExtractScalingGroupNameFromPCSGFQN(t *testing.T) {
 	}
 }
 
-func TestGenerateBasePodGangName(t *testing.T) {
-	tests := []struct {
-		name           string
-		pcsNameReplica ResourceNameReplica
-		expected       string
-	}{
-		{
-			name:           "simple base PodGang name",
-			pcsNameReplica: ResourceNameReplica{Name: "simple1", Replica: 0},
-			expected:       "simple1-0",
-		},
-		{
-			name:           "base PodGang with different replica",
-			pcsNameReplica: ResourceNameReplica{Name: "test-app", Replica: 2},
-			expected:       "test-app-2",
-		},
-		{
-			name:           "complex PCS name",
-			pcsNameReplica: ResourceNameReplica{Name: "my-complex-workload", Replica: 5},
-			expected:       "my-complex-workload-5",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := GenerateBasePodGangName(tc.pcsNameReplica)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
-}
-
 func TestExtractScalingGroupNameFromPCSGFQN_Consistency(t *testing.T) {
 	// Test that ExtractScalingGroupNameFromPCSGFQN is the inverse of GeneratePodCliqueScalingGroupName
 	testCases := []struct {
@@ -264,66 +233,6 @@ func TestGenerateNonAnchorPodGangName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			actual := GenerateNonAnchorPodGangName(ResourceNameReplica{Name: tc.pcsName, Replica: tc.replicaIndex}, tc.epoch, tc.pcsgName, tc.index)
 			assert.Equal(t, tc.expected, actual)
-		})
-	}
-}
-
-func TestExtractPCSGNameAndIndexFromPodGangName(t *testing.T) {
-	tests := []struct {
-		name          string
-		pcsName       string
-		replicaIndex  int
-		epoch         string
-		podGangName   string
-		expectedPCSG  string
-		expectedIndex int32
-		expectErr     bool
-	}{
-		{
-			name:          "single-segment pcsg name",
-			pcsName:       "my-pcs",
-			replicaIndex:  0,
-			epoch:         "1700000000000000000",
-			podGangName:   "my-pcs-0-1700000000000000000-prefill-3",
-			expectedPCSG:  "prefill",
-			expectedIndex: 3,
-		},
-		{
-			name:          "pcsg name with hyphens",
-			pcsName:       "my-pcs",
-			replicaIndex:  0,
-			epoch:         "1700000000000000000",
-			podGangName:   "my-pcs-0-1700000000000000000-gpu-workers-0",
-			expectedPCSG:  "gpu-workers",
-			expectedIndex: 0,
-		},
-		{
-			name:         "prefix missing",
-			pcsName:      "my-pcs",
-			replicaIndex: 0,
-			epoch:        "1700000000000000000",
-			podGangName:  "other-pcs-1-1700000000000000000-prefill-3",
-			expectErr:    true,
-		},
-		{
-			name:         "non-integer index",
-			pcsName:      "my-pcs",
-			replicaIndex: 0,
-			epoch:        "1700000000000000000",
-			podGangName:  "my-pcs-0-1700000000000000000-prefill-x",
-			expectErr:    true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pcsgName, index, err := ExtractPCSGNameAndIndexFromPodGangName(tc.podGangName, ResourceNameReplica{Name: tc.pcsName, Replica: tc.replicaIndex}, tc.epoch)
-			if tc.expectErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-			assert.Equal(t, tc.expectedPCSG, pcsgName)
-			assert.Equal(t, tc.expectedIndex, index)
 		})
 	}
 }
