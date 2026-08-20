@@ -87,23 +87,21 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 		return ctrlcommon.ReconcileWithErrors("failed to set selector for PodClique", err)
 	}
 
-	// Skip the patch when the mutators left the status byte-identical to what is already persisted.
-	// The API server no-ops an identical write, but it still receives, decodes and validates the
-	// request. Skipping avoids that cost, which matters at scale where pod events drive many
-	// reconciles. equality.Semantic is used because the status mixes counters, pointers, conditions
-	// and a label-selector map.
-	if equality.Semantic.DeepEqual(*originalStatus, pclq.Status) {
-		return ctrlcommon.ReconcileAfter(internalconstants.PodCliqueStatusResyncInterval, fmt.Sprintf("periodic status resync for PodClique: %v", pclqObjectKey))
-	}
-
-	// update the PodClique status.
-	if err := r.client.Status().Patch(ctx, pclq, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			return ctrlcommon.ReconcileAfter(internalconstants.ComponentSyncRetryInterval, fmt.Sprintf("409-conflict when updating PodClique status, re-queueing: %v", pclqObjectKey))
+	// Patch only when the mutators changed the status. The API server no-ops an identical write, but
+	// it still receives, decodes and validates the request. Skipping avoids that cost, which matters
+	// at scale where pod events drive many reconciles. equality.Semantic is used because the status
+	// mixes counters, pointers, conditions and a label-selector map.
+	if !equality.Semantic.DeepEqual(*originalStatus, pclq.Status) {
+		if err := r.client.Status().Patch(ctx, pclq, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrlcommon.ReconcileAfter(internalconstants.ComponentSyncRetryInterval, fmt.Sprintf("409-conflict when updating PodClique status, re-queueing: %v", pclqObjectKey))
+			}
+			logger.Error(err, "failed to update PodClique status")
+			return ctrlcommon.ReconcileWithErrors("failed to update PodClique status", err)
 		}
-		logger.Error(err, "failed to update PodClique status")
-		return ctrlcommon.ReconcileWithErrors("failed to update PodClique status", err)
 	}
+	// Requeue after a fixed interval so a status left stale by a lost update is recomputed from a
+	// fresh cache and corrected even when no watch event fires.
 	return ctrlcommon.ReconcileAfter(internalconstants.PodCliqueStatusResyncInterval, fmt.Sprintf("periodic status resync for PodClique: %v", pclqObjectKey))
 }
 

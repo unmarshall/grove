@@ -84,20 +84,17 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 
 	mutateCurrentPodCliqueSetGenerationHash(logger, pcs, pcsg, lo.Flatten(lo.Values(pclqsPerPCSGReplica)))
 
-	// Skip the patch when the mutators left the status byte-identical to what is already persisted.
-	// The API server no-ops an identical write, but it still receives, decodes and validates the
-	// request. Skipping avoids that cost. equality.Semantic is used because the status mixes counters,
-	// pointers, conditions and a label-selector map.
-	if equality.Semantic.DeepEqual(*originalStatus, pcsg.Status) {
-		return ctrlcommon.ContinueReconcile()
-	}
-
-	if err = r.client.Status().Patch(ctx, pcsg, patchObj); err != nil {
-		if apierrors.IsConflict(err) {
-			return ctrlcommon.ReconcileAfter(internalconstants.ComponentSyncRetryInterval, fmt.Sprintf("409-conflict when updating PodCliqueScalingGroup status, re-queueing: %v", pcsgObjectKey))
+	// Patch only when the mutators changed the status. The API server no-ops an identical write, but
+	// it still receives, decodes and validates the request. Skipping avoids that cost. equality.Semantic
+	// is used because the status mixes counters, pointers, conditions and a label-selector map.
+	if !equality.Semantic.DeepEqual(*originalStatus, pcsg.Status) {
+		if err = r.client.Status().Patch(ctx, pcsg, patchObj); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrlcommon.ReconcileAfter(internalconstants.ComponentSyncRetryInterval, fmt.Sprintf("409-conflict when updating PodCliqueScalingGroup status, re-queueing: %v", pcsgObjectKey))
+			}
+			logger.Error(err, "failed to update PodCliqueScalingGroup status")
+			return ctrlcommon.ReconcileWithErrors("failed to update the status with label selector and replicas", err)
 		}
-		logger.Error(err, "failed to update PodCliqueScalingGroup status")
-		return ctrlcommon.ReconcileWithErrors("failed to update the status with label selector and replicas", err)
 	}
 
 	return ctrlcommon.ContinueReconcile()
