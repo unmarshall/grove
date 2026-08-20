@@ -244,13 +244,62 @@ func TestReconcileStatusConvergesWhenReadyPodMatchesDesiredHash(t *testing.T) {
 
 	result := r.reconcileStatus(context.Background(), logr.Discard(), pclq)
 
-	_, err := result.Result()
+	res, err := result.Result()
 	require.NoError(t, err)
+	assert.Equal(t, internalconstants.PodCliqueStatusResyncInterval, res.RequeueAfter,
+		"a successful status reconcile should requeue after PodCliqueStatusResyncInterval")
 	updatedPCLQ := &grovecorev1alpha1.PodClique{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: pclq.Name, Namespace: pclq.Namespace}, updatedPCLQ))
 	assert.Equal(t, int32(1), updatedPCLQ.Status.UpdatedReplicas)
 	assert.Equal(t, templateHash, *updatedPCLQ.Status.CurrentPodTemplateHash)
 	assert.Equal(t, *pcs.Status.CurrentGenerationHash, *updatedPCLQ.Status.CurrentPodCliqueSetGenerationHash)
+}
+
+// TestReconcileStatusRequeuesWithoutPatchWhenStatusUnchanged verifies that when a reconcile
+// recomputes a status identical to what is already persisted, reconcileStatus skips the patch but
+// still requeues after PodCliqueStatusResyncInterval. The periodic requeue lets a stale status left
+// by a lost update be recomputed from a fresh cache even when no watch event fires.
+func TestReconcileStatusRequeuesWithoutPatchWhenStatusUnchanged(t *testing.T) {
+	pcs, pclq, templateHash := newPodCliqueHashConvergenceFixture(t)
+	pclq.Generation = 1
+	pclq.Spec = grovecorev1alpha1.PodCliqueSpec{Replicas: 1, MinAvailable: ptr.To[int32](1)}
+	pclq.Status = grovecorev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To[int64](1)}
+	pod := createReadyOwnedPodWithHash("ready-pod", pclq, templateHash)
+
+	cl := testutils.NewTestClientBuilder().
+		WithObjects(pcs, pclq, pod).
+		WithStatusSubresource(pcs, pclq).
+		WithIndex(&corev1.Pod{}, ".metadata.controller.uid", func(obj client.Object) []string {
+			controllerRef := metav1.GetControllerOfNoCopy(obj)
+			if controllerRef == nil {
+				return nil
+			}
+			return []string{string(controllerRef.UID)}
+		}).
+		Build()
+	r := &Reconciler{client: cl, eventRecorder: record.NewFakeRecorder(1)}
+
+	// The first reconcile persists the computed status.
+	first := r.reconcileStatus(context.Background(), logr.Discard(), pclq)
+	require.False(t, first.HasErrors())
+
+	// Re-fetch so the in-memory object matches what is persisted, then reconcile again. The mutators
+	// recompute an identical status, so the equality guard skips the patch.
+	refetched := &grovecorev1alpha1.PodClique{}
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: pclq.Name, Namespace: pclq.Namespace}, refetched))
+	rvBefore := refetched.ResourceVersion
+
+	second := r.reconcileStatus(context.Background(), logr.Discard(), refetched)
+
+	res, err := second.Result()
+	require.NoError(t, err)
+	assert.Equal(t, internalconstants.PodCliqueStatusResyncInterval, res.RequeueAfter,
+		"an unchanged status reconcile should still requeue after PodCliqueStatusResyncInterval")
+
+	// No patch was issued, so the resourceVersion is unchanged.
+	after := &grovecorev1alpha1.PodClique{}
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: pclq.Name, Namespace: pclq.Namespace}, after))
+	assert.Equal(t, rvBefore, after.ResourceVersion, "no status patch should be issued when the status is unchanged")
 }
 
 // TestMutateCurrentHashesDoesNotAdvanceWhenTemplateHashIsStale verifies that
