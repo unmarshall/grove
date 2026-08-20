@@ -20,6 +20,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	internalconstants "github.com/ai-dynamo/grove/operator/internal/constants"
 	ctrlcommon "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
@@ -82,9 +83,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	reconcileSpecFlowResult := r.reconcileSpec(ctx, logger, pclq)
-	if statusReconcileResult := r.reconcileStatus(ctx, logger, pclq); ctrlcommon.ShortCircuitReconcileFlow(statusReconcileResult) {
-		return statusReconcileResult.Result()
-	}
+	statusReconcileResult := r.reconcileStatus(ctx, logger, pclq)
+	reconcileResult := ctrlcommon.MergeStepResults(reconcileSpecFlowResult, statusReconcileResult)
 
-	return reconcileSpecFlowResult.Result()
+	result, err := reconcileResult.Result()
+	// Neither flow requested a requeue, so schedule the periodic status resync as a backstop that
+	// recomputes a status left stale by a lost update. This is applied here rather than in
+	// reconcileStatus so it cannot mask a shorter requeue from the spec flow, which drives
+	// rolling-update progression. A longer resync overriding that shorter requeue would delay the
+	// update by a full interval.
+	// See https://github.com/ai-dynamo/grove/issues/775.
+	if err == nil && result.RequeueAfter == 0 {
+		result.RequeueAfter = internalconstants.PodCliqueStatusResyncInterval
+	}
+	return result, err
 }

@@ -100,9 +100,8 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 			return ctrlcommon.ReconcileWithErrors("failed to update PodClique status", err)
 		}
 	}
-	// Requeue after a fixed interval so a status left stale by a lost update is recomputed from a
-	// fresh cache and corrected even when no watch event fires.
-	return ctrlcommon.ReconcileAfter(internalconstants.PodCliqueStatusResyncInterval, fmt.Sprintf("periodic status resync for PodClique: %v", pclqObjectKey))
+
+	return ctrlcommon.ContinueReconcile()
 }
 
 // mutateCurrentHashes updates the PodClique's current template and generation hashes when updates are complete

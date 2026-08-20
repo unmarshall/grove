@@ -244,10 +244,8 @@ func TestReconcileStatusConvergesWhenReadyPodMatchesDesiredHash(t *testing.T) {
 
 	result := r.reconcileStatus(context.Background(), logr.Discard(), pclq)
 
-	res, err := result.Result()
+	_, err := result.Result()
 	require.NoError(t, err)
-	assert.Equal(t, internalconstants.PodCliqueStatusResyncInterval, res.RequeueAfter,
-		"a successful status reconcile should requeue after PodCliqueStatusResyncInterval")
 	updatedPCLQ := &grovecorev1alpha1.PodClique{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: pclq.Name, Namespace: pclq.Namespace}, updatedPCLQ))
 	assert.Equal(t, int32(1), updatedPCLQ.Status.UpdatedReplicas)
@@ -256,9 +254,9 @@ func TestReconcileStatusConvergesWhenReadyPodMatchesDesiredHash(t *testing.T) {
 }
 
 // TestReconcileStatusRequeuesWithoutPatchWhenStatusUnchanged verifies that when a reconcile
-// recomputes a status identical to what is already persisted, reconcileStatus skips the patch but
-// still requeues after PodCliqueStatusResyncInterval. The periodic requeue lets a stale status left
-// by a lost update be recomputed from a fresh cache even when no watch event fires.
+// recomputes a status identical to what is already persisted, reconcileStatus skips the patch and
+// returns without requesting a requeue. The periodic resync that recovers a stale status is applied
+// by the top-level Reconcile, not by reconcileStatus.
 func TestReconcileStatusRequeuesWithoutPatchWhenStatusUnchanged(t *testing.T) {
 	pcs, pclq, templateHash := newPodCliqueHashConvergenceFixture(t)
 	pclq.Generation = 1
@@ -291,10 +289,10 @@ func TestReconcileStatusRequeuesWithoutPatchWhenStatusUnchanged(t *testing.T) {
 
 	second := r.reconcileStatus(context.Background(), logr.Discard(), refetched)
 
+	require.False(t, second.HasErrors())
 	res, err := second.Result()
 	require.NoError(t, err)
-	assert.Equal(t, internalconstants.PodCliqueStatusResyncInterval, res.RequeueAfter,
-		"an unchanged status reconcile should still requeue after PodCliqueStatusResyncInterval")
+	assert.Zero(t, res.RequeueAfter, "an unchanged status reconcile should not requeue from reconcileStatus")
 
 	// No patch was issued, so the resourceVersion is unchanged.
 	after := &grovecorev1alpha1.PodClique{}
