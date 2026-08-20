@@ -16,6 +16,7 @@ package podclique
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,10 +31,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // TestMutateUpdatedReplica tests the mutateUpdatedReplica function across different PodClique states
@@ -491,6 +495,47 @@ func TestComputeMinAvailableBreachedConditionPartialScheduleRegression(t *testin
 			assert.Equal(t, tt.wantReason, condition.Reason, "MinAvailableBreached reason mismatch")
 		})
 	}
+}
+
+// TestReconcileStatusRequeuesOnConflict verifies that when the optimistic-locked status patch is
+// rejected with a conflict, reconcileStatus requeues after ComponentSyncRetryInterval instead of
+// surfacing a hard error. A conflict means the PodClique was written by a concurrent reconcile
+// after this reconcile read it, so retrying against a fresher PodClique prevents a stale write
+// from silently winning. See https://github.com/ai-dynamo/grove/issues/775.
+func TestReconcileStatusRequeuesOnConflict(t *testing.T) {
+	pcs, pclq, templateHash := newPodCliqueHashConvergenceFixture(t)
+	pclq.Generation = 1
+	pclq.Spec = grovecorev1alpha1.PodCliqueSpec{
+		Replicas:     1,
+		MinAvailable: ptr.To[int32](1),
+	}
+	pclq.Status = grovecorev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To[int64](1)}
+	pod := createReadyOwnedPodWithHash("ready-pod", pclq, templateHash)
+
+	conflict := apierrors.NewConflict(
+		schema.GroupResource{Group: grovecorev1alpha1.SchemeGroupVersion.Group, Resource: "podcliques"},
+		pclq.Name, errors.New("object was modified"))
+	cl := testutils.NewTestClientBuilder().
+		WithObjects(pcs, pclq, pod).
+		WithStatusSubresource(pcs, pclq).
+		WithIndex(&corev1.Pod{}, ".metadata.controller.uid", func(obj client.Object) []string {
+			controllerRef := metav1.GetControllerOfNoCopy(obj)
+			if controllerRef == nil {
+				return nil
+			}
+			return []string{string(controllerRef.UID)}
+		}).
+		RecordErrorForObjects(testutils.ClientMethodStatusPatch, conflict, client.ObjectKeyFromObject(pclq)).
+		Build()
+	r := &Reconciler{client: cl, eventRecorder: record.NewFakeRecorder(1)}
+
+	result := r.reconcileStatus(context.Background(), logr.Discard(), pclq)
+
+	require.False(t, result.HasErrors(), "a conflicting status patch must not surface as a reconcile error")
+	res, err := result.Result()
+	require.NoError(t, err)
+	assert.Equal(t, internalconstants.ComponentSyncRetryInterval, res.RequeueAfter,
+		"a conflicting status patch should requeue after ComponentSyncRetryInterval")
 }
 
 // TestMutateSelector verifies the /scale selector is published for standalone PodCliques (with or
