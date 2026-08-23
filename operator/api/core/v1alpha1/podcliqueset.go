@@ -490,6 +490,13 @@ type HeadlessServiceConfig struct {
 type UpdateStrategyType string
 
 const (
+	// CoherentStrategy indicates that replicas will be updated in Minimal Viable Units —
+	// MinAvailable replicas of each updated standalone PodClique plus MinAvailable replicas of each
+	// updated PodCliqueScalingGroup — scheduled atomically as a new PodGang. This guarantees
+	// that pods forming a minimum-viable serving unit are always version-compatible.
+	// NOTE: While we have introduced an update strategy type for coherent, this is still not available.
+	// In future releases once this is available this NOTE will be removed.
+	CoherentStrategy UpdateStrategyType = "Coherent"
 	// RollingRecreateStrategy indicates that replicas will be progressively
 	// deleted and recreated one at a time, when templates change. This applies to
 	// both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.

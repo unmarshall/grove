@@ -189,16 +189,3 @@ func GetPCSGReplicasFromPCSTemplateSpec(pcs *grovecorev1alpha1.PodCliqueSet) map
 	return result
 }
 
-// IsPCSReplicaUpdateInProgress reports whether the given PCS replica index is currently under
-// update, that is it appears in Status.UpdateProgress.CurrentlyUpdating with UpdateEndedAt unset.
-func IsPCSReplicaUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int) bool {
-	if pcs.Status.UpdateProgress == nil {
-		return false
-	}
-	for _, currentlyUpdating := range pcs.Status.UpdateProgress.CurrentlyUpdating {
-		if int(currentlyUpdating.ReplicaIndex) == pcsReplicaIndex && currentlyUpdating.UpdateEndedAt == nil {
-			return true
-		}
-	}
-	return false
-}

@@ -195,9 +195,7 @@ func (r _resource) runSyncFlow(ctx context.Context, syncSnap *syncSnapshot) erro
 		} else {
 			// Deep-copy the existing entries so mutations here do not alias the snapshot's PodGangMap.
 			entries = clonePodGangEntries(pgm.Spec.Entries)
-			// A RollingRecreate preserves PodGangs and entries. An under-update replica only needs its
-			// entries advanced to the current generation hash.
-			if componentutils.IsPCSReplicaUpdateInProgress(syncSnap.pcs, pcsReplicaIndex) {
+			if shouldAdvanceEntriesGenerationHash(syncSnap.pcs, entries) {
 				advanceEntriesGenerationHash(entries, *syncSnap.pcs.Status.CurrentGenerationHash)
 			}
 			scaleOutEpoch := strconv.FormatInt(r.clk.Now().UnixNano(), 10)

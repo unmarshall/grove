@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -600,61 +599,6 @@ func TestGetPCSGReplicasFromPCSTemplateSpec(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			actual := GetPCSGReplicasFromPCSTemplateSpec(tt.pcs)
-			assert.Equal(t, tt.expected, actual)
-		})
-	}
-}
-
-func TestIsPCSReplicaInCurrentlyUpdating(t *testing.T) {
-	tests := []struct {
-		name            string
-		updateProgress  *grovecorev1alpha1.PodCliqueSetUpdateProgress
-		pcsReplicaIndex int
-		expected        bool
-	}{
-		{
-			name:            "nil update progress",
-			updateProgress:  nil,
-			pcsReplicaIndex: 0,
-			expected:        false,
-		},
-		{
-			name: "replica currently updating with unset UpdateEndedAt",
-			updateProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
-				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{
-					{ReplicaIndex: 1},
-				},
-			},
-			pcsReplicaIndex: 1,
-			expected:        true,
-		},
-		{
-			name: "replica present but update already ended",
-			updateProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
-				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{
-					{ReplicaIndex: 1, UpdateEndedAt: ptr.To(metav1.Now())},
-				},
-			},
-			pcsReplicaIndex: 1,
-			expected:        false,
-		},
-		{
-			name: "replica not in CurrentlyUpdating",
-			updateProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
-				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{
-					{ReplicaIndex: 0},
-				},
-			},
-			pcsReplicaIndex: 1,
-			expected:        false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pcs := &grovecorev1alpha1.PodCliqueSet{
-				Status: grovecorev1alpha1.PodCliqueSetStatus{UpdateProgress: tt.updateProgress},
-			}
-			actual := IsPCSReplicaUpdateInProgress(pcs, tt.pcsReplicaIndex)
 			assert.Equal(t, tt.expected, actual)
 		})
 	}

@@ -162,7 +162,7 @@ func TestSyncDeletesOrphanedPodGangMaps(t *testing.T) {
 	assertPodGangMapAbsent(t, cl, "pcs-1")
 }
 
-func TestSyncAdvancesGenerationHashOnlyForReplicaUnderUpdate(t *testing.T) {
+func TestSyncAdvancesGenerationHashForAllReplicas(t *testing.T) {
 	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
 		WithReplicas(2).
 		WithStandaloneCliqueReplicas("clq-a", 1).
@@ -182,13 +182,13 @@ func TestSyncAdvancesGenerationHashOnlyForReplicaUnderUpdate(t *testing.T) {
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 	require.NoError(t, err)
 
-	// Replica 0 is under update, so its entries advance to the new hash.
+	// RollingRecreate preserves PodGangs, so every replica's entries advance to the current hash,
+	// not only the replica listed in CurrentlyUpdating.
 	pgm0 := getPodGangMap(t, cl, "pcs-0")
 	assert.Equal(t, "new-hash", pgm0.Spec.Entries[0].PodCliqueSetGenerationHash)
 
-	// Replica 1 is not under update, so its entries keep the old hash.
 	pgm1 := getPodGangMap(t, cl, "pcs-1")
-	assert.Equal(t, "old-hash", pgm1.Spec.Entries[0].PodCliqueSetGenerationHash)
+	assert.Equal(t, "new-hash", pgm1.Spec.Entries[0].PodCliqueSetGenerationHash)
 }
 
 func TestDeleteRemovesAllPodGangMapsOfPCS(t *testing.T) {

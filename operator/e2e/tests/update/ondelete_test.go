@@ -22,8 +22,11 @@ import (
 	"testing"
 	"time"
 
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	"github.com/ai-dynamo/grove/operator/e2e/tests"
+	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -663,4 +666,267 @@ func Test_OD9_StrategyTransition(t *testing.T) {
 	verifyNoAutomaticDeletionAfterUpdate(tc, tracker2, postSwitchPodNames, 10, true)
 
 	tests.Logger.Info("OnDelete Update - Strategy Transition test (OD-9) completed successfully!")
+}
+
+// Test_OD10_ScaleOutAfterOnDeleteUpdateNoTail verifies the OnDelete update then PCSG scale-out flow for
+// a workload whose PodCliqueScalingGroup has replicas == minAvailable, so the PodGangMap has no tail
+// entry (anchor + scale-out only). An OnDelete update advances the PodCliqueSet generation hash but does
+// not churn PodGangs. The PodGangMap entries must be advanced to the new hash so the scale-out entry's
+// DependsOn resolves to the anchor epoch. Without that, DependsOn holds an empty epoch (""), which
+// resolves to a dependency PodGang name that never exists, so the scaled-out pods stay scheduling-gated.
+// Scenario OD-10:
+// 1. Initialize a 14-node Grove cluster
+// 2. Deploy the OnDelete workload (sg-x replicas 2, minAvailable 2), verify 10 pods
+// 3. Assert the initial PodGangMap has an anchor and a scale-out entry, and no tail entry
+// 4. Trigger an OnDelete update on pc-c, then wait for it to complete
+// 5. Assert the entries are unchanged except that all now carry the new generation hash
+// 6. Scale out sg-x from 2 to 3 replicas, and assert the new index lands in the scale-out entry
+// 7. Verify all pods including the scaled-out replica become running, none stranded gated
+func Test_OD10_ScaleOutAfterOnDeleteUpdateNoTail(t *testing.T) {
+	tests.Logger.Info("1. Initialize a 14-node Grove cluster")
+	tests.Logger.Info("2. Deploy the OnDelete workload (sg-x replicas 2, minAvailable 2), verify 10 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: "workload-ondelete",
+		workloadYAML: "../../yaml/workload-ondelete.yaml",
+		workerNodes:  14,
+		expectedPods: 10,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("3. Assert the initial PodGangMap has an anchor and a scale-out entry, and no tail entry")
+	oldHash := getPCSGenerationHash(t, tc)
+	before := getPodGangMapEntries(t, tc, 0)
+	assertEntryRoles(t, before, grovev1alpha1.PodGangEntryRoleAnchor, grovev1alpha1.PodGangEntryRoleScaleOut)
+
+	anchorEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
+	assert.NotNil(t, anchorEntry.AnchorIndex)
+	assert.Equal(t, int32(0), *anchorEntry.AnchorIndex)
+	assertStandalonePCLQPodCounts(t, anchorEntry, map[string]int32{"pc-a": 2})
+	assertPodGangEntryPCSGIndices(t, anchorEntry, "sg-x", []int32{0, 1})
+	assertPodGangEntryDependsOn(t, anchorEntry, nil)
+
+	scaleOutEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
+	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", nil)
+	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
+
+	tests.Logger.Info("4. Trigger an OnDelete update on pc-c, then wait for it to complete")
+	if err := triggerPodCliqueUpdate(tc, "pc-c"); err != nil {
+		t.Fatalf("Failed to update PodClique pc-c spec: %v", err)
+	}
+	if err := waitForOnDeleteUpdateCompleteWithTimeout(tc, 1*time.Minute); err != nil {
+		t.Fatalf("Failed to verify OnDelete update completion: %v", err)
+	}
+
+	tests.Logger.Info("5. Assert the entries are unchanged except that all now carry the new generation hash")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
+	}
+	after := getPodGangMapEntries(t, tc, 0)
+	assertEntriesUnchangedExceptHashForNonCoherentUpdate(t, before, after, newHash)
+
+	tests.Logger.Info("6. Scale out sg-x from 2 to 3 replicas, and assert the new index lands in the scale-out entry")
+	// sg-x holds pc-b (1) + pc-c (3) = 4 pods per PCSG replica. With pc-a (2 standalone) the totals are
+	// 2 + 4*2 = 10 at 2 replicas and 2 + 4*3 = 14 at 3 replicas.
+	tc.ScalePCSGAcrossAllReplicasAndWait(tc.Workload.Name, "sg-x", 1, 3, 14, 0)
+
+	afterScaleOut := getPodGangMapEntries(t, tc, 0)
+	scaleOutEntry = entryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
+	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", []int32{2})
+	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
+
+	tests.Logger.Info("7. Verify all pods including the scaled-out replica become running, none stranded gated")
+	if err := tc.WaitForRunningPods(14); err != nil {
+		t.Fatalf("Scaled-out pods did not all become running after an OnDelete update; they may be stranded scheduling-gated: %v", err)
+	}
+
+	tests.Logger.Info("OnDelete Update - Scale-Out After OnDelete Update (no tail) test (OD-10) completed successfully!")
+}
+
+// Test_OD11_ScaleOutAfterOnDeleteUpdateWithTail is the OD-10 flow for a workload whose
+// PodCliqueScalingGroup has replicas > minAvailable, so the PodGangMap materializes a tail entry
+// (anchor + tail + scale-out). It asserts the same invariants across the update, so the tail entry is
+// exercised alongside the anchor and scale-out.
+// Scenario OD-11:
+// 1. Initialize a 14-node Grove cluster
+// 2. Deploy the with-tail OnDelete workload (sg-x replicas 2, minAvailable 1), verify 10 pods
+// 3. Assert the initial PodGangMap has an anchor, a tail, and a scale-out entry
+// 4. Trigger an OnDelete update on pc-c, then wait for it to complete
+// 5. Assert the entries are unchanged except that all now carry the new generation hash
+// 6. Scale out sg-x from 2 to 3 replicas, and assert the new index lands in the scale-out entry
+// 7. Verify all pods including the scaled-out replica become running, none stranded gated
+func Test_OD11_ScaleOutAfterOnDeleteUpdateWithTail(t *testing.T) {
+	tests.Logger.Info("1. Initialize a 14-node Grove cluster")
+	tests.Logger.Info("2. Deploy the with-tail OnDelete workload (sg-x replicas 2, minAvailable 1), verify 10 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: "workload-ondelete-with-tail",
+		workloadYAML: "../../yaml/workload-ondelete-with-tail.yaml",
+		workerNodes:  14,
+		expectedPods: 10,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("3. Assert the initial PodGangMap has an anchor, a tail, and a scale-out entry")
+	oldHash := getPCSGenerationHash(t, tc)
+	before := getPodGangMapEntries(t, tc, 0)
+	assertEntryRoles(t, before,
+		grovev1alpha1.PodGangEntryRoleAnchor,
+		grovev1alpha1.PodGangEntryRoleTail,
+		grovev1alpha1.PodGangEntryRoleScaleOut)
+
+	anchorEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
+	assert.NotNil(t, anchorEntry.AnchorIndex)
+	assert.Equal(t, int32(0), *anchorEntry.AnchorIndex)
+	assertStandalonePCLQPodCounts(t, anchorEntry, map[string]int32{"pc-a": 2})
+	assertPodGangEntryPCSGIndices(t, anchorEntry, "sg-x", []int32{0})
+	assertPodGangEntryDependsOn(t, anchorEntry, nil)
+
+	tailEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleTail)
+	assertPodGangEntryPCSGIndices(t, tailEntry, "sg-x", []int32{1})
+	assertPodGangEntryDependsOn(t, tailEntry, []string{anchorEntry.Epoch})
+
+	scaleOutEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
+	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", nil)
+	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
+
+	tests.Logger.Info("4. Trigger an OnDelete update on pc-c, then wait for it to complete")
+	if err := triggerPodCliqueUpdate(tc, "pc-c"); err != nil {
+		t.Fatalf("Failed to update PodClique pc-c spec: %v", err)
+	}
+	if err := waitForOnDeleteUpdateCompleteWithTimeout(tc, 1*time.Minute); err != nil {
+		t.Fatalf("Failed to verify OnDelete update completion: %v", err)
+	}
+
+	tests.Logger.Info("5. Assert the entries are unchanged except that all now carry the new generation hash")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
+	}
+	after := getPodGangMapEntries(t, tc, 0)
+	assertEntriesUnchangedExceptHashForNonCoherentUpdate(t, before, after, newHash)
+
+	tests.Logger.Info("6. Scale out sg-x from 2 to 3 replicas, and assert the new index lands in the scale-out entry")
+	tc.ScalePCSGAcrossAllReplicasAndWait(tc.Workload.Name, "sg-x", 1, 3, 14, 0)
+
+	afterScaleOut := getPodGangMapEntries(t, tc, 0)
+	scaleOutEntry = entryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
+	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", []int32{2})
+	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
+
+	tests.Logger.Info("7. Verify all pods including the scaled-out replica become running, none stranded gated")
+	if err := tc.WaitForRunningPods(14); err != nil {
+		t.Fatalf("Scaled-out pods did not all become running after an OnDelete update; they may be stranded scheduling-gated: %v", err)
+	}
+
+	tests.Logger.Info("OnDelete Update - Scale-Out After OnDelete Update (with tail) test (OD-11) completed successfully!")
+}
+
+// getPCSGenerationHash returns the PodCliqueSet's current generation hash from its status.
+func getPCSGenerationHash(t *testing.T, tc *testctx.TestContext) string {
+	t.Helper()
+	var pcs grovev1alpha1.PodCliqueSet
+	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: tc.Workload.Name}, &pcs); err != nil {
+		t.Fatalf("Failed to get PodCliqueSet %s: %v", tc.Workload.Name, err)
+	}
+	if pcs.Status.CurrentGenerationHash == nil {
+		t.Fatalf("PodCliqueSet %s has no CurrentGenerationHash", tc.Workload.Name)
+	}
+	return *pcs.Status.CurrentGenerationHash
+}
+
+// getPodGangMapEntries returns the entries of the given PCS replica's PodGangMap.
+func getPodGangMapEntries(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) []grovev1alpha1.PodGangEntry {
+	t.Helper()
+	pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: tc.Workload.Name, Replica: pcsReplicaIndex})
+	var pgm grovev1alpha1.PodGangMap
+	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: pgmName}, &pgm); err != nil {
+		t.Fatalf("Failed to get PodGangMap %s: %v", pgmName, err)
+	}
+	return pgm.Spec.Entries
+}
+
+// entryByRole returns the single entry with the given role, failing if there is not exactly one.
+func entryByRole(t *testing.T, entries []grovev1alpha1.PodGangEntry, role grovev1alpha1.PodGangEntryRole) grovev1alpha1.PodGangEntry {
+	t.Helper()
+	var found []grovev1alpha1.PodGangEntry
+	for i := range entries {
+		if entries[i].Role == role {
+			found = append(found, entries[i])
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly one %s entry, found %d", role, len(found))
+	}
+	return found[0]
+}
+
+// assertEntryRoles fails unless entries carry exactly the given roles, one entry per role.
+func assertEntryRoles(t *testing.T, entries []grovev1alpha1.PodGangEntry, roles ...grovev1alpha1.PodGangEntryRole) {
+	t.Helper()
+	actual := make([]grovev1alpha1.PodGangEntryRole, 0, len(entries))
+	for i := range entries {
+		actual = append(actual, entries[i].Role)
+	}
+	assert.ElementsMatch(t, roles, actual)
+}
+
+// assertStandalonePCLQPodCounts fails unless the entry's PodCliques equal expected. A nil expected means empty.
+func assertStandalonePCLQPodCounts(t *testing.T, entry grovev1alpha1.PodGangEntry, expected map[string]int32) {
+	t.Helper()
+	if len(expected) == 0 {
+		assert.Empty(t, entry.PodCliques)
+		return
+	}
+	assert.Equal(t, expected, entry.PodCliques)
+}
+
+// assertPodGangEntryPCSGIndices fails unless the entry's replica indices for pcsgName equal expected. A nil
+// expected means the entry carries no indices for pcsgName.
+func assertPodGangEntryPCSGIndices(t *testing.T, entry grovev1alpha1.PodGangEntry, pcsgName string, expected []int32) {
+	t.Helper()
+	if len(expected) == 0 {
+		assert.Empty(t, entry.PCSGReplicaIndices[pcsgName])
+		return
+	}
+	assert.Equal(t, expected, entry.PCSGReplicaIndices[pcsgName])
+}
+
+// assertPodGangEntryDependsOn fails unless the entry's DependsOn equals expected. A nil expected means empty.
+func assertPodGangEntryDependsOn(t *testing.T, entry grovev1alpha1.PodGangEntry, expected []string) {
+	t.Helper()
+	if len(expected) == 0 {
+		assert.Empty(t, entry.DependsOn)
+		return
+	}
+	assert.Equal(t, expected, entry.DependsOn)
+}
+
+// assertEntriesUnchangedExceptHashForNonCoherentUpdate asserts the PodGangMap invariant that holds for
+// RollingRecreate and OnDelete updates, which preserve PodGangs and entries. It fails unless after has
+// the same entries as before, matched by epoch, with the same role, anchor index, pod counts, PCSG
+// indices, and DependsOn, and only the generation hash changed, to newHash on every entry. It does not
+// hold for Coherent updates, which create new-generation entries and drain old-generation ones.
+func assertEntriesUnchangedExceptHashForNonCoherentUpdate(t *testing.T, before, after []grovev1alpha1.PodGangEntry, newHash string) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("entry count changed across the update: before %d, after %d", len(before), len(after))
+	}
+	afterByEpoch := make(map[string]grovev1alpha1.PodGangEntry, len(after))
+	for i := range after {
+		afterByEpoch[after[i].Epoch] = after[i]
+	}
+	for i := range before {
+		b := before[i]
+		a, ok := afterByEpoch[b.Epoch]
+		if !ok {
+			t.Fatalf("entry with epoch %s is missing after the update", b.Epoch)
+		}
+		if a.PodCliqueSetGenerationHash != newHash {
+			t.Fatalf("entry with epoch %s carries generation hash %q after the update, expected %q", b.Epoch, a.PodCliqueSetGenerationHash, newHash)
+		}
+		// Set the expected new hash on the before-copy, then assert that every other field to match across before<-> after.
+		// The before entry is a value copy, so this does not mutate the caller's slice.
+		b.PodCliqueSetGenerationHash = newHash
+		assert.Equal(t, b, a, "entry with epoch %s changed across the update beyond its generation hash", b.Epoch)
+	}
 }

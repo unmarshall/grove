@@ -43,7 +43,7 @@ spec:
             type: object
           spec:
             description: Spec defines the desired PodGang-to-pod-count mapping for
-              this PodCliqueSet replica.
+              a PodCliqueSet replica.
             properties:
               entries:
                 description: |-
@@ -74,12 +74,14 @@ spec:
                     epoch:
                       description: |-
                         Epoch is the identity of this entry and the group of PodGangs materialized from it. It serves
-                        two purposes. First, identity, it is unique across entries within a PodGangMap and is the
-                        listMapKey, and every PodGang materialized from this entry carries it as the grove.io/epoch
-                        label so those PodGangs are grouped by it. Second, ordering, DependsOn references epochs, and
-                        comparing epochs orders entries so scheduling dependencies can be expressed and the most recent
-                        anchor found. The value is a monotonic unix-nano integer used only as a distinct, orderable key.
-                        It is not interpreted as a wall-clock time.
+                        two purposes.
+                          - Identity: it is unique across entries within a PodGangMap and is the listMapKey. Every
+                            PodGang materialized from this entry carries it as the grove.io/epoch label, so those
+                            PodGangs are grouped by it.
+                          - Ordering: DependsOn references epochs, and comparing epochs orders entries so scheduling
+                            dependencies can be expressed and the most recent anchor found.
+                        The value is a monotonic unix-nano integer used only as a distinct, orderable key. It is not
+                        interpreted as a wall-clock time.
                       type: string
                     pcsgReplicaIndices:
                       additionalProperties:
@@ -112,9 +114,8 @@ spec:
                       type: object
                     role:
                       description: |-
-                        Role classifies this entry. See PodGangEntryRole for the meaning of each value. Role is the
-                        durable marker that lets the entry structure be reconstructed from the entries alone, so no
-                        separate record needs to be persisted.
+                        Role classifies this entry as anchor, tail or scale-out.
+                        See PodGangEntryRole for the meaning of each value.
                       enum:
                       - Anchor
                       - Tail

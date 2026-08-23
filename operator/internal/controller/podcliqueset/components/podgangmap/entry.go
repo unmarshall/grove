@@ -76,13 +76,33 @@ func isPodGangEntryEmpty(entry grovecorev1alpha1.PodGangEntry) bool {
 	return true
 }
 
-// advanceEntriesGenerationHash sets every entry's PodCliqueSetGenerationHash to currentHash. A
-// RollingRecreate preserves PodGangs and entries, so an updated replica's entries only need their
-// generation hash advanced.
-func advanceEntriesGenerationHash(entries []grovecorev1alpha1.PodGangEntry, currentHash string) {
+// advanceEntriesGenerationHash sets every entry's PodCliqueSetGenerationHash to
+// pcsCurrentGenerationHash.
+func advanceEntriesGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsCurrentGenerationHash string) {
 	for i := range entries {
-		entries[i].PodCliqueSetGenerationHash = currentHash
+		entries[i].PodCliqueSetGenerationHash = pcsCurrentGenerationHash
 	}
+}
+
+// shouldAdvanceEntriesGenerationHash reports whether the PodGangMap entries should be advanced to the
+// current PodCliqueSet generation hash. RollingRecreate and OnDelete both preserve the PodGangs and
+// entries across an update, so every entry always belongs to the current generation. When any entry
+// lags the current hash it is advanced so the anchor and scale-out entries stay matchable by
+// CurrentGenerationHash.
+// Coherent update is skipped. A coherent update creates new-generation entries and drains old-generation
+// entries, so a PodGangMap deliberately holds entries for more than one generation hash at once.
+// Advancing all entries to the current hash would erase that distinction.
+func shouldAdvanceEntriesGenerationHash(pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry) bool {
+	if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy {
+		return false
+	}
+	currentHash := *pcs.Status.CurrentGenerationHash
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != currentHash {
+			return true
+		}
+	}
+	return false
 }
 
 // clonePodGangEntries returns a deep copy of the entries so the caller can mutate without aliasing

@@ -15,6 +15,7 @@
 package podgangmap
 
 import (
+	"strconv"
 	"testing"
 
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 )
 
 func TestSortEntriesByEpoch(t *testing.T) {
@@ -102,6 +104,65 @@ func TestIsPodGangEntryEmpty(t *testing.T) {
 	}
 }
 
+func TestShouldAdvanceEntriesGenerationHash(t *testing.T) {
+	tests := []struct {
+		name         string
+		strategyType *grovecorev1alpha1.UpdateStrategyType
+		entryHashes  []string
+		expected     bool
+	}{
+		{
+			name:        "nil strategy defaults to RollingRecreate and advances on drift",
+			entryHashes: []string{"old"},
+			expected:    true,
+		},
+		{
+			name:         "RollingRecreate advances when an entry lags the current hash",
+			strategyType: ptr.To(grovecorev1alpha1.RollingRecreateStrategy),
+			entryHashes:  []string{"new", "old"},
+			expected:     true,
+		},
+		{
+			name:         "RollingRecreate does not advance when all entries are current",
+			strategyType: ptr.To(grovecorev1alpha1.RollingRecreateStrategy),
+			entryHashes:  []string{"new", "new"},
+			expected:     false,
+		},
+		{
+			name:         "OnDelete advances when an entry lags the current hash",
+			strategyType: ptr.To(grovecorev1alpha1.OnDeleteStrategy),
+			entryHashes:  []string{"old"},
+			expected:     true,
+		},
+		{
+			name:         "OnDelete does not advance when all entries are current",
+			strategyType: ptr.To(grovecorev1alpha1.OnDeleteStrategy),
+			entryHashes:  []string{"new", "new"},
+			expected:     false,
+		},
+		{
+			name:         "Coherent never advances even when entries lag",
+			strategyType: ptr.To(grovecorev1alpha1.CoherentStrategy),
+			entryHashes:  []string{"old"},
+			expected:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pcsBuilder := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+				WithPodCliqueSetGenerationHash(ptr.To("new"))
+			if tt.strategyType != nil {
+				pcsBuilder.WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: *tt.strategyType})
+			}
+			pcs := pcsBuilder.Build()
+			entries := entriesWithGenerationHashes(tt.entryHashes)
+
+			actual := shouldAdvanceEntriesGenerationHash(pcs, entries)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
 func TestAdvanceEntriesGenerationHash(t *testing.T) {
 	entries := []grovecorev1alpha1.PodGangEntry{
 		testutils.NewPodGangEntryBuilder("old", "100").Build(),
@@ -144,4 +205,12 @@ func epochsOf(entries []grovecorev1alpha1.PodGangEntry) []string {
 		epochs = append(epochs, entries[i].Epoch)
 	}
 	return epochs
+}
+
+func entriesWithGenerationHashes(hashes []string) []grovecorev1alpha1.PodGangEntry {
+	entries := make([]grovecorev1alpha1.PodGangEntry, 0, len(hashes))
+	for i, h := range hashes {
+		entries = append(entries, testutils.NewPodGangEntryBuilder(h, strconv.Itoa(i)).Build())
+	}
+	return entries
 }
