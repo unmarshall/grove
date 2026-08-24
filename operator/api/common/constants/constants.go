@@ -131,6 +131,12 @@ const (
 	// ConditionTopologyLevelsUnavailable indicates that the required topology levels defined on a PodCliqueSet for topology-aware scheduling are no longer available.
 	// This can happen when the ClusterTopologyBinding resource is modified which removes one or more levels required by the PodCliqueSet.
 	ConditionTopologyLevelsUnavailable = "TopologyLevelsUnavailable"
+	// ConditionTypePodGangMigrationInProgress indicates that a PodCliqueSet created under the legacy
+	// PodGang naming is being migrated to the epoch-based PodGang naming and PodGangMap scheme. It is
+	// set (before the controller manager starts) on every PodCliqueSet that still has legacy PodGangs,
+	// and cleared once every replica has migrated. While it is True the PodCliqueScalingGroup and
+	// PodClique reconcilers requeue without acting, so scaling does not interleave with the migration.
+	ConditionTypePodGangMigrationInProgress = "PodGangMigrationInProgress"
 )
 
 // Constants for Condition Reasons.
@@ -174,6 +180,8 @@ const (
 	KindPodClique = "PodClique"
 	// KindPodCliqueScalingGroup is the kind for a PodCliqueScalingGroup resource.
 	KindPodCliqueScalingGroup = "PodCliqueScalingGroup"
+	// KindPodGangMap is the kind for a PodGangMap resource.
+	KindPodGangMap = "PodGangMap"
 	// KindClusterTopology is the kind for a ClusterTopologyBinding resource.
 	KindClusterTopology = "ClusterTopologyBinding"
 )

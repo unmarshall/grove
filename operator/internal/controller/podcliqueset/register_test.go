@@ -249,3 +249,43 @@ func TestPodCliqueScalingGroupPredicateStatusChangesAffectingUpdatedAccounting(t
 		})
 	}
 }
+
+// TestPodCliqueScalingGroupPredicateSpecChange asserts that the PodCliqueScalingGroup predicate
+// enqueues the PodCliqueSet on a bare spec change (observed via a generation bump), which is how a
+// scale-out reaches the PodGangMap now that PCSG scale-out no longer writes status.
+func TestPodCliqueScalingGroupPredicateSpecChange(t *testing.T) {
+	pred, ok := podCliqueScalingGroupPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	oldPCSG := &grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	newPCSG := oldPCSG.DeepCopy()
+	newPCSG.Generation = 2
+	newPCSG.Spec.Replicas = 3
+
+	assert.True(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPCSG, ObjectNew: newPCSG}))
+}
+
+// TestPodCliqueScalingGroupPredicateNoChange asserts that the predicate ignores an update with no
+// spec or relevant status change.
+func TestPodCliqueScalingGroupPredicateNoChange(t *testing.T) {
+	pred, ok := podCliqueScalingGroupPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	oldPCSG := &grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	newPCSG := oldPCSG.DeepCopy()
+
+	assert.False(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPCSG, ObjectNew: newPCSG}))
+}
+
+// TestDeleteOnlyPredicate asserts that the predicate enqueues only on a delete event, so an externally
+// deleted owned resource is reconstructed, and ignores create, update, and generic events which are the
+// reconciler's own writes.
+func TestDeleteOnlyPredicate(t *testing.T) {
+	pred, ok := deleteOnlyPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	assert.True(t, pred.DeleteFunc(event.DeleteEvent{}), "delete event must enqueue")
+	assert.False(t, pred.CreateFunc(event.CreateEvent{}), "create event must not enqueue")
+	assert.False(t, pred.UpdateFunc(event.UpdateEvent{}), "update event must not enqueue")
+	assert.False(t, pred.GenericFunc(event.GenericEvent{}), "generic event must not enqueue")
+}

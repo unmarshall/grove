@@ -68,6 +68,10 @@ type errorRecord struct {
 	labels      labels.Set
 	resourceGVK schema.GroupVersionKind
 	err         error
+	// remainingFailures is nil for an error that fires on every matching call. When non-nil it is the
+	// number of leading consecutive matching calls that still return the error. It decrements per
+	// matching call and once it reaches zero the call succeeds.
+	remainingFailures *int
 }
 
 // CreateDefaultFakeClient creates a default client.Client without any configured reactions to errors.
@@ -170,6 +174,26 @@ func (b *TestClientBuilder) RecordErrorForObjects(method ClientMethod, err *apie
 			method:    method,
 			objectKey: objectKey,
 			err:       err,
+		})
+	}
+	return b
+}
+
+// RecordErrorForObjectsNTimes records an error that is returned for the first consecutiveFailures
+// matching calls of the given method on the given object keys. Every call after that succeeds and
+// delegates to the underlying client. A consecutiveFailures less than or equal to zero records
+// nothing.
+func (b *TestClientBuilder) RecordErrorForObjectsNTimes(method ClientMethod, err *apierrors.StatusError, consecutiveFailures int, objectKeys ...client.ObjectKey) *TestClientBuilder {
+	if err == nil || consecutiveFailures <= 0 {
+		return b
+	}
+	for _, objectKey := range objectKeys {
+		remaining := consecutiveFailures
+		b.errorRecords = append(b.errorRecords, errorRecord{
+			method:            method,
+			objectKey:         objectKey,
+			err:               err,
+			remainingFailures: &remaining,
 		})
 	}
 	return b
@@ -336,10 +360,21 @@ func (w *testStatusWriter) Patch(ctx context.Context, obj client.Object, patch c
 // ---------------------------------- Helper methods ----------------------------------
 
 func (c *testClient) getRecordedObjectError(method ClientMethod, objKey client.ObjectKey) error {
-	foundErrorRecord, ok := lo.Find(c.errorRecords, func(errRecord errorRecord) bool {
-		return errRecord.method == method && errRecord.objectKey == objKey
-	})
-	return lo.Ternary(ok, foundErrorRecord.err, nil)
+	for i := range c.errorRecords {
+		rec := &c.errorRecords[i]
+		if rec.method != method || rec.objectKey != objKey {
+			continue
+		}
+		if rec.remainingFailures == nil {
+			return rec.err
+		}
+		if *rec.remainingFailures > 0 {
+			*rec.remainingFailures--
+			return rec.err
+		}
+		return nil
+	}
+	return nil
 }
 
 func (c *testClient) getRecordedObjectCollectionError(method ClientMethod, namespace string, labelSelector labels.Selector, objGVK schema.GroupVersionKind) error {
