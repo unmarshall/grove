@@ -22,9 +22,7 @@ import (
 	"testing"
 	"time"
 
-	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	"github.com/ai-dynamo/grove/operator/e2e/tests"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +50,9 @@ func Test_OD1_NoAutomaticDeletionOnSpecChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to capture existing pods: %v", err)
 	}
+	// Capture the PodGangMap entries and generation hash before the update.
+	oldHash := getPCSGenerationHash(t, tc)
+	entriesBefore := getPodGangMapEntries(t, tc, 0)
 
 	tests.Logger.Info("3. Change the specification of pc-a")
 	if err := triggerPodCliqueUpdate(tc, "pc-a"); err != nil {
@@ -61,6 +62,13 @@ func Test_OD1_NoAutomaticDeletionOnSpecChange(t *testing.T) {
 	tests.Logger.Info("4. Verify that NO pods are automatically deleted")
 	tests.Logger.Info("5. Verify that the update is marked complete (UpdateEndedAt is set)")
 	verifyNoAutomaticDeletionAfterUpdate(tc, tracker, existingPodNames, 10, true)
+
+	tests.Logger.Info("6. Verify the PodGangMap entries advanced to the new generation hash, otherwise unchanged")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
+	}
+	assertEntriesUnchangedExceptHashForNonCoherentUpdate(t, entriesBefore, getPodGangMapEntries(t, tc, 0), newHash)
 
 	tests.Logger.Info("OnDelete Update - No Automatic Deletion test (OD-1) completed successfully!")
 }
@@ -464,6 +472,12 @@ func Test_OD7_MultipleReplicasPCS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to capture existing pods: %v", err)
 	}
+	// Capture each replica's PodGangMap entries and the generation hash before the update.
+	oldHash := getPCSGenerationHash(t, tc)
+	entriesBefore := map[int][]grovev1alpha1.PodGangEntry{}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		entriesBefore[pcsReplicaIndex] = getPodGangMapEntries(t, tc, pcsReplicaIndex)
+	}
 
 	tests.Logger.Info("3. Change the specification of pc-a")
 	if err = triggerPodCliqueUpdate(tc, "pc-a"); err != nil {
@@ -472,6 +486,15 @@ func Test_OD7_MultipleReplicasPCS(t *testing.T) {
 
 	tests.Logger.Info("4. Verify uniform strategy application across both replicas")
 	verifyNoAutomaticDeletionAfterUpdate(tc, tracker, existingPodNames, 20, false)
+
+	tests.Logger.Info("5. Verify every replica's PodGangMap entries advanced to the new generation hash, otherwise unchanged")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
+	}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		assertEntriesUnchangedExceptHashForNonCoherentUpdate(t, entriesBefore[pcsReplicaIndex], getPodGangMapEntries(t, tc, pcsReplicaIndex), newHash)
+	}
 
 	tests.Logger.Info("OnDelete Update - Multiple PCS Replicas test (OD-7) completed successfully!")
 }
@@ -819,114 +842,4 @@ func Test_OD11_ScaleOutAfterOnDeleteUpdateWithTail(t *testing.T) {
 	}
 
 	tests.Logger.Info("OnDelete Update - Scale-Out After OnDelete Update (with tail) test (OD-11) completed successfully!")
-}
-
-// getPCSGenerationHash returns the PodCliqueSet's current generation hash from its status.
-func getPCSGenerationHash(t *testing.T, tc *testctx.TestContext) string {
-	t.Helper()
-	var pcs grovev1alpha1.PodCliqueSet
-	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: tc.Workload.Name}, &pcs); err != nil {
-		t.Fatalf("Failed to get PodCliqueSet %s: %v", tc.Workload.Name, err)
-	}
-	if pcs.Status.CurrentGenerationHash == nil {
-		t.Fatalf("PodCliqueSet %s has no CurrentGenerationHash", tc.Workload.Name)
-	}
-	return *pcs.Status.CurrentGenerationHash
-}
-
-// getPodGangMapEntries returns the entries of the given PCS replica's PodGangMap.
-func getPodGangMapEntries(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) []grovev1alpha1.PodGangEntry {
-	t.Helper()
-	pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: tc.Workload.Name, Replica: pcsReplicaIndex})
-	var pgm grovev1alpha1.PodGangMap
-	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: pgmName}, &pgm); err != nil {
-		t.Fatalf("Failed to get PodGangMap %s: %v", pgmName, err)
-	}
-	return pgm.Spec.Entries
-}
-
-// entryByRole returns the single entry with the given role, failing if there is not exactly one.
-func entryByRole(t *testing.T, entries []grovev1alpha1.PodGangEntry, role grovev1alpha1.PodGangEntryRole) grovev1alpha1.PodGangEntry {
-	t.Helper()
-	var found []grovev1alpha1.PodGangEntry
-	for i := range entries {
-		if entries[i].Role == role {
-			found = append(found, entries[i])
-		}
-	}
-	if len(found) != 1 {
-		t.Fatalf("expected exactly one %s entry, found %d", role, len(found))
-	}
-	return found[0]
-}
-
-// assertEntryRoles fails unless entries carry exactly the given roles, one entry per role.
-func assertEntryRoles(t *testing.T, entries []grovev1alpha1.PodGangEntry, roles ...grovev1alpha1.PodGangEntryRole) {
-	t.Helper()
-	actual := make([]grovev1alpha1.PodGangEntryRole, 0, len(entries))
-	for i := range entries {
-		actual = append(actual, entries[i].Role)
-	}
-	assert.ElementsMatch(t, roles, actual)
-}
-
-// assertStandalonePCLQPodCounts fails unless the entry's PodCliques equal expected. A nil expected means empty.
-func assertStandalonePCLQPodCounts(t *testing.T, entry grovev1alpha1.PodGangEntry, expected map[string]int32) {
-	t.Helper()
-	if len(expected) == 0 {
-		assert.Empty(t, entry.PodCliques)
-		return
-	}
-	assert.Equal(t, expected, entry.PodCliques)
-}
-
-// assertPodGangEntryPCSGIndices fails unless the entry's replica indices for pcsgName equal expected. A nil
-// expected means the entry carries no indices for pcsgName.
-func assertPodGangEntryPCSGIndices(t *testing.T, entry grovev1alpha1.PodGangEntry, pcsgName string, expected []int32) {
-	t.Helper()
-	if len(expected) == 0 {
-		assert.Empty(t, entry.PCSGReplicaIndices[pcsgName])
-		return
-	}
-	assert.Equal(t, expected, entry.PCSGReplicaIndices[pcsgName])
-}
-
-// assertPodGangEntryDependsOn fails unless the entry's DependsOn equals expected. A nil expected means empty.
-func assertPodGangEntryDependsOn(t *testing.T, entry grovev1alpha1.PodGangEntry, expected []string) {
-	t.Helper()
-	if len(expected) == 0 {
-		assert.Empty(t, entry.DependsOn)
-		return
-	}
-	assert.Equal(t, expected, entry.DependsOn)
-}
-
-// assertEntriesUnchangedExceptHashForNonCoherentUpdate asserts the PodGangMap invariant that holds for
-// RollingRecreate and OnDelete updates, which preserve PodGangs and entries. It fails unless after has
-// the same entries as before, matched by epoch, with the same role, anchor index, pod counts, PCSG
-// indices, and DependsOn, and only the generation hash changed, to newHash on every entry. It does not
-// hold for Coherent updates, which create new-generation entries and drain old-generation ones.
-func assertEntriesUnchangedExceptHashForNonCoherentUpdate(t *testing.T, before, after []grovev1alpha1.PodGangEntry, newHash string) {
-	t.Helper()
-	if len(before) != len(after) {
-		t.Fatalf("entry count changed across the update: before %d, after %d", len(before), len(after))
-	}
-	afterByEpoch := make(map[string]grovev1alpha1.PodGangEntry, len(after))
-	for i := range after {
-		afterByEpoch[after[i].Epoch] = after[i]
-	}
-	for i := range before {
-		b := before[i]
-		a, ok := afterByEpoch[b.Epoch]
-		if !ok {
-			t.Fatalf("entry with epoch %s is missing after the update", b.Epoch)
-		}
-		if a.PodCliqueSetGenerationHash != newHash {
-			t.Fatalf("entry with epoch %s carries generation hash %q after the update, expected %q", b.Epoch, a.PodCliqueSetGenerationHash, newHash)
-		}
-		// Set the expected new hash on the before-copy, then assert that every other field to match across before<-> after.
-		// The before entry is a value copy, so this does not mutate the caller's slice.
-		b.PodCliqueSetGenerationHash = newHash
-		assert.Equal(t, b, a, "entry with epoch %s changed across the update beyond its generation hash", b.Epoch)
-	}
 }

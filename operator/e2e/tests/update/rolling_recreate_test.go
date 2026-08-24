@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	tests "github.com/ai-dynamo/grove/operator/e2e/tests"
 	"github.com/ai-dynamo/grove/operator/e2e/waiter"
+	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -453,121 +454,163 @@ func Test_RU13_RollingUpdateWithPCSScaleInAfterFinalOrdinal(t *testing.T) {
 }
 */
 
-/* This test is flaky. It sometimes fails with rolling_updates_test.go:454: Rolling update failed: condition not met within timeout
-// Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate tests rolling update with scale-out on PCSG being updated
+// Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate tests a PodCliqueScalingGroup scale-out that runs
+// concurrently with a RollingRecreate update on a multi-replica PodCliqueSet. The PodCliqueSet generation
+// hash advances globally while replicas roll one at a time, so a replica not yet selected still carries
+// old-generation PodGangMap entries when the scale-out reconciles. Every replica's scale-out entry must
+// resolve its DependsOn to that replica's anchor epoch, never an empty epoch, so the scaled-out pods are
+// not left scheduling-gated.
 // Scenario RU-14:
 // 1. Initialize a 28-node Grove cluster
-// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
-// 3. Change the specification of pc-a, pc-b and pc-c
-// 4. Scale out the PCSG during its rolling update
-// 5. Verify the scaled out replica is created with the correct specifications
-// 6. Verify it should not be updated again before the rolling update ends
+// 2. Deploy workload WL1 with 2 replicas, verify 20 pods
+// 3. Assert each replica's PodGangMap starts with an anchor and a scale-out entry
+// 4. Roll an update, wait until replica 0 is updating, then scale out sg-x from 2 to 3 during the update
+// 5. Verify all 28 pods run, none stranded scheduling-gated
+// 6. Assert each replica's entries advanced to the new hash and the scale-out entry holds the new index
 func Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate(t *testing.T) {
 	tests.Logger.Info("1. Initialize a 28-node Grove cluster")
-	tests.Logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
-	tc, cleanup, tracker := SetupTest(t, TestConfig{
-		WorkloadName:       "workload1",
-		WorkloadYAML:       "../../yaml/workload1.yaml",
-		WorkerNodes:        28,
-		ExpectedPods:       10,
-		InitialPCSReplicas: 2,
-		PostScalePods:      20,
+	tests.Logger.Info("2. Deploy workload WL1 with 2 replicas, verify 20 pods")
+	tc, cleanup, tracker := setupTest(t, testConfig{
+		workloadName:       "workload1",
+		workloadYAML:       "../../yaml/workload1.yaml",
+		workerNodes:        28,
+		expectedPods:       10,
+		initialPCSReplicas: 2,
+		postScalePods:      20,
 	})
 	defer cleanup()
 
-	tests.Logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	tests.Logger.Info("3. Assert each replica's PodGangMap starts with an anchor and a scale-out entry")
+	oldHash := getPCSGenerationHash(t, tc)
+	// Each replica has its own PodGangMap, but they share this expected shape since the workload template
+	// is uniform across replicas. Only the epochs differ per replica, which assertReplicaPodGangMap reads
+	// from each replica's own entries.
+	wantPGM := expectedReplicaPodGangMap{
+		standalonePodCounts: map[string]int32{"pc-a": 2},
+		pcsgName:            "sg-x",
+		anchorIndices:       []int32{0, 1},
+	}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		assertReplicaPodGangMap(t, getPodGangMapEntries(t, tc, pcsReplicaIndex), wantPGM)
+	}
+
+	tests.Logger.Info("4. Roll an update, wait until replica 0 is updating, then scale out sg-x during the update")
 	tcLongerTimeout := *tc
 	tcLongerTimeout.Timeout = 2 * time.Minute
-	updateWait := triggerRollingUpdate(&tcLongerTimeout, 2, "pc-a", "pc-b", "pc-c")
+	updateErrCh := triggerRollingUpdate(&tcLongerTimeout, 2, "pc-a", "pc-b", "pc-c")
+	// Wait until replica 0 is actually updating. Replica 1 then still carries old-generation entries,
+	// which is the window where a scale-out could produce a DependsOn on an empty anchor epoch.
+	if err := waitForOrdinalUpdating(&tcLongerTimeout, 0); err != nil {
+		t.Fatalf("Update did not start on replica 0: %v", err)
+	}
+	scaleErrCh := tcLongerTimeout.ScalePCSGAcrossAllReplicasAsync("workload1", "sg-x", 2, 3, 28, 0, 0)
 
-	tests.Logger.Info("4. Scale out the PCSG during its rolling update (in parallel)")
-	scaleWait := tcLongerTimeout.ScalePCSGAcrossAllReplicasAsync("workload1", "sg-x", 2, 3, 28, 0, 100) // 100ms delay so update is "first"
-
-	tests.Logger.Info("5. Verify the scaled out replica is created with the correct specifications")
-	// sg-x = 4 pods per replica (1 pc-b + 3 pc-c)
-	// Scaling PCSG instances directly (workload1-0-sg-x, workload1-1-sg-x) since the PCS controller
-	// only sets replicas during initial PCSG creation to support HPA scaling.
-	// After scaling sg-x to 3 replicas: 2 PCS replicas x (2 pc-a + 3 sg-x x 4 pods) = 2 x 14 = 28 pods
-
-	tests.Logger.Info("6. Verify it should not be updated again before the rolling update ends")
-	if err := <-updateWait; err != nil {
+	if err := <-updateErrCh; err != nil {
 		t.Fatalf("Rolling update failed: %v", err)
 	}
-	if err := <-scaleWait; err != nil {
+	if err := <-scaleErrCh; err != nil {
 		t.Fatalf("Scale operation failed: %v", err)
 	}
+	tracker.stop()
 
-	pods, err := tc.ListPods()
-	if err != nil {
-		t.Fatalf("Failed to list pods: %v", err)
+	tests.Logger.Info("5. Verify all 28 pods run, none stranded scheduling-gated")
+	// sg-x holds 4 pods per replica (1 pc-b + 3 pc-c). At 3 PCSG replicas each PCS replica has
+	// 2 pc-a + 3*4 = 14 pods, so 2 PCS replicas total 28.
+	if err := tc.WaitForRunningPods(28); err != nil {
+		t.Fatalf("Pods did not all become running after scale-out during a rolling update; they may be stranded scheduling-gated: %v", err)
 	}
-	if len(pods.Items) != 28 {
-		t.Fatalf("Expected 28 pods, got %d", len(pods.Items))
+
+	tests.Logger.Info("6. Assert each replica's entries advanced to the new hash and the scale-out entry holds the new index")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
 	}
-	tracker.Stop()
+	wantPGM.scaleOutIndices = []int32{2}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		entries := getPodGangMapEntries(t, tc, pcsReplicaIndex)
+		assertReplicaPodGangMap(t, entries, wantPGM)
+		for _, entry := range entries {
+			assert.Equal(t, newHash, entry.PodCliqueSetGenerationHash, "entry %s must carry the new generation hash", entry.Epoch)
+		}
+	}
 
 	tests.Logger.Info("Rolling Update with PCSG scale-out during update test (RU-14) completed successfully!")
 }
-*/
 
-/* This test is flaky. It sometimes fails with "rolling_updates_test.go:516: Expected 28 pods, got 30"
-// Test_RU15_RollingUpdateWithPCSGScaleOutBeforeUpdate tests rolling update with scale-out on PCSG before it is updated
+// Test_RU15_RollingUpdateWithPCSGScaleOutBeforeUpdate tests a PodCliqueScalingGroup scale-out that
+// completes before a RollingRecreate update on a multi-replica PodCliqueSet. The scale-out entry gains
+// its new index while all replicas share the current generation hash, then the update advances the hash
+// across replicas. Every replica's scale-out entry must keep its index and depend on its anchor epoch, so
+// the scaled-out pods are not left scheduling-gated.
 // Scenario RU-15:
 // 1. Initialize a 28-node Grove cluster
-// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
-// 3. Change the specification of pc-a, pc-b and pc-c
-// 4. Scale out the PCSG before its rolling update starts
-// 5. Verify the scaled out replica is created with the correct specifications
-// 6. Verify it should not be updated again before the rolling update ends
+// 2. Deploy workload WL1 with 2 replicas, verify 20 pods
+// 3. Assert each replica's PodGangMap starts with an anchor and a scale-out entry
+// 4. Scale out sg-x from 2 to 3 across all replicas and wait for it to complete
+// 5. Roll an update of pc-a, pc-b and pc-c and wait for it to complete
+// 6. Verify all 28 pods run, none stranded scheduling-gated
+// 7. Assert each replica's entries advanced to the new hash and the scale-out entry holds the new index
 func Test_RU15_RollingUpdateWithPCSGScaleOutBeforeUpdate(t *testing.T) {
 	tests.Logger.Info("1. Initialize a 28-node Grove cluster")
-	tests.Logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
-	tc, cleanup, tracker := SetupTest(t, TestConfig{
-		WorkloadName:       "workload1",
-		WorkloadYAML:       "../../yaml/workload1.yaml",
-		WorkerNodes:        28,
-		ExpectedPods:       10,
-		InitialPCSReplicas: 2,
-		PostScalePods:      20,
+	tests.Logger.Info("2. Deploy workload WL1 with 2 replicas, verify 20 pods")
+	tc, cleanup, tracker := setupTest(t, testConfig{
+		workloadName:       "workload1",
+		workloadYAML:       "../../yaml/workload1.yaml",
+		workerNodes:        28,
+		expectedPods:       10,
+		initialPCSReplicas: 2,
+		postScalePods:      20,
 	})
 	defer cleanup()
 
-	tests.Logger.Info("3. Scale out the PCSG before its rolling update starts (in parallel)")
-	// Scaling PCSG instances directly (workload1-0-sg-x, workload1-1-sg-x) since the PCS controller
-	// only sets replicas during initial PCSG creation to support HPA scaling.
-	// After scaling sg-x to 3 replicas: 2 PCS replicas x (2 pc-a + 3 sg-x x 4 pods) = 2 x 14 = 28 pods
+	tests.Logger.Info("3. Assert each replica's PodGangMap starts with an anchor and a scale-out entry")
+	oldHash := getPCSGenerationHash(t, tc)
+	// Each replica has its own PodGangMap, but they share this expected shape since the workload template
+	// is uniform across replicas. Only the epochs differ per replica, which assertReplicaPodGangMap reads
+	// from each replica's own entries.
+	wantPGM := expectedReplicaPodGangMap{
+		standalonePodCounts: map[string]int32{"pc-a": 2},
+		pcsgName:            "sg-x",
+		anchorIndices:       []int32{0, 1},
+	}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		assertReplicaPodGangMap(t, getPodGangMapEntries(t, tc, pcsReplicaIndex), wantPGM)
+	}
+
+	tests.Logger.Info("4. Scale out sg-x from 2 to 3 across all replicas and wait for it to complete")
+	// sg-x holds 4 pods per replica (1 pc-b + 3 pc-c). At 3 PCSG replicas each PCS replica has
+	// 2 pc-a + 3*4 = 14 pods, so 2 PCS replicas total 28.
+	tc.ScalePCSGAcrossAllReplicasAndWait("workload1", "sg-x", 2, 3, 28, 0)
+
+	tests.Logger.Info("5. Roll an update of pc-a, pc-b and pc-c and wait for it to complete")
 	tcLongTimeout := *tc
 	tcLongTimeout.Timeout = 2 * time.Minute
-	// Scale starts first (no delay)
-	scaleWait := tcLongTimeout.ScalePCSGAcrossAllReplicasAsync("workload1", "sg-x", 2, 3, 28, 0, 0)
-
-	tests.Logger.Info("4. Change the specification of pc-a, pc-b and pc-c")
-	// Small delay so scale is clearly "first", then trigger update
-	time.Sleep(100 * time.Millisecond)
-	updateWait := triggerRollingUpdate(&tcLongTimeout, 2, "pc-a", "pc-b", "pc-c")
-
-	tests.Logger.Info("5. Verify the scaled out replica is created with the correct specifications")
-	tests.Logger.Info("6. Verify it should not be updated again before the rolling update ends")
-
-	if err := <-updateWait; err != nil {
+	if err := <-triggerRollingUpdate(&tcLongTimeout, 2, "pc-a", "pc-b", "pc-c"); err != nil {
 		t.Fatalf("Rolling update failed: %v", err)
 	}
-	if err := <-scaleWait; err != nil {
-		t.Fatalf("Scale operation failed: %v", err)
+	tracker.stop()
+
+	tests.Logger.Info("6. Verify all 28 pods run, none stranded scheduling-gated")
+	if err := tc.WaitForRunningPods(28); err != nil {
+		t.Fatalf("Pods did not all become running after a scale-out then rolling update; they may be stranded scheduling-gated: %v", err)
 	}
 
-	pods, err := tc.ListPods()
-	if err != nil {
-		t.Fatalf("Failed to list pods: %v", err)
+	tests.Logger.Info("7. Assert each replica's entries advanced to the new hash and the scale-out entry holds the new index")
+	newHash := getPCSGenerationHash(t, tc)
+	if newHash == oldHash {
+		t.Fatalf("PodCliqueSet generation hash did not change after the update: %s", newHash)
 	}
-	if len(pods.Items) != 28 {
-		t.Fatalf("Expected 28 pods, got %d", len(pods.Items))
+	wantPGM.scaleOutIndices = []int32{2}
+	for _, pcsReplicaIndex := range []int{0, 1} {
+		entries := getPodGangMapEntries(t, tc, pcsReplicaIndex)
+		assertReplicaPodGangMap(t, entries, wantPGM)
+		for _, entry := range entries {
+			assert.Equal(t, newHash, entry.PodCliqueSetGenerationHash, "entry %s must carry the new generation hash", entry.Epoch)
+		}
 	}
-	tracker.Stop()
 
 	tests.Logger.Info("Rolling Update with PCSG scale-out before update test (RU-15) completed successfully!")
 }
-*/
 
 // Test_RU16_RollingUpdateWithPCSGScaleInDuringUpdate tests rolling update with scale-in on PCSG being updated
 // Scenario RU-16:
