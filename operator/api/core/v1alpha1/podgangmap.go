@@ -70,7 +70,9 @@ const (
 	PodGangEntryRoleTail PodGangEntryRole = "Tail"
 	// PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a
 	// steady-state scale-out beyond the template. It materializes into one PodGang per replica index.
-	// It is created on the first scale-out and removed once it holds no replicas.
+	// It is created on the first scale-out. Even if this entry is empty it is exempted from being removed since
+	// it represents a scale-out bucket and offers a reliable epoch that downstream reconcilers can use when
+	// independently constructing PodGang names.
 	PodGangEntryRoleScaleOut PodGangEntryRole = "ScaleOut"
 )
 

@@ -56,7 +56,9 @@ type replicaEpochs struct {
 
 func TestSyncMigratesSingleReplica(t *testing.T) {
 	epochs := replicaEpochs{anchor: "1000", tail: "1001"}
-	cl := newMigratorClient(append([]client.Object{gatedPCS(1)}, legacyReplicaObjects(0, epochs)...)...)
+	objs := append([]client.Object{gatedPCS(1)}, legacyReplicaObjects(0, epochs)...)
+	objs = append(objs, epochPodGangsForReplica(0, epochs)...)
+	cl := newMigratorClient(objs...)
 	operator := New(cl, groveclientscheme.Scheme)
 
 	err := operator.Sync(context.Background(), logr.Discard(), getPCS(t, cl))
@@ -76,6 +78,7 @@ func TestSyncMigratesMultipleReplicas(t *testing.T) {
 	objs := []client.Object{gatedPCS(2)}
 	for replicaIndex, epochs := range epochsByReplica {
 		objs = append(objs, legacyReplicaObjects(replicaIndex, epochs)...)
+		objs = append(objs, epochPodGangsForReplica(replicaIndex, epochs)...)
 	}
 	cl := newMigratorClient(objs...)
 	operator := New(cl, groveclientscheme.Scheme)
@@ -106,6 +109,12 @@ func TestSyncMigratesScaleOutReplica(t *testing.T) {
 	for _, cliqueName := range []string{"pcb", "pcc"} {
 		objs = append(objs, pcsgPCLQWithPods(0, 1, cliqueName, legacyScaledPodGangName(0), legacyBasePodGangName(0))...)
 	}
+	// The epoch PodGangs the anchor and ScaleOut entries materialize into must exist for the gate to lift.
+	scaleOutRnr := apicommon.ResourceNameReplica{Name: testPCSName, Replica: 0}
+	objs = append(objs,
+		testutils.NewPodGangBuilder(apicommon.GenerateAnchorPodGangName(scaleOutRnr, epochs.anchor), testNamespace).Build(),
+		testutils.NewPodGangBuilder(apicommon.GenerateNonAnchorPodGangName(scaleOutRnr, epochs.scaleOut, testPCSGName, 1), testNamespace).Build(),
+	)
 
 	cl := newMigratorClient(objs...)
 	operator := New(cl, groveclientscheme.Scheme)
@@ -149,7 +158,9 @@ func TestSyncIsNoOpWhenNotGated(t *testing.T) {
 
 func TestSyncPreservesForeignLabelsAndSpec(t *testing.T) {
 	epochs := replicaEpochs{anchor: "1000", tail: "1001"}
-	cl := newMigratorClient(append([]client.Object{gatedPCS(1)}, legacyReplicaObjects(0, epochs)...)...)
+	objs := append([]client.Object{gatedPCS(1)}, legacyReplicaObjects(0, epochs)...)
+	objs = append(objs, epochPodGangsForReplica(0, epochs)...)
+	cl := newMigratorClient(objs...)
 	operator := New(cl, groveclientscheme.Scheme)
 
 	err := operator.Sync(context.Background(), logr.Discard(), getPCS(t, cl))
@@ -162,6 +173,24 @@ func TestSyncPreservesForeignLabelsAndSpec(t *testing.T) {
 	for _, pod := range listPodsOfPCLQ(t, cl, standaloneCliqueName(0)) {
 		assert.Equal(t, "bar", pod.Labels["example.com/foo"], "foreign Pod label must be preserved")
 	}
+}
+
+// TestSyncHoldsGateUntilEpochPodGangsExist asserts the migrator does not clear the gate while the
+// epoch-scheme PodGangs are absent. It relabels, returns a continue-and-requeue signal, and leaves the
+// PodGangMigrationInProgress condition in place, so a later reconcile clears the gate once the PodGang
+// component has created them.
+func TestSyncHoldsGateUntilEpochPodGangsExist(t *testing.T) {
+	epochs := replicaEpochs{anchor: "1000", tail: "1001"}
+	// The legacy objects and PodGangMap are present, but the epoch PodGangs are not created yet.
+	cl := newMigratorClient(append([]client.Object{gatedPCS(1)}, legacyReplicaObjects(0, epochs)...)...)
+	operator := New(cl, groveclientscheme.Scheme)
+
+	err := operator.Sync(context.Background(), logr.Discard(), getPCS(t, cl))
+	testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeContinueReconcileAndRequeue, Operation: "Sync"}, err)
+
+	// The relabeling still happened, but the gate is held until the epoch PodGangs exist.
+	assertReplicaMigrated(t, cl, 0, epochs)
+	assertGateStillPresent(t, cl)
 }
 
 func TestMigratePodGangLabelsMissingLabelsReturnsError(t *testing.T) {
@@ -211,6 +240,24 @@ func assertGateCleared(t *testing.T, cl client.Client) {
 	t.Helper()
 	pcs := getPCS(t, cl)
 	assert.Nil(t, meta.FindStatusCondition(pcs.Status.Conditions, apiconstants.ConditionTypePodGangMigrationInProgress))
+}
+
+// assertGateStillPresent verifies the migration gate condition remains on the PodCliqueSet.
+func assertGateStillPresent(t *testing.T, cl client.Client) {
+	t.Helper()
+	pcs := getPCS(t, cl)
+	assert.NotNil(t, meta.FindStatusCondition(pcs.Status.Conditions, apiconstants.ConditionTypePodGangMigrationInProgress))
+}
+
+// epochPodGangsForReplica builds the epoch-scheme PodGangs the migrator expects for a replica whose
+// PodGangMap has an anchor entry (PCSG replicas 0 and 1) and a tail entry (PCSG replica 2), matching
+// replicaPGM.
+func epochPodGangsForReplica(pcsReplicaIndex int, epochs replicaEpochs) []client.Object {
+	rnr := apicommon.ResourceNameReplica{Name: testPCSName, Replica: pcsReplicaIndex}
+	return []client.Object{
+		testutils.NewPodGangBuilder(apicommon.GenerateAnchorPodGangName(rnr, epochs.anchor), testNamespace).Build(),
+		testutils.NewPodGangBuilder(apicommon.GenerateNonAnchorPodGangName(rnr, epochs.tail, testPCSGName, 2), testNamespace).Build(),
+	}
 }
 
 func standaloneCliqueName(pcsReplicaIndex int) string {

@@ -26,6 +26,8 @@ import (
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/podgangmigrator"
+	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
@@ -44,6 +46,7 @@ const (
 	errCodeMissingLabels      grovecorev1alpha1.ErrorCode = "ERR_MISSING_LABELS"
 	errCodePatchPodGangLabels grovecorev1alpha1.ErrorCode = "ERR_PATCH_PODGANG_LABELS"
 	errCodeClearMigrationGate grovecorev1alpha1.ErrorCode = "ERR_CLEAR_MIGRATION_GATE"
+	errCodeGetPodGang         grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANG"
 )
 
 type _resource struct {
@@ -70,11 +73,12 @@ func (r _resource) GetExistingResourceNames(_ context.Context, _ logr.Logger, _ 
 // Sync migrates the PodCliqueSet to the epoch-based PodGang scheme. It does the following:
 //   - For every replica, rewrite the grove.io/podgang label on each constituent PodClique and Pod to
 //     the epoch-based name the PodGangMap assigns, and drop the legacy grove.io/base-podgang label.
-//   - Clear the migration gate condition once every replica is relabeled, so the PodCliqueScalingGroup
-//     and PodClique reconcilers unblock.
+//   - Clear the migration gate once every epoch-named PodGang exists, unblocking the
+//     PodCliqueScalingGroup and PodClique reconcilers.
 //
-// It creates and deletes no PodGang. The PodGang component runs in a later sync group. It creates the
-// epoch-named PodGangs and deletes the legacy ones once the Pods carry the new label.
+// It creates no PodGang. The PodGang component in a later sync group creates them. Holding the gate
+// until they exist stops an unblocked rollout from deleting an old Pod whose replacement is gated on a
+// PodGang that does not exist yet.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
 	if !podgangmigrator.IsMigrationInProgress(pcs) {
 		return nil
@@ -83,6 +87,16 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev
 		if err := r.migrateReplica(ctx, pcs, pcsReplicaIndex); err != nil {
 			return err
 		}
+	}
+	allCreated, err := r.allEpochBasedPodGangsCreated(ctx, pcs)
+	if err != nil {
+		return err
+	}
+	if !allCreated {
+		// Continue the reconcile so the PodGang component creates the missing PodGangs, then requeue to
+		// re-check and lift the gate.
+		return groveerr.New(groveerr.ErrCodeContinueReconcileAndRequeue, component.OperationSync,
+			fmt.Sprintf("All epoch-schemed PodGangs for PodCliqueSet %v are not yet created, holding the migration gate until they exist", client.ObjectKeyFromObject(pcs)))
 	}
 	return r.clearMigrationGate(ctx, logger, pcs)
 }
@@ -207,6 +221,61 @@ func (r _resource) migratePodGangLabels(ctx context.Context, obj client.Object, 
 			fmt.Sprintf("failed to migrate PodGang labels on %v", client.ObjectKeyFromObject(obj)))
 	}
 	return nil
+}
+
+// allEpochBasedPodGangsCreated checks if all expected epoch-scheme based PodGangs are created for the PCS.
+// It derives the expected PodGang names using PodGangMap entries and anchor/non-anchor PodGang name generator functions.
+func (r _resource) allEpochBasedPodGangsCreated(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (bool, error) {
+	pcsObjectKey := client.ObjectKeyFromObject(pcs)
+	for pcsReplicaIndex := range int(pcs.Spec.Replicas) {
+		pgm, err := componentutils.GetPodGangMap(ctx, r.client, client.ObjectKeyFromObject(pcs), pcsReplicaIndex)
+		if err != nil {
+			return false, groveerr.WrapError(err, errCodeGetPodGangMap, component.OperationSync,
+				fmt.Sprintf("failed to get PodGangMap for replica %d of PodCliqueSet %v", pcsReplicaIndex, pcsObjectKey))
+		}
+		pcsRnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
+		for _, entry := range pgm.Spec.Entries {
+			expectedPodGangNames := expectedPodGangNamesForEntry(pcsRnr, entry)
+			for _, expectedPodGangName := range expectedPodGangNames {
+				pgExists, err := r.podGangExists(ctx, pcs.Namespace, expectedPodGangName)
+				if err != nil {
+					return false, err
+				}
+				if !pgExists {
+					return false, nil
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
+// expectedPodGangNamesForEntry computes the expected PodGang names that are associated to the given PodGangEntry.
+// For an anchor entry, there will be just one PodGang and for non-anchor entry there can be one or more PodGangs.
+func expectedPodGangNamesForEntry(pcsRnr apicommon.ResourceNameReplica, entry grovecorev1alpha1.PodGangEntry) []string {
+	if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+		return []string{apicommon.GenerateAnchorPodGangName(pcsRnr, entry.Epoch)}
+	}
+	var nonAnchorPodGangNames []string
+	for pcsgName, pcsgReplicaIndices := range entry.PCSGReplicaIndices {
+		for _, pcsgReplicaIndex := range pcsgReplicaIndices {
+			nonAnchorPodGangNames = append(nonAnchorPodGangNames, apicommon.GenerateNonAnchorPodGangName(pcsRnr, entry.Epoch, pcsgName, pcsgReplicaIndex))
+		}
+	}
+	return nonAnchorPodGangNames
+}
+
+// podGangExists reports whether the named PodGang exists in the namespace.
+func (r _resource) podGangExists(ctx context.Context, namespace, podGangName string) (bool, error) {
+	pg := &groveschedulerv1alpha1.PodGang{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podGangName}, pg); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, groveerr.WrapError(err, errCodeGetPodGang, component.OperationSync,
+			fmt.Sprintf("failed to get PodGang %q in namespace %q", podGangName, namespace))
+	}
+	return true, nil
 }
 
 // clearMigrationGate removes the PodGangMigrationInProgress condition once every replica is migrated,

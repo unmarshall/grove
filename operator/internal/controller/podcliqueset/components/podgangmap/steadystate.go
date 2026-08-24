@@ -66,8 +66,8 @@ func buildBootstrapEntries(pcs *grovecorev1alpha1.PodCliqueSet, clk clock.Clock,
 // omitted from the returned map.
 func epochByRoleFromPodGangs(existingPodGangs []groveschedulerv1alpha1.PodGang) map[grovecorev1alpha1.PodGangEntryRole]int64 {
 	byRole := make(map[grovecorev1alpha1.PodGangEntryRole]int64)
-	for i := range existingPodGangs {
-		labels := existingPodGangs[i].Labels
+	for _, podGang := range existingPodGangs {
+		labels := podGang.Labels
 		epochStr, hasEpoch := labels[apicommon.LabelEpoch]
 		role, hasRole := labels[apicommon.LabelPodGangRole]
 		if !hasEpoch || !hasRole {
@@ -146,7 +146,7 @@ func buildBootstrapTailEntry(pcs *grovecorev1alpha1.PodCliqueSet, epoch, anchorE
 // For each PodCliqueScalingGroup the count of its placed indices is diffed against its live
 // Spec.Replicas. A scale-out appends new indices to the ScaleOut entry. A scale-in drains indices in
 // role order ScaleOut, Tail, Anchor. Each standalone PodClique pod count on the anchor is set from its
-// live Spec.Replicas. A ScaleOut entry is ensured and empty entries are dropped.
+// live Spec.Replicas. A ScaleOut entry is ensured (even if empty) and empty entries are dropped.
 func reconcileEntries(pcs *grovecorev1alpha1.PodCliqueSet,
 	entries []grovecorev1alpha1.PodGangEntry,
 	standalonePCLQs []grovecorev1alpha1.PodClique,
@@ -173,10 +173,10 @@ func refreshStandalonePodCliqueCounts(entries []grovecorev1alpha1.PodGangEntry, 
 		return
 	}
 	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
-	for i := range standalonePCLQs {
-		cliqueName := apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(standalonePCLQs[i].Name, rnr)
+	for _, standalonePCLQ := range standalonePCLQs {
+		cliqueName := apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(standalonePCLQ.Name, rnr)
 		if _, ok := anchor.PodCliques[cliqueName]; ok {
-			anchor.PodCliques[cliqueName] = standalonePCLQs[i].Spec.Replicas
+			anchor.PodCliques[cliqueName] = standalonePCLQ.Spec.Replicas
 		}
 	}
 }
@@ -185,13 +185,13 @@ func refreshStandalonePodCliqueCounts(entries []grovecorev1alpha1.PodGangEntry, 
 // entries against its live Spec.Replicas and appends (scale-out) or drains (scale-in) accordingly.
 func reconcilePCSGReplicaIndices(entries []grovecorev1alpha1.PodGangEntry, pcs *grovecorev1alpha1.PodCliqueSet, pcsgs []grovecorev1alpha1.PodCliqueScalingGroup, pcsReplicaIndex int) error {
 	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
-	for i := range pcsgs {
-		pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(pcsgs[i].Name, rnr)
+	for _, pcsg := range pcsgs {
+		pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(pcsg.Name, rnr)
 		if err != nil {
 			return err
 		}
 		currentCount := countPCSGReplicaIndices(entries, pcsgConfigName)
-		diff := int(pcsgs[i].Spec.Replicas) - currentCount
+		diff := int(pcsg.Spec.Replicas) - currentCount
 		switch {
 		case diff > 0:
 			appendScaleOutReplicaIndices(entries, pcsgConfigName, lo.RangeFrom[int32](int32(currentCount), diff))
@@ -206,8 +206,8 @@ func reconcilePCSGReplicaIndices(entries []grovecorev1alpha1.PodGangEntry, pcs *
 // indices held across all entries.
 func countPCSGReplicaIndices(entries []grovecorev1alpha1.PodGangEntry, pcsgConfigName string) int {
 	count := 0
-	for i := range entries {
-		count += len(entries[i].PCSGReplicaIndices[pcsgConfigName])
+	for _, entry := range entries {
+		count += len(entry.PCSGReplicaIndices[pcsgConfigName])
 	}
 	return count
 }
@@ -311,12 +311,12 @@ func ensureScaleOutEntry(entries []grovecorev1alpha1.PodGangEntry, pcs *grovecor
 	}
 	currentHash := *pcs.Status.CurrentGenerationHash
 	var anchorEpoch string
-	for i := range entries {
-		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleScaleOut && entries[i].PodCliqueSetGenerationHash == currentHash {
+	for _, entry := range entries {
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut && entry.PodCliqueSetGenerationHash == currentHash {
 			return entries
 		}
-		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entries[i].PodCliqueSetGenerationHash == currentHash && entries[i].AnchorIndex != nil && *entries[i].AnchorIndex == 0 {
-			anchorEpoch = entries[i].Epoch
+		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entry.PodCliqueSetGenerationHash == currentHash && entry.AnchorIndex != nil && *entry.AnchorIndex == 0 {
+			anchorEpoch = entry.Epoch
 		}
 	}
 	scaleOut := newPodGangEntry(scaleOutEpoch, currentHash, []string{anchorEpoch})
