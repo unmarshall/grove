@@ -48,8 +48,9 @@ type PodGangMapList struct {
 type PodGangMapSpec struct {
 	// PodCliqueSetReplicaIndex is the index of the PodCliqueSet replica this map belongs to.
 	PodCliqueSetReplicaIndex int32 `json:"podCliqueSetReplicaIndex"`
-	// Entries is the ordered list of desired PodGangs for this PodCliqueSet replica.
-	// Each entry corresponds to one PodGang and specifies its pod and replica counts.
+	// Entries is the ordered list of desired PodGang entries for this PodCliqueSet replica. An Anchor
+	// entry materializes into one PodGang. A Tail or ScaleOut entry materializes into one PodGang per
+	// PodCliqueScalingGroup replica index it carries.
 	// +listType=map
 	// +listMapKey=epoch
 	Entries []PodGangEntry `json:"entries"`

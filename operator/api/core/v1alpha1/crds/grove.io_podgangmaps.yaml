@@ -47,8 +47,9 @@ spec:
             properties:
               entries:
                 description: |-
-                  Entries is the ordered list of desired PodGangs for this PodCliqueSet replica.
-                  Each entry corresponds to one PodGang and specifies its pod and replica counts.
+                  Entries is the ordered list of desired PodGang entries for this PodCliqueSet replica. An Anchor
+                  entry materializes into one PodGang. A Tail or ScaleOut entry materializes into one PodGang per
+                  PodCliqueScalingGroup replica index it carries.
                 items:
                   description: |-
                     PodGangEntry describes one scheduling batch, identified by its epoch, that materializes into one

@@ -180,6 +180,8 @@ const (
 	KindPodClique = "PodClique"
 	// KindPodCliqueScalingGroup is the kind for a PodCliqueScalingGroup resource.
 	KindPodCliqueScalingGroup = "PodCliqueScalingGroup"
+	// KindPodGangMap is the kind for a PodGangMap resource.
+	KindPodGangMap = "PodGangMap"
 	// KindClusterTopology is the kind for a ClusterTopologyBinding resource.
 	KindClusterTopology = "ClusterTopologyBinding"
 )

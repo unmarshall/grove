@@ -276,3 +276,16 @@ func TestPodCliqueScalingGroupPredicateNoChange(t *testing.T) {
 
 	assert.False(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPCSG, ObjectNew: newPCSG}))
 }
+
+// TestDeleteOnlyPredicate asserts that the predicate enqueues only on a delete event, so an externally
+// deleted owned resource is reconstructed, and ignores create, update, and generic events which are the
+// reconciler's own writes.
+func TestDeleteOnlyPredicate(t *testing.T) {
+	pred, ok := deleteOnlyPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	assert.True(t, pred.DeleteFunc(event.DeleteEvent{}), "delete event must enqueue")
+	assert.False(t, pred.CreateFunc(event.CreateEvent{}), "create event must not enqueue")
+	assert.False(t, pred.UpdateFunc(event.UpdateEvent{}), "update event must not enqueue")
+	assert.False(t, pred.GenericFunc(event.GenericEvent{}), "generic event must not enqueue")
+}

@@ -24,6 +24,7 @@ import (
 	grovectrlutils "github.com/ai-dynamo/grove/operator/internal/controller/utils"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 
+	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,6 +50,8 @@ func (r *Reconciler) RegisterWithManager(mgr manager.Manager) error {
 			MaxConcurrentReconciles: *r.config.ConcurrentSyncs,
 		}).
 		For(&grovecorev1alpha1.PodCliqueSet{}, builder.WithPredicates(podCliqueSetPredicate())).
+		Owns(&grovecorev1alpha1.PodGangMap{}, builder.WithPredicates(deleteOnlyPredicate())).
+		Owns(&groveschedulerv1alpha1.PodGang{}, builder.WithPredicates(deleteOnlyPredicate())).
 		Watches(
 			&grovecorev1alpha1.ClusterTopologyBinding{},
 			handler.EnqueueRequestsFromMapFunc(mapClusterTopologyToPodCliqueSets(r.client)),
@@ -79,6 +82,18 @@ func podCliqueSetPredicate() predicate.Predicate {
 				hasAnnotationChanged(updateEvent.ObjectOld.GetAnnotations(), updateEvent.ObjectNew.GetAnnotations(), constants.AnnotationReconcileTrigger)
 		},
 		GenericFunc: func(_ event.GenericEvent) bool { return true },
+	}
+}
+
+// deleteOnlyPredicate returns a predicate that triggers a reconcile only on a delete event, so an
+// externally deleted owned resource is reconstructed. Create and update events are the reconciler's own
+// writes and are ignored.
+func deleteOnlyPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(_ event.CreateEvent) bool { return false },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
+		UpdateFunc:  func(_ event.UpdateEvent) bool { return false },
+		GenericFunc: func(_ event.GenericEvent) bool { return false },
 	}
 }
 

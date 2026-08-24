@@ -668,10 +668,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `epoch` _string_ | Epoch is the identity of this entry and the group of PodGangs materialized from it. It serves<br />two purposes. First, identity, it is unique across entries within a PodGangMap and is the<br />listMapKey, and every PodGang materialized from this entry carries it as the grove.io/epoch<br />label so those PodGangs are grouped by it. Second, ordering, DependsOn references epochs, and<br />comparing epochs orders entries so scheduling dependencies can be expressed and the most recent<br />anchor found. The value is a monotonic unix-nano integer used only as a distinct, orderable key.<br />It is not interpreted as a wall-clock time. |  |  |
+| `epoch` _string_ | Epoch is the identity of this entry and the group of PodGangs materialized from it. It serves<br />two purposes.<br />  - Identity: it is unique across entries within a PodGangMap and is the listMapKey. Every<br />    PodGang materialized from this entry carries it as the grove.io/epoch label, so those<br />    PodGangs are grouped by it.<br />  - Ordering: DependsOn references epochs, and comparing epochs orders entries so scheduling<br />    dependencies can be expressed and the most recent anchor found.<br />The value is a monotonic unix-nano integer used only as a distinct, orderable key. It is not<br />interpreted as a wall-clock time. |  |  |
 | `podCliqueSetGenerationHash` _string_ | PodCliqueSetGenerationHash is the PodCliqueSet generation hash that pods in this PodGang<br />must match. Used by PodClique and PodCliqueScalingGroup reconcilers to create pods at the<br />correct spec version and to distinguish old pods from new pods during a coherent update. |  |  |
-| `role` _[PodGangEntryRole](#podgangentryrole)_ | Role classifies this entry. See PodGangEntryRole for the meaning of each value. Role is the<br />durable marker that lets the entry structure be reconstructed from the entries alone, so no<br />separate record needs to be persisted. |  | Enum: [Anchor Tail ScaleOut] <br /> |
-| `anchorIndex` _integer_ | AnchorIndex is the index of an anchor entry within its generation hash. It is set only on<br />entries whose Role is Anchor and is 0 for every other entry. The index starts at 0 for each<br />generation hash and increments for each additional anchor of the same hash. It forms the last<br />segment of the anchor PodGang name. |  |  |
+| `role` _[PodGangEntryRole](#podgangentryrole)_ | Role classifies this entry as anchor, tail or scale-out.<br />See PodGangEntryRole for the meaning of each value. |  | Enum: [Anchor Tail ScaleOut] <br /> |
+| `anchorIndex` _integer_ | AnchorIndex is the index of an anchor entry within its generation hash. It is non-nil only on<br />entries whose Role is Anchor, and nil otherwise. For an Anchor entry the index starts at 0 for<br />each generation hash and increments for each additional anchor of the same hash. It forms the<br />last segment of the anchor PodGang name. |  |  |
 | `podCliques` _object (keys:string, values:integer)_ | PodCliques maps standalone PodClique name to the number of pods that belong to this PodGang.<br />Only standalone PodCliques (not owned by a PodCliqueScalingGroup) are listed here.<br />PodCliques owned by a PodCliqueScalingGroup derive their PodGang association via<br />PCSGReplicaIndices below. |  |  |
 | `pcsgReplicaIndices` _object (keys:string, values:integer array)_ | PCSGReplicaIndices maps a PodCliqueScalingGroup config name to the PCSG replica indices this<br />entry carries. For a non-anchor entry the PodGang materializer expands these into one PodGang<br />per index. Indices are stable identities that survive entry reshuffles, so a PodClique<br />reconciler for a PodCliqueScalingGroup-owned PodClique can find its target PodGang by looking<br />up its replica index here. |  |  |
 | `dependsOn` _string array_ | DependsOn lists the epochs whose PodGangs must be scheduled before this entry's PodGang<br />becomes eligible for scheduling. An empty DependsOn means the entry has no scheduling<br />dependency and its PodGang is eligible for scheduling immediately. |  |  |
@@ -693,7 +693,7 @@ _Appears in:_
 | --- | --- |
 | `Anchor` | PodGangEntryRoleAnchor marks the entry that carries the MinAvailable replicas.<br />It holds every standalone PodClique and each PodCliqueScalingGroup's MinAvailable replicas.<br />It materializes into a single PodGang.<br /> |
 | `Tail` | PodGangEntryRoleTail marks a non-anchor entry that holds a PodCliqueScalingGroup's replica<br />indices above MinAvailable, as declared by the template. It materializes into one PodGang per<br />replica index.<br /> |
-| `ScaleOut` | PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a<br />steady-state scale-out beyond the template. It materializes into one PodGang per replica index.<br />It is created on the first scale-out and removed once it holds no replicas.<br /> |
+| `ScaleOut` | PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a<br />steady-state scale-out beyond the template. It materializes into one PodGang per replica index.<br />It is created on the first scale-out. Even if this entry is empty it is exempted from being removed since<br />it represents a scale-out bucket and offers a reliable epoch that downstream reconcilers can use when<br />independently constructing PodGang names.<br /> |
 
 
 #### PodGangMap
@@ -713,7 +713,7 @@ One PodGangMap resource exists per PodCliqueSet replica, named <pcs-name>-<pcs-r
 | `apiVersion` _string_ | `grove.io/v1alpha1` | | |
 | `kind` _string_ | `PodGangMap` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[PodGangMapSpec](#podgangmapspec)_ | Spec defines the desired PodGang-to-pod-count mapping for this PodCliqueSet replica. |  |  |
+| `spec` _[PodGangMapSpec](#podgangmapspec)_ | Spec defines the desired PodGang-to-pod-count mapping for a PodCliqueSet replica. |  |  |
 
 
 #### PodGangMapSpec
@@ -730,7 +730,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `podCliqueSetReplicaIndex` _integer_ | PodCliqueSetReplicaIndex is the index of the PodCliqueSet replica this map belongs to. |  |  |
-| `entries` _[PodGangEntry](#podgangentry) array_ | Entries is the ordered list of desired PodGangs for this PodCliqueSet replica.<br />Each entry corresponds to one PodGang and specifies its pod and replica counts. |  |  |
+| `entries` _[PodGangEntry](#podgangentry) array_ | Entries is the ordered list of desired PodGang entries for this PodCliqueSet replica. An Anchor<br />entry materializes into one PodGang. A Tail or ScaleOut entry materializes into one PodGang per<br />PodCliqueScalingGroup replica index it carries. |  |  |
 
 
 #### PodGangPhase
@@ -988,6 +988,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
+| `Coherent` | CoherentStrategy indicates that replicas will be updated in Minimal Viable Units —<br />MinAvailable replicas of each updated standalone PodClique plus MinAvailable replicas of each<br />updated PodCliqueScalingGroup — scheduled atomically as a new PodGang. This guarantees<br />that pods forming a minimum-viable serving unit are always version-compatible.<br />NOTE: While we have introduced an update strategy type for coherent, this is still not available.<br />In future releases once this is available this NOTE will be removed.<br /> |
 | `RollingRecreate` | RollingRecreateStrategy indicates that replicas will be progressively<br />deleted and recreated one at a time, when templates change. This applies to<br />both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.<br />RollingRecreateStrategy qualifies as an auto update strategy in Grove since<br />it handles the orchestration entirely by itself.<br />This is the default update strategy.<br /> |
 | `OnDelete` | OnDeleteStrategy indicates that replicas will only be updated when<br />they are manually deleted. Changes to templates do not automatically<br />trigger replica deletions.<br /> |
 
