@@ -351,6 +351,10 @@ func waitForRollingUpdateComplete(tc *testctx.TestContext, expectedReplicas int3
 	fetchPCS := waiter.FetchByName(pcsName, k8sclient.Getter[*grovev1alpha1.PodCliqueSet](tc.Client, tc.Namespace))
 	predicate := waiter.Predicate[*grovev1alpha1.PodCliqueSet](func(pcs *grovev1alpha1.PodCliqueSet) bool {
 		pollCount++
+		if pcs == nil {
+			// A transient cache miss returns a nil object. Keep polling.
+			return false
+		}
 
 		endedAt := "<nil>"
 		if pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt != nil {
@@ -507,6 +511,10 @@ func waitForOrdinalUpdating(tc *testctx.TestContext, ordinal int32) error {
 	fetchPCS := waiter.FetchByName(pcsName, k8sclient.Getter[*grovev1alpha1.PodCliqueSet](tc.Client, tc.Namespace))
 	predicate := waiter.Predicate[*grovev1alpha1.PodCliqueSet](func(pcs *grovev1alpha1.PodCliqueSet) bool {
 		pollCount++
+		if pcs == nil {
+			// A transient cache miss returns a nil object. Keep polling.
+			return false
+		}
 
 		// Log status every few polls for debugging
 		if pollCount%3 == 1 {
@@ -1162,6 +1170,10 @@ func waitForOnDeleteUpdateComplete(tc *testctx.TestContext) error {
 	})
 	predicate := waiter.Predicate[*grovev1alpha1.PodCliqueSet](func(pcs *grovev1alpha1.PodCliqueSet) bool {
 		pollCount++
+		if pcs == nil {
+			// A transient cache miss returns a nil object. Keep polling.
+			return false
+		}
 		if workload.IsOnDeleteUpdateComplete(pcs) {
 			tests.Logger.Debugf("[waitForOnDeleteUpdateComplete] OnDelete update marked complete after %d polls (UpdatedReplicas=%d)",
 				pollCount, pcs.Status.UpdatedReplicas)
