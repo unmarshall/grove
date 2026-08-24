@@ -100,9 +100,11 @@ type PodGangEntry struct {
 	// See PodGangEntryRole for the meaning of each value.
 	Role PodGangEntryRole `json:"role"`
 	// AnchorIndex is the index of an anchor entry within its generation hash. It is non-nil only on
-	// entries whose Role is Anchor, and nil otherwise. For an Anchor entry the index starts at 0 for
-	// each generation hash and increments for each additional anchor of the same hash. It forms the
-	// last segment of the anchor PodGang name.
+	// entries whose Role is Anchor, and nil otherwise. Index 0 marks the anchor that carries the
+	// MinAvailable replicas. It orders the anchors of a generation hash independently of the global
+	// epoch order, so the MinAvailable anchor stays identifiable as more anchors are added.
+	// NOTE: today a PodCliqueSet replica has a single anchor with index 0. Coherent updates (GREP-393)
+	// introduce additional anchors per hash with higher indices.
 	// +optional
 	AnchorIndex *int32 `json:"anchorIndex,omitempty"`
 	// PodCliques maps standalone PodClique name to the number of pods that belong to this PodGang.
