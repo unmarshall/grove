@@ -188,4 +188,3 @@ func GetPCSGReplicasFromPCSTemplateSpec(pcs *grovecorev1alpha1.PodCliqueSet) map
 	}
 	return result
 }
-
