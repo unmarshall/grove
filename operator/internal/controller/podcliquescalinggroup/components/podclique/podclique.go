@@ -350,22 +350,15 @@ func (r _resource) buildResource(logger logr.Logger, ss *syncSnapshot, pcsgRepli
 	return nil
 }
 
-// resolvePodGangName returns the PodGang name for a PodCliqueScalingGroup replica by reading its
-// epoch from the PodGangMap. The replica belongs to the anchor PodGang when its index is below the
-// PodCliqueScalingGroup's MinAvailable, otherwise to a non-anchor (Tail or ScaleOut) PodGang.
+// resolvePodGangName returns the PodGang name for a PodCliqueScalingGroup replica by reading its entry
+// from the PodGangMap. The entry's role determines whether the replica belongs to an anchor or a
+// non-anchor PodGang.
 func resolvePodGangName(pgm *grovecorev1alpha1.PodGangMap, rnr apicommon.ResourceNameReplica, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int32) (string, error) {
 	pcsgConfigName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(pcsg.Name, rnr)
 	if err != nil {
 		return "", err
 	}
-	epoch, err := componentutils.EpochForPCSGReplica(pgm, pcsgConfigName, pcsgReplicaIndex)
-	if err != nil {
-		return "", err
-	}
-	if pcsgReplicaIndex < *pcsg.Spec.MinAvailable {
-		return apicommon.GenerateAnchorPodGangName(rnr, epoch), nil
-	}
-	return apicommon.GenerateNonAnchorPodGangName(rnr, epoch, pcsgConfigName, pcsgReplicaIndex), nil
+	return componentutils.PodGangNameForPCSGReplica(pgm, rnr, pcsgConfigName, pcsgReplicaIndex)
 }
 
 // addEnvironmentVariablesToPodContainerSpecs injects PCSG-specific environment variables into all containers in the PodClique

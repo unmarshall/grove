@@ -68,20 +68,10 @@ func PodGangMapByPCSReplicaIndex(pgms []grovecorev1alpha1.PodGangMap) (map[int]g
 	return pgmByReplicaIndex, nil
 }
 
-// EpochForPCSGReplica returns the epoch of the PodGangMap entry a PodCliqueScalingGroup replica index
-// belongs to. Callers use it to build the PodGang name for that replica.
-func EpochForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName string, pcsgReplicaIndex int32) (string, error) {
-	entry, err := podGangEntryForPCSGReplica(pgm, pcsgName, pcsgReplicaIndex)
-	if err != nil {
-		return "", err
-	}
-	return entry.Epoch, nil
-}
-
 // PodGangNameForPCSGReplica returns the epoch-based PodGang name that a PodCliqueScalingGroup replica
 // index belongs to, reading its entry from the PodGangMap. An Anchor entry yields the anchor PodGang
-// name. A Tail or ScaleOut entry yields the non-anchor name. It uses the same entry lookup as
-// EpochForPCSGReplica, so it agrees with how the PodGang materializer names the PodGang.
+// name. A Tail or ScaleOut entry yields the non-anchor name. It reads the role from the entry, so it
+// agrees with how the PodGang materializer names the PodGang.
 func PodGangNameForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, rnr apicommon.ResourceNameReplica, pcsgName string, pcsgReplicaIndex int32) (string, error) {
 	entry, err := podGangEntryForPCSGReplica(pgm, pcsgName, pcsgReplicaIndex)
 	if err != nil {

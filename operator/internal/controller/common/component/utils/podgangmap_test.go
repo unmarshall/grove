@@ -149,57 +149,6 @@ func pgmWithReplicaIndexLabel(pcsName, namespace, value string) grovecorev1alpha
 	}
 }
 
-func TestEpochForPCSGReplica(t *testing.T) {
-	const (
-		pcsName       = "pcs"
-		namespace     = "default"
-		genHash       = "hash-1"
-		pcsgName      = "sg"
-		anchorEpoch   = "1000"
-		tailEpoch     = "1001"
-		scaleOutEpoch = "1002"
-	)
-	// Anchor holds index 0 (MinAvailable=1), Tail holds [1,3), ScaleOut is pre-created and holds a
-	// placed scale-out index 3. Index 4 is a grown-but-not-yet-placed scale-out index.
-	pgm := testutils.NewPodGangMapBuilder(pcsName, namespace, "uid", 0).WithEntries(
-		testutils.NewAnchorEntry(genHash, anchorEpoch, 0, pcsgName, 0),
-		testutils.NewPodGangEntryBuilder(genHash, tailEpoch).
-			WithRole(grovecorev1alpha1.PodGangEntryRoleTail).
-			WithPCSGReplicaIndices(map[string][]int32{pcsgName: {1, 2}}).
-			WithDependsOn(anchorEpoch).Build(),
-		testutils.NewPodGangEntryBuilder(genHash, scaleOutEpoch).
-			WithRole(grovecorev1alpha1.PodGangEntryRoleScaleOut).
-			WithPCSGReplicaIndices(map[string][]int32{pcsgName: {3}}).
-			WithDependsOn(anchorEpoch).Build(),
-	).Build()
-
-	tests := []struct {
-		name          string
-		index         int32
-		expectedEpoch string
-	}{
-		{"anchor index resolves to the anchor epoch", 0, anchorEpoch},
-		{"tail index resolves to the tail epoch", 2, tailEpoch},
-		{"placed scale-out index resolves to the ScaleOut epoch", 3, scaleOutEpoch},
-		{"not-yet-placed scale-out index falls back to the ScaleOut entry", 4, scaleOutEpoch},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			actual, err := EpochForPCSGReplica(pgm, pcsgName, test.index)
-			require.NoError(t, err)
-			assert.Equal(t, test.expectedEpoch, actual)
-		})
-	}
-
-	t.Run("errors when no owning entry and no ScaleOut entry exist", func(t *testing.T) {
-		anchorOnly := testutils.NewPodGangMapBuilder(pcsName, namespace, "uid", 0).WithEntries(
-			testutils.NewAnchorEntry(genHash, anchorEpoch, 0, pcsgName, 0),
-		).Build()
-		_, err := EpochForPCSGReplica(anchorOnly, pcsgName, 5)
-		require.Error(t, err)
-	})
-}
-
 func TestDependsOnForEpoch(t *testing.T) {
 	const (
 		pcsName       = "pcs"
