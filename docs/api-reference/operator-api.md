@@ -693,7 +693,7 @@ _Appears in:_
 | --- | --- |
 | `Anchor` | PodGangEntryRoleAnchor marks the entry that carries the MinAvailable replicas.<br />It holds every standalone PodClique and each PodCliqueScalingGroup's MinAvailable replicas.<br />It materializes into a single PodGang.<br /> |
 | `Tail` | PodGangEntryRoleTail marks a non-anchor entry that holds a PodCliqueScalingGroup's replica<br />indices above MinAvailable, as declared by the template. It materializes into one PodGang per<br />replica index.<br /> |
-| `ScaleOut` | PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a<br />steady-state scale-out beyond the template. It materializes into one PodGang per replica index.<br />It is created on the first scale-out. Even if this entry is empty it is exempted from being removed since<br />it represents a scale-out bucket and offers a reliable epoch that downstream reconcilers can use when<br />independently constructing PodGang names.<br /> |
+| `ScaleOut` | PodGangEntryRoleScaleOut marks the entry that holds PodCliqueScalingGroup replicas added by a<br />steady-state scale-out beyond the template. It materializes into one PodGang per replica index.<br />The entry is created for every PodCliqueSet that has a PodCliqueScalingGroup, starting empty, and<br />is kept even when empty for the current generation. It offers a stable scale-out epoch that<br />downstream reconcilers use when independently constructing PodGang names.<br /> |
 
 
 #### PodGangMap
