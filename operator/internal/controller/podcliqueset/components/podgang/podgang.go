@@ -52,6 +52,7 @@ const (
 	errCodeSetControllerReference  grovecorev1alpha1.ErrorCode = "ERR_SET_CONTROLLER_REFERENCE"
 	errCodeCreateOrPatchPodGang    grovecorev1alpha1.ErrorCode = "ERR_CREATE_OR_PATCH_PODGANG"
 	errCodeResolveTopologyLevels   grovecorev1alpha1.ErrorCode = "ERR_RESOLVE_TOPOLOGY_LEVELS"
+	errCodeUpdatePodGangStatus     grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODGANG_STATUS"
 )
 
 type _resource struct {
