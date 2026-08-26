@@ -288,7 +288,7 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 			},
 		}
 		if initialized {
-			setOrUpdateInitializedCondition(pg, metav1.ConditionTrue, groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
+			setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeInitialized, metav1.ConditionTrue, groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
 		}
 		return pg
 	}
@@ -345,6 +345,51 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 		pgAfter := &groveschedulerv1alpha1.PodGang{}
 		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: pgName}, pgAfter))
 		assert.False(t, isInitializedInCluster(t, cl, pgName))
+	})
+
+	t.Run("existing PodGang was Scheduled and Ready, pods regress - flips Scheduled and Ready to False, keeps timestamps", func(t *testing.T) {
+		ctx := t.Context()
+		// The PodGang was previously Scheduled and Ready with timestamps stamped. In this pass its pods
+		// have regressed so verifyAllPodsCreated fails, but the live Scheduled and Ready conditions must
+		// still be reconciled to False. LastScheduled and LastReady are never cleared.
+		existingPG := makeExistingPodGang(pgName, true)
+		setScheduledCondition(existingPG, true, metav1.Now())
+		setReadyCondition(existingPG, true, metav1.Now())
+
+		pclq := makePCLQ(pclqName, 2)
+		cl := testutils.NewTestClientBuilder().
+			WithObjects(pcs, existingPG).
+			WithStatusSubresource(&groveschedulerv1alpha1.PodGang{}).
+			Build()
+		r := newResource(cl)
+		pgi := anchorPodGangInfo()
+		ss := &syncState{
+			pcs:                   pcs,
+			logger:                ctrllogger.FromContext(ctx),
+			expectedPodGangs:      []*podGangInfo{pgi},
+			existingPodGangByName: map[string]groveschedulerv1alpha1.PodGang{pgName: *existingPG},
+			existingPCLQByName:    componentutils.PodCliqueByName([]grovecorev1alpha1.PodClique{pclq}),
+			existingPCLQPods:      map[string][]v1.Pod{},
+		}
+
+		// Read the seeded timestamps back from the client so they carry the same store-truncated
+		// precision as the values asserted on after reconcile.
+		initial := &groveschedulerv1alpha1.PodGang{}
+		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: pgName}, initial))
+		wantLastScheduled := initial.Status.LastScheduled
+		wantLastReady := initial.Status.LastReady
+
+		result := r.createOrUpdatePodGangs(ctx, ss)
+
+		require.True(t, result.hasErrors(), "verifyAllPodsCreated must record a requeue error")
+		testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, result.errs[0])
+		patched := &groveschedulerv1alpha1.PodGang{}
+		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: pgName}, patched))
+		assert.False(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled)), "Scheduled must flip to False on regression")
+		assert.False(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady)), "Ready must flip to False on regression")
+		assert.True(t, isInitializedInCluster(t, cl, pgName), "Initialized is a latch and must remain True")
+		assert.Equal(t, wantLastScheduled, patched.Status.LastScheduled, "LastScheduled must not be cleared")
+		assert.Equal(t, wantLastReady, patched.Status.LastReady, "LastReady must not be cleared")
 	})
 
 	t.Run("new PodGang, pods ready - creates PodGang, records creation, sets Initialized=True", func(t *testing.T) {
@@ -1728,8 +1773,9 @@ func TestSetReadyCondition(t *testing.T) {
 }
 
 // TestReconcilePodGangStatus verifies reconcilePodGangStatus patches the live PodGang's Scheduled
-// and Ready conditions from live pod observation, skips the patch when the status is already
-// current, requeues on a conflicting patch, and surfaces a non-conflict patch failure as an error.
+// and Ready conditions from live pod observation on every call, sets the Initialized latch only
+// when allPodsCreated is true, skips the patch when the status is already current, requeues on a
+// conflicting patch, and surfaces a non-conflict patch failure as an error.
 func TestReconcilePodGangStatus(t *testing.T) {
 	const (
 		ns       = "default"
@@ -1759,22 +1805,40 @@ func TestReconcilePodGangStatus(t *testing.T) {
 		}
 	}
 
-	t.Run("patches Scheduled and Ready True and stamps timestamps when pods are ready", func(t *testing.T) {
+	t.Run("allPodsCreated true - sets Initialized and patches Scheduled and Ready True with timestamps", func(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().
 			WithObjects(pcs, existingPodGang()).
 			WithStatusSubresource(&groveschedulerv1alpha1.PodGang{}).
 			Build()
 		r := newResource(cl)
 
-		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi)
+		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, true)
 
 		require.NoError(t, err)
 		patched := &groveschedulerv1alpha1.PodGang{}
 		require.NoError(t, cl.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: pgName}, patched))
+		assert.True(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeInitialized)))
 		assert.True(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled)))
 		assert.True(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady)))
 		assert.NotNil(t, patched.Status.LastScheduled)
 		assert.NotNil(t, patched.Status.LastReady)
+	})
+
+	t.Run("allPodsCreated false - does not set Initialized but still reconciles Scheduled and Ready", func(t *testing.T) {
+		cl := testutils.NewTestClientBuilder().
+			WithObjects(pcs, existingPodGang()).
+			WithStatusSubresource(&groveschedulerv1alpha1.PodGang{}).
+			Build()
+		r := newResource(cl)
+
+		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, false)
+
+		require.NoError(t, err)
+		patched := &groveschedulerv1alpha1.PodGang{}
+		require.NoError(t, cl.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: pgName}, patched))
+		assert.Nil(t, meta.FindStatusCondition(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeInitialized)), "Initialized must not be set when allPodsCreated is false")
+		assert.True(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled)))
+		assert.True(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady)))
 	})
 
 	t.Run("does not patch when status is already current", func(t *testing.T) {
@@ -1799,7 +1863,7 @@ func TestReconcilePodGangStatus(t *testing.T) {
 		require.NoError(t, cl.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: pgName}, initial))
 		wantLastScheduled := initial.Status.LastScheduled
 
-		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi)
+		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, true)
 
 		// The recorded StatusPatch error fails the test if a patch is issued. A nil error therefore
 		// proves the DeepEqual guard skipped the patch because the status was already current.
@@ -1820,7 +1884,7 @@ func TestReconcilePodGangStatus(t *testing.T) {
 			Build()
 		r := newResource(cl)
 
-		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi)
+		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, true)
 
 		testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, err)
 	})
@@ -1834,7 +1898,7 @@ func TestReconcilePodGangStatus(t *testing.T) {
 			Build()
 		r := newResource(cl)
 
-		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi)
+		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, true)
 
 		testutils.AssertGroveError(t, &groveerr.GroveError{Code: errCodeUpdatePodGangStatus, Cause: internalErr, Operation: component.OperationSync}, err)
 	})

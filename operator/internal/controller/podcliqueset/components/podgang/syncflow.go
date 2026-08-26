@@ -446,9 +446,10 @@ func (r _resource) deleteExcessPodGangs(ctx context.Context, ss *syncState) erro
 	return nil
 }
 
-// createOrUpdatePodGangs creates or updates all expected PodGangs.
-// PodGangs are created with empty podReferences, Initialized=False.
-// Once all pods are created, PodReferences are populated and the PodGang is marked as Initialized=True.
+// createOrUpdatePodGangs creates or updates all expected PodGangs. PodGangs are created with empty
+// podReferences and Initialized set to False. Once all pods are created the PodReferences are
+// populated and the PodGang is marked Initialized True. The Scheduled and Ready conditions are
+// reconciled from live pod observation on every pass.
 func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) syncFlowResult {
 	result := syncFlowResult{}
 	for _, expectedPG := range ss.expectedPodGangs {
@@ -464,16 +465,18 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 			result.recordPodGangCreation(expectedPG.fqn)
 		}
 
-		// Verify all pods are created before proceeding
-		if err := r.verifyAllPodsCreated(ss, expectedPG); err != nil {
+		// verifyAllPodsCreated reports whether every constituent pod has been created and associated.
+		// Its result gates only the Initialized latch. The Scheduled and Ready conditions are live and
+		// are reconciled on every pass regardless, so a regression is reflected instead of frozen.
+		allPodsCreatedErr := r.verifyAllPodsCreated(ss, expectedPG)
+		if allPodsCreatedErr != nil {
 			ss.logger.Info("Not all pods are created or associated to the PodGang yet", "PodGangName", expectedPG.fqn)
-			result.recordError(err)
-			continue
+			result.recordError(allPodsCreatedErr)
 		}
 
-		// Reconcile the PodGang status conditions (Initialized, Scheduled, Ready) and their
-		// timestamps from live pod observation.
-		if err := r.reconcilePodGangStatus(ctx, ss, expectedPG); err != nil {
+		// Reconcile the PodGang Scheduled and Ready conditions and their timestamps from live pod
+		// observation. Initialized is set to True only once all pods are created, and is never reset.
+		if err := r.reconcilePodGangStatus(ctx, ss, expectedPG, allPodsCreatedErr == nil); err != nil {
 			ss.logger.Error(err, "failed to reconcile PodGang status", "PodGangName", expectedPG.fqn)
 			result.recordError(err)
 			continue
@@ -483,14 +486,14 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 	return result
 }
 
-// reconcilePodGangStatus reads the live PodGang and reconciles its Initialized, Scheduled and
-// Ready conditions from live pod observation, advancing LastScheduled and LastReady on each fresh
-// transition to True. It is called after verifyAllPodsCreated passes, so Initialized is set to
-// True here. It does not write Phase, which the backend scheduler owns. The patch takes an
-// optimistic lock so a write built from a stale cached PodGang is rejected with a conflict rather
-// than reverting a concurrent scheduler update, in which case a requeue is signalled. It emits at
-// most one status-subresource patch per call, skipping the patch when the status is unchanged.
-func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pgi *podGangInfo) error {
+// reconcilePodGangStatus reconciles the PodGang status from live pods.
+//   - Scheduled and Ready track current pod state on every call and advance LastScheduled and
+//     LastReady on each fresh transition to True.
+//   - Initialized is a one-way latch set to True when allPodsCreated is true and never reset.
+//   - The patch is optimistically locked so a write from a stale cache is rejected as a conflict
+//     and signals a requeue.
+//   - At most one status patch is emitted per call, and it is skipped when the status is unchanged.
+func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pgi *podGangInfo, allPodsCreated bool) error {
 	pg, err := componentutils.GetPodGang(ctx, r.client, pgi.fqn, ss.pcs.Namespace)
 	if err != nil {
 		return err
@@ -502,8 +505,10 @@ func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pg
 	minReplicasScheduled := r.arePodGangMinReplicasScheduled(ss, pgi)
 	minReplicasReady := r.arePodGangMinReplicasReady(ss, pgi)
 
-	setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeInitialized, metav1.ConditionTrue,
-		groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
+	if allPodsCreated {
+		setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeInitialized, metav1.ConditionTrue,
+			groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
+	}
 	setScheduledCondition(pg, minReplicasScheduled, now)
 	setReadyCondition(pg, minReplicasReady, now)
 
@@ -519,22 +524,6 @@ func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pg
 			fmt.Sprintf("failed to patch status for PodGang %s", pgi.fqn))
 	}
 	return nil
-}
-
-// setScheduledCondition sets the Scheduled condition from the live scheduled count and advances
-// LastScheduled when the condition transitions to True. LastScheduled is never reset once set.
-func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasScheduled bool, now metav1.Time) {
-	status := metav1.ConditionFalse
-	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
-	message := "one or more PodGroups have fewer scheduled pods than MinReplicas"
-	if minReplicasScheduled {
-		status = metav1.ConditionTrue
-		reason = groveschedulerv1alpha1.ConditionReasonPodGangScheduled
-		message = "MinReplicas pods of every PodGroup are scheduled"
-	}
-	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message) && minReplicasScheduled {
-		pg.Status.LastScheduled = &now
-	}
 }
 
 // arePodGangMinReplicasScheduled returns true if, for every constituent PodClique, at least
@@ -557,38 +546,6 @@ func (r _resource) arePodGangMinReplicasScheduled(ss *syncState, pgi *podGangInf
 	return true
 }
 
-// setPodGangCondition sets the given condition via meta.SetStatusCondition and returns whether the
-// condition's status changed, that is whether this call was a transition rather than an idempotent
-// re-assertion of the same status. A nil prior condition counts as a transition.
-func setPodGangCondition(pg *groveschedulerv1alpha1.PodGang, condType groveschedulerv1alpha1.PodGangConditionType, status metav1.ConditionStatus, reason, message string) bool {
-	prior := meta.FindStatusCondition(pg.Status.Conditions, string(condType))
-	changed := prior == nil || prior.Status != status
-	meta.SetStatusCondition(&pg.Status.Conditions, metav1.Condition{
-		Type:               string(condType),
-		Status:             status,
-		ObservedGeneration: pg.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-	return changed
-}
-
-// setReadyCondition sets the Ready condition from the live ready count and advances LastReady when
-// the condition transitions to True. LastReady is never reset once set.
-func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasReady bool, now metav1.Time) {
-	status := metav1.ConditionFalse
-	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
-	message := "one or more PodGroups have fewer ready pods than MinReplicas"
-	if minReplicasReady {
-		status = metav1.ConditionTrue
-		reason = groveschedulerv1alpha1.ConditionReasonPodGangReady
-		message = "MinReplicas pods of every PodGroup are ready"
-	}
-	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message) && minReplicasReady {
-		pg.Status.LastReady = &now
-	}
-}
-
 // arePodGangMinReplicasReady returns true if, for every constituent PodClique, at least
 // MinReplicas pods associated to this PodGang are Ready. Only pods named in the PodClique's
 // associatedPodNames are counted, so a PodClique whose pods are spread across more than one
@@ -609,6 +566,54 @@ func (r _resource) arePodGangMinReplicasReady(ss *syncState, pgi *podGangInfo) b
 	return true
 }
 
+// setPodGangCondition sets the given condition via meta.SetStatusCondition and returns whether the
+// condition's status changed, that is whether this call was a transition rather than an idempotent
+// re-assertion of the same status. A nil prior condition counts as a transition.
+func setPodGangCondition(pg *groveschedulerv1alpha1.PodGang, condType groveschedulerv1alpha1.PodGangConditionType, status metav1.ConditionStatus, reason, message string) bool {
+	prior := meta.FindStatusCondition(pg.Status.Conditions, string(condType))
+	changed := prior == nil || prior.Status != status
+	meta.SetStatusCondition(&pg.Status.Conditions, metav1.Condition{
+		Type:               string(condType),
+		Status:             status,
+		ObservedGeneration: pg.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	return changed
+}
+
+// setScheduledCondition sets the Scheduled condition from the live scheduled count and advances
+// LastScheduled when the condition transitions to True. LastScheduled is never reset once set.
+func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasScheduled bool, now metav1.Time) {
+	status := metav1.ConditionFalse
+	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
+	message := "one or more PodGroups have fewer scheduled pods than MinReplicas"
+	if minReplicasScheduled {
+		status = metav1.ConditionTrue
+		reason = groveschedulerv1alpha1.ConditionReasonPodGangScheduled
+		message = "MinReplicas pods of every PodGroup are scheduled"
+	}
+	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message) && minReplicasScheduled {
+		pg.Status.LastScheduled = &now
+	}
+}
+
+// setReadyCondition sets the Ready condition from the live ready count and advances LastReady when
+// the condition transitions to True. LastReady is never reset once set.
+func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasReady bool, now metav1.Time) {
+	status := metav1.ConditionFalse
+	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
+	message := "one or more PodGroups have fewer ready pods than MinReplicas"
+	if minReplicasReady {
+		status = metav1.ConditionTrue
+		reason = groveschedulerv1alpha1.ConditionReasonPodGangReady
+		message = "MinReplicas pods of every PodGroup are ready"
+	}
+	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message) && minReplicasReady {
+		pg.Status.LastReady = &now
+	}
+}
+
 // patchPodGangInitializedStatus patches the Initialized condition with the given status.
 func (r _resource) patchPodGangInitializedStatus(ctx context.Context, ss *syncState, podGangName string, status metav1.ConditionStatus, reason, message string) error {
 	// Create a PodGang object with only the status we want to patch
@@ -618,7 +623,7 @@ func (r _resource) patchPodGangInitializedStatus(ctx context.Context, ss *syncSt
 			Namespace: ss.pcs.Namespace,
 		},
 	}
-	setOrUpdateInitializedCondition(statusPatch, status, reason, message)
+	setPodGangCondition(statusPatch, groveschedulerv1alpha1.PodGangConditionTypeInitialized, status, reason, message)
 	// One could argue why not use Status.Phase to also denote Initialized condition. For now the argument is that
 	// current set of phases (Pending, Starting, Running) is influenced by the status of constituent Pods w.r.t their
 	// scheduling state, whereas initialized condition is denoting if a PodGang is ready to be scheduled
