@@ -593,7 +593,8 @@ func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasSchedu
 		reason = groveschedulerv1alpha1.ConditionReasonPodGangScheduled
 		message = "MinReplicas pods of every PodGroup are scheduled"
 	}
-	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message) && minReplicasScheduled {
+	mutated := setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message)
+	if mutated && minReplicasScheduled {
 		pg.Status.LastScheduled = &now
 	}
 }
@@ -609,7 +610,8 @@ func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasReady bool
 		reason = groveschedulerv1alpha1.ConditionReasonPodGangReady
 		message = "MinReplicas pods of every PodGroup are ready"
 	}
-	if setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message) && minReplicasReady {
+	mutated := setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message)
+	if mutated && minReplicasReady {
 		pg.Status.LastReady = &now
 	}
 }
