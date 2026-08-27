@@ -75,6 +75,82 @@ func TestPodPredicate_Delete(t *testing.T) {
 	})
 }
 
+// TestPodPredicateUpdate verifies the pod predicate's Update path. A managed pod whose Scheduled or
+// Ready condition transitions must enqueue a reconcile so PodClique.Status.ScheduledReplicas and
+// ReadyReplicas stay current. Updates with no relevant status change, a spec change, or an
+// unmanaged pod must not enqueue.
+func TestPodPredicateUpdate(t *testing.T) {
+	const ns, pclqName, podName = "default", "pclq-1", "pclq-1-0"
+	r := &Reconciler{expectationsStore: expect.NewExpectationsStore()}
+	pred, ok := r.podPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	managedPod := func(conds ...corev1.PodCondition) *corev1.Pod {
+		b := testutils.NewPodBuilder(podName, ns).
+			WithOwner(pclqName).
+			WithLabels(map[string]string{common.LabelManagedByKey: common.LabelManagedByValue})
+		for _, c := range conds {
+			b = b.WithCondition(c)
+		}
+		return b.Build()
+	}
+	scheduled := corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}
+	notScheduled := corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionFalse}
+	ready := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
+	notReady := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse}
+
+	tests := []struct {
+		name     string
+		oldPod   *corev1.Pod
+		newPod   *corev1.Pod
+		wantFire bool
+	}{
+		{
+			name:     "Scheduled False to True enqueues",
+			oldPod:   managedPod(notScheduled),
+			newPod:   managedPod(scheduled),
+			wantFire: true,
+		},
+		{
+			name:     "Scheduled condition appears as True enqueues",
+			oldPod:   managedPod(),
+			newPod:   managedPod(scheduled),
+			wantFire: true,
+		},
+		{
+			name:     "Ready False to True enqueues",
+			oldPod:   managedPod(scheduled, notReady),
+			newPod:   managedPod(scheduled, ready),
+			wantFire: true,
+		},
+		{
+			name:     "no relevant status change does not enqueue",
+			oldPod:   managedPod(scheduled, ready),
+			newPod:   managedPod(scheduled, ready),
+			wantFire: false,
+		},
+		{
+			name:     "unmanaged pod does not enqueue",
+			oldPod:   testutils.NewPodBuilder(podName, ns).WithCondition(notScheduled).Build(),
+			newPod:   testutils.NewPodBuilder(podName, ns).WithCondition(scheduled).Build(),
+			wantFire: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantFire, pred.UpdateFunc(event.UpdateEvent{ObjectOld: tt.oldPod, ObjectNew: tt.newPod}))
+		})
+	}
+
+	t.Run("spec change does not enqueue even with a Scheduled transition", func(t *testing.T) {
+		oldPod := managedPod(notScheduled)
+		newPod := managedPod(scheduled)
+		newPod.Generation = oldPod.Generation + 1
+		assert.False(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+}
+
 // TestPodCliqueSetPredicateCurrentlyUpdatingReplicaChanges verifies that the PodCliqueSet
 // watch predicate enqueues PodClique reconciles when the replica currently being rolled out
 // changes.

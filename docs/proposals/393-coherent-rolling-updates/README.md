@@ -743,16 +743,34 @@ The PodGang component reports two conditions on every `PodGang.Status` to expres
 
 | Condition | Meaning |
 | --- | --- |
-| `PodGangConditionTypeScheduled` | Set to `True` once `MinReplicas` pods of every `PodGroup` have been scheduled onto nodes. Setting `Scheduled=True` also implies `MinReplicas` has been released to 0 on every standalone-PCLQ PodGroup (PCSG-member PodGroups keep their original `MinReplicas` — see stage 2 below). Once set to `True`, this condition remains `True` for the rest of the PodGang's lifetime — placement is a one-time event from the scheduler's perspective. |
-| `PodGangConditionTypeReady` | Set to `True` when, for every `PodGroup`, the count of `Ready` pods (passing readiness probes) is at least the `MinAvailable` of the constituent PCLQ. The floor is read from the PCS spec, not from the live `MinReplicas` value on the PodGroup — a standalone-PCLQ PodGroup with `MinReplicas` released to 0 still needs its constituent PCLQ's `MinAvailable` Ready pods to count as `Ready`. Unlike `Scheduled`, this condition reflects current state — if pods fail readiness, the PodGang component flips it back to `False`. |
+| `PodGangConditionTypeScheduled` | Set to `True` while `MinReplicas` pods of every `PodGroup` are scheduled onto nodes. This condition reflects current state, so if scheduled pods are later evicted, deleted, or preempted and the count for any PodGroup falls below its `MinReplicas`, it flips back to `False`. The first time it transitions to `True`, the PodGang component patches `MinReplicas=0` on every standalone-PCLQ PodGroup (PCSG-member PodGroups keep their original `MinReplicas`, see [Why standalone-PCLQ PodGroups release MinReplicas but PCSG-member PodGroups do not](#why-standalone-pclq-podgroups-release-minreplicas-but-pcsg-member-podgroups-do-not)). |
+| `PodGangConditionTypeReady` | Set to `True` while, for every `PodGroup`, the count of `Ready` pods (passing readiness probes) is at least the `MinAvailable` of the constituent PCLQ. The floor is read from the PCS spec, not from the live `MinReplicas` value on the PodGroup, so a standalone-PCLQ PodGroup with `MinReplicas` released to 0 still needs its constituent PCLQ's `MinAvailable` Ready pods to count as `Ready`. This condition reflects current state, so it flips back to `False` if readiness regresses. |
 
-`Scheduled` is therefore strictly progressive; `Ready` tracks live serving status. The orchestrator's coherent-update advancement reads `Ready=True` only on PodGangs in `InFlightPodGangs` (the current sub-step's PodGangs), so a previously-advanced PodGang flipping `Ready=False` does not block update progression.
+Both conditions reflect current state. To support orchestrator gating and pod-component scheduling-gate-removal that need a stable "ever reached this state" signal, the PodGang component also maintains two timestamps in `PodGang.Status`:
+
+```go
+type PodGangStatus struct {
+    // ... existing fields ...
+    // LastScheduled is the wall-clock time at which the Scheduled condition most
+    // recently transitioned from False (or absent) to True. It is nil until the
+    // first such transition, and is never reset to nil thereafter.
+    LastScheduled *metav1.Time `json:"lastScheduled,omitempty"`
+    // LastReady is the wall-clock time at which the Ready condition most recently
+    // transitioned from False (or absent) to True. It is nil until the first such
+    // transition, and is never reset to nil thereafter.
+    LastReady *metav1.Time `json:"lastReady,omitempty"`
+}
+```
+
+These timestamps are updated on every `False→True` transition of their respective conditions and are never reset. `LastScheduled` gives the pod-component scheduling-gate-removal logic a durable "has been scheduled at least once" signal, and `LastReady` gives the coherent-update orchestrator a durable "has been ready at least once" signal, both of which survive a later regression of the underlying condition.
 
 The lifecycle of a PodGang the PodGang component creates — MPG, TPG, and legacy BPG/SPG alike — proceeds in three stages:
 
 1. **Set on creation.** Each `PodGroup`'s `MinReplicas` is set to the `MinAvailable` value defined in the PCS spec for the constituent PCLQ (standalone-PCLQ PodGroups) or for the member PCLQ (PCSG-member PodGroups). This forces the scheduler to place the whole gang at once before any constituent pod can run, establishing the `MinAvailable` floor for that component.
-2. **Release `MinReplicas` on standalone-PCLQ PodGroups, mark `Scheduled=True`.** Once the scheduler has placed `MinReplicas` pods of every `PodGroup` on nodes, the PodGang component patches `MinReplicas=0` on every **standalone-PCLQ PodGroup** of the PodGang, leaves **PCSG-member PodGroups** at their original `MinReplicas`, then sets `Status.Conditions[Type=Scheduled]=True` with `Reason=PodGangScheduled`. Pod-component scheduling-gate-removal logic uses this condition (see [DependsOn and scheduling order](#dependson-and-scheduling-order)).
-3. **Mark `Ready=True`.** Once every `PodGroup` has at least `MinAvailable` (of the constituent PCLQ) pods passing readiness probes, the PodGang component sets `Status.Conditions[Type=Ready]=True` with `Reason=PodGangReady`. The orchestrator uses this condition (together with the rest of the per-sub-step gate) to advance coherent-update sub-steps — see [Per-sub-step gate](#per-sub-step-gate).
+2. **First placement: release `MinReplicas` on standalone-PCLQ PodGroups, mark `Scheduled=True`, capture `LastScheduled`.** Once the scheduler has placed `MinReplicas` pods of every `PodGroup` on nodes, the PodGang component patches `MinReplicas=0` on every **standalone-PCLQ PodGroup** of the PodGang, leaves **PCSG-member PodGroups** at their original `MinReplicas`, sets `Status.Conditions[Type=Scheduled]=True` with `Reason=PodGangScheduled`, and sets `Status.LastScheduled = metav1.Now()`. Pod-component scheduling-gate-removal logic uses `LastScheduled` (see [DependsOn and scheduling order](#dependson-and-scheduling-order)).
+3. **First readiness: mark `Ready=True`, capture `LastReady`.** Once every `PodGroup` has at least `MinAvailable` (of the constituent PCLQ) pods passing readiness probes, the PodGang component sets `Status.Conditions[Type=Ready]=True` with `Reason=PodGangReady` and sets `Status.LastReady = metav1.Now()`. The orchestrator uses `LastReady` (together with the rest of the per-sub-step gate) to advance coherent-update sub-steps (see [Per-sub-step gate](#per-sub-step-gate)).
+
+After the first `False→True` transition, both conditions become live signals. They can flip back to `False` if placement or readiness regresses, and forward to `True` again on recovery. `LastScheduled` and `LastReady` advance on every fresh `False→True` transition.
 
 ##### Why standalone-PCLQ PodGroups release MinReplicas but PCSG-member PodGroups do not
 

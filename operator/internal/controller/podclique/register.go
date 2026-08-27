@@ -147,24 +147,23 @@ func hasPodStatusChanged(updateEvent event.UpdateEvent) bool {
 	if !oldOk || !newOk {
 		return false
 	}
-	return hasReadyConditionChanged(oldPod.Status.Conditions, newPod.Status.Conditions) ||
+	return hasConditionStatusChanged(oldPod.Status.Conditions, newPod.Status.Conditions, corev1.PodReady) ||
+		hasConditionStatusChanged(oldPod.Status.Conditions, newPod.Status.Conditions, corev1.PodScheduled) ||
 		hasLastTerminationStateChanged(oldPod.Status.InitContainerStatuses, newPod.Status.InitContainerStatuses) ||
 		hasLastTerminationStateChanged(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) ||
 		hasStartedAndReadyChangedForAnyContainer(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses)
 }
 
-// hasReadyConditionChanged checks if the Pod's Ready condition status has transitioned
-func hasReadyConditionChanged(oldPodConditions, newPodConditions []corev1.PodCondition) bool {
-	getReadyCondition := func(podConditions []corev1.PodCondition) (corev1.PodCondition, bool) {
-		return lo.Find(podConditions, func(condition corev1.PodCondition) bool {
-			return condition.Type == corev1.PodReady
+// hasConditionStatusChanged reports whether the given Pod condition transitioned into or out of the
+// True state between the old and new conditions. A missing condition counts as not True.
+func hasConditionStatusChanged(oldPodConditions, newPodConditions []corev1.PodCondition, condType corev1.PodConditionType) bool {
+	isTrue := func(podConditions []corev1.PodCondition) bool {
+		cond, ok := lo.Find(podConditions, func(condition corev1.PodCondition) bool {
+			return condition.Type == condType
 		})
+		return ok && cond.Status == corev1.ConditionTrue
 	}
-	oldPodReadyCondition, oldOk := getReadyCondition(oldPodConditions)
-	newPodReadyCondition, newOk := getReadyCondition(newPodConditions)
-	oldPodReady := oldOk && oldPodReadyCondition.Status == corev1.ConditionTrue
-	newPodReady := newOk && newPodReadyCondition.Status == corev1.ConditionTrue
-	return oldPodReady != newPodReady
+	return isTrue(oldPodConditions) != isTrue(newPodConditions)
 }
 
 // hasLastTerminationStateChanged detects changes in container termination states with non-zero exit codes

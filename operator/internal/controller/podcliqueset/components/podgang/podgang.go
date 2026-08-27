@@ -34,7 +34,6 @@ import (
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -52,6 +51,7 @@ const (
 	errCodeSetControllerReference  grovecorev1alpha1.ErrorCode = "ERR_SET_CONTROLLER_REFERENCE"
 	errCodeCreateOrPatchPodGang    grovecorev1alpha1.ErrorCode = "ERR_CREATE_OR_PATCH_PODGANG"
 	errCodeResolveTopologyLevels   grovecorev1alpha1.ErrorCode = "ERR_RESOLVE_TOPOLOGY_LEVELS"
+	errCodeUpdatePodGangStatus     grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODGANG_STATUS"
 )
 
 type _resource struct {
@@ -259,17 +259,4 @@ func (r _resource) getSchedulerNameForPCS(pcs *grovecorev1alpha1.PodCliqueSet) s
 		}
 	}
 	return r.schedRegistry.GetDefault().Name()
-}
-
-// setOrUpdateInitializedCondition sets or updates the PodGangInitialized condition on the PodGang status.
-func setOrUpdateInitializedCondition(pg *groveschedulerv1alpha1.PodGang, status metav1.ConditionStatus, reason, message string) {
-	condition := metav1.Condition{
-		Type:               string(groveschedulerv1alpha1.PodGangConditionTypeInitialized),
-		Status:             status,
-		ObservedGeneration: pg.Generation,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            message,
-	}
-	meta.SetStatusCondition(&pg.Status.Conditions, condition)
 }

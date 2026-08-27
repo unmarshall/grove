@@ -212,6 +212,7 @@ func hasStatusChanged(updateEvent event.UpdateEvent) bool {
 // hasAnyStatusReplicasChanged checks if any replica count fields have changed.
 func hasAnyStatusReplicasChanged(oldPCLQStatus, newPCLQStatus grovecorev1alpha1.PodCliqueStatus) bool {
 	return oldPCLQStatus.Replicas != newPCLQStatus.Replicas ||
+		oldPCLQStatus.ScheduledReplicas != newPCLQStatus.ScheduledReplicas ||
 		oldPCLQStatus.ReadyReplicas != newPCLQStatus.ReadyReplicas ||
 		oldPCLQStatus.ScheduleGatedReplicas != newPCLQStatus.ScheduleGatedReplicas ||
 		oldPCLQStatus.UpdatedReplicas != newPCLQStatus.UpdatedReplicas

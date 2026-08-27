@@ -206,6 +206,86 @@ func TestPodCliquePredicateStatusChangesAffectingUpdatedAccounting(t *testing.T)
 	}
 }
 
+// TestPodCliquePredicateStatusReplicaChanges asserts that the PodClique predicate enqueues the
+// PodCliqueSet when any replica-count status field changes. ScheduledReplicas is included so a
+// change in scheduled pods wakes the PodCliqueSet reconciler to advance the PodGang Scheduled
+// condition and LastScheduled.
+func TestPodCliquePredicateStatusReplicaChanges(t *testing.T) {
+	pred, ok := podCliquePredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	tests := []struct {
+		name   string
+		mutate func(*grovecorev1alpha1.PodClique)
+	}{
+		{
+			name:   "replicas changes",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) { pclq.Status.Replicas = 1 },
+		},
+		{
+			name:   "scheduled replicas changes",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) { pclq.Status.ScheduledReplicas = 1 },
+		},
+		{
+			name:   "ready replicas changes",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) { pclq.Status.ReadyReplicas = 1 },
+		},
+		{
+			name:   "schedule gated replicas changes",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) { pclq.Status.ScheduleGatedReplicas = 1 },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPCLQ := testutils.NewPodCliqueBuilder("pcs", uuid.NewUUID(), "worker", "default", 0).Build()
+			newPCLQ := oldPCLQ.DeepCopy()
+			tt.mutate(newPCLQ)
+
+			assert.True(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPCLQ, ObjectNew: newPCLQ}))
+		})
+	}
+}
+
+// TestPodCliquePredicateNoRelevantChange asserts that the PodClique predicate does not enqueue the
+// PodCliqueSet when nothing changes or when only a status field that does not feed PodCliqueSet
+// reconciliation changes.
+func TestPodCliquePredicateNoRelevantChange(t *testing.T) {
+	pred, ok := podCliquePredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	tests := []struct {
+		name   string
+		mutate func(*grovecorev1alpha1.PodClique)
+	}{
+		{
+			name:   "no change",
+			mutate: func(*grovecorev1alpha1.PodClique) {},
+		},
+		{
+			name:   "observed generation changes",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) { pclq.Status.ObservedGeneration = ptr.To(int64(2)) },
+		},
+		{
+			name: "last errors change",
+			mutate: func(pclq *grovecorev1alpha1.PodClique) {
+				pclq.Status.LastErrors = []grovecorev1alpha1.LastError{{Code: grovecorev1alpha1.ErrorCode("ERR"), Description: "boom"}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPCLQ := testutils.NewPodCliqueBuilder("pcs", uuid.NewUUID(), "worker", "default", 0).Build()
+			oldPCLQ.Status.ObservedGeneration = ptr.To(int64(1))
+			newPCLQ := oldPCLQ.DeepCopy()
+			tt.mutate(newPCLQ)
+
+			assert.False(t, pred.UpdateFunc(event.UpdateEvent{ObjectOld: oldPCLQ, ObjectNew: newPCLQ}))
+		})
+	}
+}
+
 // TestPodCliqueScalingGroupPredicateStatusChangesAffectingUpdatedAccounting asserts
 // that the PodCliqueScalingGroup predicate enqueues on status changes relevant to
 // rolling-update accounting (generation hash, updated replicas, update progress).
