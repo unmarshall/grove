@@ -269,3 +269,21 @@ func TestPodGangNameForPCSGReplica(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// TestIndexPodGangEntriesByEpoch verifies the entries are indexed by their epoch.
+func TestIndexPodGangEntriesByEpoch(t *testing.T) {
+	t.Run("indexes each entry under its epoch", func(t *testing.T) {
+		anchor := testutils.NewPodGangEntryBuilder("hash", "1000").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build()
+		tail := testutils.NewPodGangEntryBuilder("hash", "1001").WithRole(grovecorev1alpha1.PodGangEntryRoleTail).WithDependsOn("1000").Build()
+
+		actual := IndexPodGangEntriesByEpoch([]grovecorev1alpha1.PodGangEntry{anchor, tail})
+
+		require.Len(t, actual, 2)
+		assert.Equal(t, anchor, actual["1000"])
+		assert.Equal(t, tail, actual["1001"])
+	})
+	t.Run("returns an empty map for no entries", func(t *testing.T) {
+		actual := IndexPodGangEntriesByEpoch(nil)
+		assert.Empty(t, actual)
+	})
+}

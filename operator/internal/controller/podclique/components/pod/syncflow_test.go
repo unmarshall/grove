@@ -460,6 +460,38 @@ func TestSelectExcessPodsToDelete_ExcludesPodsAlreadyBeingDeleted(t *testing.T) 
 	}
 }
 
+// TestReconcilePCSGLabellessPods verifies a PodCliqueScalingGroup PodClique's labelless pods are
+// relabeled to its single PodGang.
+func TestReconcilePCSGLabellessPods(t *testing.T) {
+	const pcsgPodGangName = "simple1-0-1001-sga-2"
+
+	t.Run("relabels labelless pods to the PodCliqueScalingGroup PodGang", func(t *testing.T) {
+		pod := testutils.NewPodBuilder("pod-a", testNamespace).Build()
+		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
+		r := &_resource{client: cl}
+		ss := &syncSnapshot{pclq: pclqWithReplicas(1), pcsgReplicaPodGangName: pcsgPodGangName, existingPCLQPods: []*corev1.Pod{pod}}
+
+		repaired, err := r.reconcilePCSGLabellessPods(context.Background(), logr.Discard(), ss)
+		require.NoError(t, err)
+		assert.True(t, repaired)
+
+		updated := &corev1.Pod{}
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(pod), updated))
+		assert.Equal(t, pcsgPodGangName, updated.Labels[apicommon.LabelPodGang])
+	})
+
+	t.Run("no labelless pods is a no-op", func(t *testing.T) {
+		pod := gatedPod("pod-a", pcsgPodGangName)
+		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
+		r := &_resource{client: cl}
+		ss := &syncSnapshot{pclq: pclqWithReplicas(1), pcsgReplicaPodGangName: pcsgPodGangName, existingPCLQPods: []*corev1.Pod{pod}}
+
+		repaired, err := r.reconcilePCSGLabellessPods(context.Background(), logr.Discard(), ss)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+	})
+}
+
 // ---------------- test helpers ----------------
 
 // pcs returns a minimal PodCliqueSet for the gate-removal tests.
