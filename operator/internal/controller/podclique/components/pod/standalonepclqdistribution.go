@@ -50,7 +50,7 @@ func (r _resource) reconcileStandalonePCLQDistribution(ctx context.Context, logg
 
 	// Repair labelless pods before computing deltas so the reconcile below sees a consistent label
 	// state. Any repair requeues, and the next reconcile computes deltas on the settled labels.
-	repaired, err := r.reconcileLabellessPods(ctx, logger, ss, desiredCountByPodGang, nonTerminatingPods)
+	repaired, err := r.reconcileLabellessPods(ctx, logger, desiredCountByPodGang, nonTerminatingPods)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func partitionPodsByTermination(pods []*corev1.Pod) (nonTerminatingPods []*corev
 // target is ambiguous, and it may have been scheduled for a different gang, so it is deleted. It gets
 // recreated with the correct label and scheduling gates on a later reconcile. It returns whether any
 // pod was repaired.
-func (r _resource) reconcileLabellessPods(ctx context.Context, logger logr.Logger, ss *syncSnapshot, desiredCountByPodGang map[string]int32, nonTerminatingPods []*corev1.Pod) (bool, error) {
+func (r _resource) reconcileLabellessPods(ctx context.Context, logger logr.Logger, desiredCountByPodGang map[string]int32, nonTerminatingPods []*corev1.Pod) (bool, error) {
 	labellessPods := lo.Filter(nonTerminatingPods, func(pod *corev1.Pod, _ int) bool {
 		_, hasPodGangLabel := pod.Labels[apicommon.LabelPodGang]
 		return !hasPodGangLabel

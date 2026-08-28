@@ -26,9 +26,9 @@ import (
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
-	"github.com/samber/lo"
 
 	"github.com/go-logr/logr"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -123,7 +123,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), snapshotWithPods(pod), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
 		require.NoError(t, err)
 		assert.True(t, repaired)
 
@@ -137,7 +137,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), snapshotWithPods(pod), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
 		require.NoError(t, err)
 		assert.True(t, repaired)
 
@@ -150,7 +150,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), snapshotWithPods(pod), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
 		require.NoError(t, err)
 		assert.False(t, repaired)
 	})
@@ -162,7 +162,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 			Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), snapshotWithPods(pod), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
 		require.Error(t, err)
 		assert.False(t, repaired)
 	})
@@ -174,7 +174,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 			Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), snapshotWithPods(pod), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
 		require.Error(t, err)
 		assert.False(t, repaired)
 	})
@@ -447,17 +447,6 @@ func pclqWithReplicas(replicas int32) *grovecorev1alpha1.PodClique {
 	return &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{Name: testCliqueName, Namespace: testNamespace},
 		Spec:       grovecorev1alpha1.PodCliqueSpec{Replicas: replicas},
-	}
-}
-
-// snapshotWithPods returns a minimal syncSnapshot for the labelless-repair tests.
-func snapshotWithPods(pods ...*corev1.Pod) *syncSnapshot {
-	return &syncSnapshot{
-		pcs:              pcs(),
-		pclq:             pclqWithReplicas(1),
-		pcsReplicaIndex:  testPCSReplicaIndex,
-		cliqueName:       testCliqueName,
-		existingPCLQPods: pods,
 	}
 }
 

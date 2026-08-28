@@ -118,14 +118,14 @@ func TestResolveDependencySatisfiedByEpoch(t *testing.T) {
 	}{
 		{
 			name:            "single anchor with no dependency is always satisfied",
-			entries:         []grovecorev1alpha1.PodGangEntry{anchorEntry(testAnchor0Epoch, 0)},
+			entries:         []grovecorev1alpha1.PodGangEntry{anchorEntry()},
 			scheduledEpochs: nil,
 			expected:        map[string]bool{testAnchor0Epoch: true},
 		},
 		{
 			name: "entry satisfied when its dependency epoch is scheduled",
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntry(testAnchor0Epoch, 0),
+				anchorEntry(),
 				tailEntry(testTailEpoch, testAnchor0Epoch),
 			},
 			scheduledEpochs: []string{testAnchor0Epoch},
@@ -134,7 +134,7 @@ func TestResolveDependencySatisfiedByEpoch(t *testing.T) {
 		{
 			name: "entry unsatisfied when its dependency epoch is not scheduled",
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntry(testAnchor0Epoch, 0),
+				anchorEntry(),
 				tailEntry(testTailEpoch, testAnchor0Epoch),
 			},
 			scheduledEpochs: nil,
@@ -143,7 +143,7 @@ func TestResolveDependencySatisfiedByEpoch(t *testing.T) {
 		{
 			name: "dependency epoch belonging to a tail is resolved the same as an anchor",
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntry(testAnchor0Epoch, 0),
+				anchorEntry(),
 				tailEntry(testTailEpoch, testAnchor0Epoch),
 				tailEntry(testScaleOutEpoch, testTailEpoch), // depends on a tail, not an anchor
 			},
@@ -157,7 +157,7 @@ func TestResolveDependencySatisfiedByEpoch(t *testing.T) {
 		{
 			name: "multi-anchor chain and scale-out resolved by their direct dependency",
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntry(testAnchor0Epoch, 0),
+				anchorEntry(),
 				anchorDependentEntry(testAnchor1Epoch, 1, testAnchor0Epoch),
 				tailEntry(testTailEpoch, testAnchor1Epoch),
 				scaleOutEntry(testScaleOutEpoch, testAnchor0Epoch),
@@ -531,7 +531,7 @@ func podGangNameForEpoch(epoch string) string {
 // tail entry (testTailEpoch) depends on the anchor.
 func twoEpochPGM() *grovecorev1alpha1.PodGangMap {
 	return pgmWithEntries(
-		anchorEntry(testAnchor0Epoch, 0),
+		anchorEntry(),
 		tailEntry(testTailEpoch, testAnchor0Epoch),
 	)
 }
@@ -543,10 +543,13 @@ func pgmWithEntries(entries ...grovecorev1alpha1.PodGangEntry) *grovecorev1alpha
 		Build()
 }
 
-func anchorEntry(epoch string, anchorIndex int32) grovecorev1alpha1.PodGangEntry {
-	return testutils.NewPodGangEntryBuilder("hash", epoch).
+// anchorEntry builds the dependency-free anchor entry. A nil-DependsOn anchor is always the
+// AnchorIndex 0 anchor at testAnchor0Epoch; higher-index anchors depend on a prior epoch and are
+// built with anchorDependentEntry.
+func anchorEntry() grovecorev1alpha1.PodGangEntry {
+	return testutils.NewPodGangEntryBuilder("hash", testAnchor0Epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
-		WithAnchorIndex(anchorIndex).
+		WithAnchorIndex(0).
 		Build()
 }
 
