@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -236,6 +237,7 @@ func buildStandalonePCLQInfosForAnchorEntry(ss *syncState, pcsReplicaIndex int, 
 			fqn:          pclqFQN,
 			replicas:     desiredPCLQReplicas,
 			minAvailable: *cliqueTemplate.Spec.MinAvailable,
+			isStandalone: true,
 		}
 		pi.topologyConstraint = createTopologyPackConstraint(ss, types.NamespacedName{Namespace: ss.pcs.Namespace, Name: pclqFQN}, cliqueTemplate.TopologyConstraint)
 		pclqInfos = append(pclqInfos, pi)
@@ -315,7 +317,14 @@ func buildPCLQInfosAndTopoConstraintsForPCSGReplica(ss *syncState, pcsReplicaInd
 			return nil, nil, fmt.Errorf("PodCliqueScalingGroup %q references a PodClique %q that does not exist in the PodCliqueSet: %v", pcsgFQN, cliqueName, client.ObjectKeyFromObject(ss.pcs))
 		}
 		pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcsgFQN, Replica: int(pcsgReplicaIndex)}, cliqueName)
-		pclqs = append(pclqs, buildPodCliqueInfo(ss, pclqTemplateSpec, pclqFQN, true))
+		pi := pclqInfo{
+			fqn:          pclqFQN,
+			replicas:     pclqTemplateSpec.Spec.Replicas,
+			minAvailable: *pclqTemplateSpec.Spec.MinAvailable,
+			isStandalone: false,
+		}
+		pi.topologyConstraint = createTopologyPackConstraint(ss, types.NamespacedName{Namespace: ss.pcs.Namespace, Name: pclqFQN}, pclqTemplateSpec.TopologyConstraint)
+		pclqs = append(pclqs, pi)
 		pclqFQNs = append(pclqFQNs, pclqFQN)
 	}
 	var topoConstraintGroupConfig *groveschedulerv1alpha1.TopologyConstraintGroupConfig
@@ -328,18 +337,6 @@ func buildPCLQInfosAndTopoConstraintsForPCSGReplica(ss *syncState, pcsReplicaInd
 		}
 	}
 	return pclqs, topoConstraintGroupConfig, nil
-}
-
-// buildPodCliqueInfo creates pclqInfo with appropriate replica counts.
-func buildPodCliqueInfo(ss *syncState, pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, pclqFQN string, belongsToPCSG bool) pclqInfo {
-	replicas := determinePodCliqueReplicas(ss, pclqTemplateSpec, pclqFQN, belongsToPCSG)
-	expectedPCLQ := pclqInfo{
-		fqn:          pclqFQN,
-		replicas:     replicas,
-		minAvailable: *pclqTemplateSpec.Spec.MinAvailable,
-	}
-	expectedPCLQ.topologyConstraint = createTopologyPackConstraint(ss, types.NamespacedName{Namespace: ss.pcs.Namespace, Name: pclqFQN}, pclqTemplateSpec.TopologyConstraint)
-	return expectedPCLQ
 }
 
 // createTopologyPackConstraint creates a TopologyPackConstraint based on the sync context and provided parameters for a resource.
@@ -373,23 +370,6 @@ func topologyLevelKeyForPackDomain(ss *syncState, nsName types.NamespacedName, t
 		return nil
 	}
 	return ptr.To(topologyLevel.Key)
-}
-
-// determinePodCliqueReplicas determines replica count considering HPA mutations.
-func determinePodCliqueReplicas(ss *syncState, pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, pclqFQN string, belongsToPCSG bool) int32 {
-	if belongsToPCSG || pclqTemplateSpec.Spec.ScaleConfig == nil {
-		return pclqTemplateSpec.Spec.Replicas
-	}
-	matchingPCLQ, found := ss.existingPCLQByName[pclqFQN]
-	if !found {
-		// PodClique resource not found - might be during initial creation
-		// Fall back to template replicas but log warning for visibility
-		ss.logger.Info("[WARN]: PodClique resource not found, using template replicas",
-			"podCliqueFQN", pclqFQN,
-			"templateReplicas", pclqTemplateSpec.Spec.Replicas)
-		return pclqTemplateSpec.Spec.Replicas
-	}
-	return matchingPCLQ.Spec.Replicas
 }
 
 // getExistingPodsByPCLQForPCS fetches all non-terminating pods grouped by PodClique.
@@ -477,6 +457,15 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 			result.recordError(allPodsCreatedErr)
 		}
 
+		// Once the gang is scheduled, release the initial gang-scheduling MinReplicas constraint on
+		// standalone PodGroups so further standalone replicas can schedule independently. This runs
+		// before reconcilePodGangStatus, which stamps LastScheduled and thereby latches the release.
+		if err := r.releaseStandalonePodGroupsMinReplicas(ctx, ss, expectedPG); err != nil {
+			ss.logger.Error(err, "failed to release MinReplicas on standalone PodGroups", "PodGangName", expectedPG.fqn)
+			result.recordError(err)
+			continue
+		}
+
 		// Reconcile the PodGang Scheduled and Ready conditions and their timestamps from live pod
 		// observation. Initialized is set to True only once all pods are created, and is never reset.
 		if err := r.reconcilePodGangStatus(ctx, ss, expectedPG, allPodsCreatedErr == nil); err != nil {
@@ -487,6 +476,51 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 	}
 
 	return result
+}
+
+// releaseStandalonePodGroupsMinReplicas sets MinReplicas to 0 on the PodGang PodGroups of standalone
+// PodCliques once the PodGang has been scheduled for the first time. The gang-scheduling MinReplicas
+// constraint governs only the initial atomic placement of the minimum viable set. Keeping it
+// afterwards would stop the scheduler from placing further standalone replicas independently.
+// PodGroups of PodCliques that belong to a PodCliqueScalingGroup keep their MinReplicas.
+func (r _resource) releaseStandalonePodGroupsMinReplicas(ctx context.Context, ss *syncState, pgi *podGangInfo) error {
+	pg, err := componentutils.GetPodGang(ctx, r.client, pgi.fqn, ss.pcs.Namespace)
+	if err != nil {
+		return err
+	}
+	// LastScheduled is set once the gang first reaches Scheduled True. A non-nil value means the
+	// release already ran on a prior reconcile, so skip without issuing a no-op patch.
+	if pg.Status.LastScheduled != nil {
+		return nil
+	}
+	if !r.arePodGangMinReplicasScheduled(ss, pgi) {
+		return nil
+	}
+	standaloneFQNs := sets.New[string]()
+	for _, pclq := range pgi.pclqs {
+		if pclq.isStandalone {
+			standaloneFQNs.Insert(pclq.fqn)
+		}
+	}
+	if standaloneFQNs.Len() == 0 {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(pg.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	for i := range pg.Spec.PodGroups {
+		if standaloneFQNs.Has(pg.Spec.PodGroups[i].Name) {
+			pg.Spec.PodGroups[i].MinReplicas = 0
+		}
+	}
+	if err := r.client.Patch(ctx, pg, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			return groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
+				fmt.Sprintf("conflict patching PodGang %s to release standalone MinReplicas from a stale cache, re-queueing", pgi.fqn))
+		}
+		return groveerr.WrapError(err, errCodeReleaseMinReplicas, component.OperationSync,
+			fmt.Sprintf("failed to release MinReplicas on standalone PodGroups of PodGang %s", pgi.fqn))
+	}
+	ss.logger.Info("Released MinReplicas on standalone PodGroups of PodGang", "podGang", pgi.fqn, "standalonePodGroups", standaloneFQNs.UnsortedList())
+	return nil
 }
 
 // reconcilePodGangStatus reconciles the PodGang status from live pods.
@@ -896,6 +930,8 @@ type pclqInfo struct {
 	replicas int32
 	// minAvailable is the minimum number of pods that are required for gang scheduling from this PodClique
 	minAvailable int32
+	// isStandalone is true when this PodClique is not a member of a PodCliqueScalingGroup.
+	isStandalone bool
 	// associatedPodNames are Pod names (having this PodClique as an owner) that have already been associated to this PodGang.
 	// This will be updated as and when pods are either deleted or new pods are associated.
 	associatedPodNames []string

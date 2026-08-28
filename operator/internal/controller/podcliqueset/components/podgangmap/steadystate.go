@@ -15,6 +15,7 @@
 package podgangmap
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 	"strconv"
@@ -184,24 +185,64 @@ func reconcileEntries(clk clock.Clock,
 	return removeEmptyEntries(entries, *pcs.Status.CurrentGenerationHash), nil
 }
 
-// refreshStandalonePodCliqueCounts sets each standalone PodClique's pod count on the anchor entry to
-// its live Spec.Replicas. A standalone PodClique always belongs to the anchor entry, and clique
-// composition is immutable on update, so the anchor already carries a key for every standalone
-// PodClique in the PCS spec. The count is updated only when the key exists.
-// NOTE: this refreshes the single AnchorIndex 0 anchor. When coherent updates land there can be more
-// than one anchor post-update, and this will need to select the right anchor per PodClique.
+// refreshStandalonePodCliqueCounts updates the per-anchor pod counts of each standalone PodClique to
+// match its live Spec.Replicas. Every anchor of the current generation carries a count for every
+// standalone PodClique. This sums a PodClique's counts across those anchors and applies the
+// difference from Spec.Replicas. A scale-out adds to the highest-AnchorIndex anchor. A scale-in
+// drains the highest-AnchorIndex anchor first and moves to the next as each reaches zero. With one
+// anchor this sets that anchor's count to Spec.Replicas.
 func refreshStandalonePodCliqueCounts(entries []grovecorev1alpha1.PodGangEntry, pcs *grovecorev1alpha1.PodCliqueSet, standalonePCLQs []grovecorev1alpha1.PodClique, pcsReplicaIndex int) {
-	anchor := currentGenerationAnchor(entries, *pcs.Status.CurrentGenerationHash)
-	if anchor == nil {
+	anchorsHighestFirst := currentGenerationAnchorsByIndexDesc(entries, *pcs.Status.CurrentGenerationHash)
+	if len(anchorsHighestFirst) == 0 {
 		return
 	}
-	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
+	pcsRnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
 	for _, standalonePCLQ := range standalonePCLQs {
-		cliqueName := apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(standalonePCLQ.Name, rnr)
-		if _, ok := anchor.PodCliques[cliqueName]; ok {
-			anchor.PodCliques[cliqueName] = standalonePCLQ.Spec.Replicas
+		cliqueName := apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(standalonePCLQ.Name, pcsRnr)
+		reconcileStandaloneCliqueCountAcrossAnchors(anchorsHighestFirst, cliqueName, standalonePCLQ.Spec.Replicas)
+	}
+}
+
+// reconcileStandaloneCliqueCountAcrossAnchors drives the clique's total pod count across the anchors
+// (ordered highest AnchorIndex first) toward desiredTotal. A positive difference is added to the
+// highest-AnchorIndex anchor. A negative difference drains the highest-AnchorIndex anchor first and
+// moves to the next as each reaches zero.
+func reconcileStandaloneCliqueCountAcrossAnchors(anchorsHighestFirst []*grovecorev1alpha1.PodGangEntry, cliqueName string, desiredTotal int32) {
+	var currentTotal int32
+	for _, anchor := range anchorsHighestFirst {
+		currentTotal += anchor.PodCliques[cliqueName]
+	}
+	diff := desiredTotal - currentTotal
+	switch {
+	case diff > 0:
+		anchorsHighestFirst[0].PodCliques[cliqueName] += diff
+	case diff < 0:
+		remaining := -diff
+		for _, anchor := range anchorsHighestFirst {
+			if remaining == 0 {
+				return
+			}
+			take := min(remaining, anchor.PodCliques[cliqueName])
+			anchor.PodCliques[cliqueName] -= take
+			remaining -= take
 		}
 	}
+}
+
+// currentGenerationAnchorsByIndexDesc returns the current-generation anchor entries ordered by
+// AnchorIndex descending (highest first).
+func currentGenerationAnchorsByIndexDesc(entries []grovecorev1alpha1.PodGangEntry, currentHash string) []*grovecorev1alpha1.PodGangEntry {
+	var anchors []*grovecorev1alpha1.PodGangEntry
+	for i := range entries {
+		e := &entries[i]
+		if e.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && e.PodCliqueSetGenerationHash == currentHash && e.AnchorIndex != nil {
+			anchors = append(anchors, e)
+		}
+	}
+	slices.SortFunc(anchors, func(a, b *grovecorev1alpha1.PodGangEntry) int {
+		return cmp.Compare(*b.AnchorIndex, *a.AnchorIndex) // highest AnchorIndex first
+	})
+	return anchors
 }
 
 // reconcilePCSGReplicaIndices diffs each PodCliqueScalingGroup's replica-index count across all
@@ -296,17 +337,6 @@ func drainPriority(entry grovecorev1alpha1.PodGangEntry) int {
 	default:
 		return 2
 	}
-}
-
-// currentGenerationAnchor returns a pointer to the AnchorIndex 0 anchor entry for the current
-// generation, or nil when none is present.
-func currentGenerationAnchor(entries []grovecorev1alpha1.PodGangEntry, currentHash string) *grovecorev1alpha1.PodGangEntry {
-	for i := range entries {
-		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entries[i].PodCliqueSetGenerationHash == currentHash && entries[i].AnchorIndex != nil && *entries[i].AnchorIndex == 0 {
-			return &entries[i]
-		}
-	}
-	return nil
 }
 
 // removeEmptyEntries drops entries that carry no pods and no replica indices. A ScaleOut entry for

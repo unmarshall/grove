@@ -129,7 +129,7 @@ func podGangEntryForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName stri
 }
 
 // AnchorPodGangEpoch returns the epoch of the AnchorIndex 0 anchor entry of the PodGangMap. Standalone
-// PodCliques always belong to this entry. It returns an error when no such anchor entry exists, a
+// PodCliques always belong to this entrnrry. It returns an error when no such anchor entry exists, a
 // contract violation that must be re-queued.
 // NOTE: When coherent-updates update strategy (GREP-393) is introduced then post coherent update it is possible
 // that there are more than one anchor entry. This function will have to be adapted to support that.
@@ -141,4 +141,14 @@ func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no AnchorIndex 0 anchor entry exists in PodGangMap %s", pgm.Name)
+}
+
+// IndexPodGangEntriesByEpoch returns a map of the PodGangMap entries keyed by their epoch. Epoch is
+// unique per entry, so each key maps to a single entry.
+func IndexPodGangEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) map[string]grovecorev1alpha1.PodGangEntry {
+	byEpoch := make(map[string]grovecorev1alpha1.PodGangEntry, len(entries))
+	for _, entry := range entries {
+		byEpoch[entry.Epoch] = entry
+	}
+	return byEpoch
 }

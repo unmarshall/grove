@@ -45,15 +45,16 @@ func GetPodCliqueFQNsForPCSNotInPCSG(pcs *grovecorev1alpha1.PodCliqueSet) []stri
 func GetPodCliqueFQNsForPCSReplicaNotInPCSG(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int) []string {
 	pclqNames := make([]string, 0, len(pcs.Spec.Template.Cliques))
 	for _, pclqTemplateSpec := range pcs.Spec.Template.Cliques {
-		if isStandalonePCLQ(pcs, pclqTemplateSpec.Name) {
+		if IsStandalonePCLQ(pcs, pclqTemplateSpec.Name) {
 			pclqNames = append(pclqNames, common.GeneratePodCliqueName(common.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}, pclqTemplateSpec.Name))
 		}
 	}
 	return pclqNames
 }
 
-// isStandalonePCLQ checks if the PodClique is managed by PodCliqueSet or not
-func isStandalonePCLQ(pcs *grovecorev1alpha1.PodCliqueSet, pclqName string) bool {
+// IsStandalonePCLQ reports whether the named PodClique is standalone, that is not a member of any
+// PodCliqueScalingGroup of the PodCliqueSet.
+func IsStandalonePCLQ(pcs *grovecorev1alpha1.PodCliqueSet, pclqName string) bool {
 	return !lo.SomeBy(pcs.Spec.Template.PodCliqueScalingGroupConfigs, func(pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig) bool {
 		return slices.Contains(pcsgConfig.CliqueNames, pclqName)
 	})
@@ -156,7 +157,7 @@ func GetExpectedStandAlonePCLQFQNsPerPCSReplica(pcs *grovecorev1alpha1.PodClique
 // CountStandalonePCLQs returns the number of standalone PodCliques declared in the PCS template.
 func CountStandalonePCLQs(pcs *grovecorev1alpha1.PodCliqueSet) int {
 	return lo.CountBy(pcs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
-		return isStandalonePCLQ(pcs, pclqTemplateSpec.Name)
+		return IsStandalonePCLQ(pcs, pclqTemplateSpec.Name)
 	})
 }
 
@@ -164,7 +165,7 @@ func CountStandalonePCLQs(pcs *grovecorev1alpha1.PodCliqueSet) int {
 func GetStandalonePCLQReplicasFromPCSTemplateSpec(pcs *grovecorev1alpha1.PodCliqueSet) map[string]int32 {
 	result := make(map[string]int32)
 	for _, cliqueTemplate := range pcs.Spec.Template.Cliques {
-		if isStandalonePCLQ(pcs, cliqueTemplate.Name) {
+		if IsStandalonePCLQ(pcs, cliqueTemplate.Name) {
 			result[cliqueTemplate.Name] = cliqueTemplate.Spec.Replicas
 		}
 	}

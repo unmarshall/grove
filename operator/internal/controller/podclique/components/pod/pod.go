@@ -49,8 +49,8 @@ const (
 	errCodeGetAvailablePodHostNameIndices      grovecorev1alpha1.ErrorCode = "ERR_GET_AVAILABLE_POD_HOSTNAME_INDICES"
 	errCodeGetPodGang                          grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANG"
 	errCodeGetPodGangMap                       grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANGMAP"
+	errCodePodGangMapNotFound                  grovecorev1alpha1.ErrorCode = "ERR_PODGANGMAP_NOT_FOUND"
 	errCodeGetPodCliqueSet                     grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUESET"
-	errCodeGetPodClique                        grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUE"
 	errCodeListPod                             grovecorev1alpha1.ErrorCode = "ERR_LIST_POD"
 	errCodeRemovePodSchedulingGate             grovecorev1alpha1.ErrorCode = "ERR_REMOVE_POD_SCHEDULING_GATE"
 	errCodeCreatePod                           grovecorev1alpha1.ErrorCode = "ERR_CREATE_POD"
@@ -64,6 +64,7 @@ const (
 	errCodeMissingPodCliqueTemplate            grovecorev1alpha1.ErrorCode = "ERR_MISSING_PODCLIQUE_TEMPLATE"
 	errCodeGetPodCliqueTemplate                grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUE_TEMPLATE"
 	errCodeUpdatePodCliqueStatus               grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODCLIQUE_STATUS"
+	errCodeLabelPod                            grovecorev1alpha1.ErrorCode = "ERR_LABEL_POD"
 )
 
 const (
