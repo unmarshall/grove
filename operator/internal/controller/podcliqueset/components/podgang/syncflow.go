@@ -457,19 +457,19 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 			result.recordError(allPodsCreatedErr)
 		}
 
-		// Once the gang is scheduled, release the initial gang-scheduling MinReplicas constraint on
-		// standalone PodGroups so further standalone replicas can schedule independently. This runs
-		// before reconcilePodGangStatus, which stamps LastScheduled and thereby latches the release.
-		if err := r.releaseStandalonePodGroupsMinReplicas(ctx, ss, expectedPG); err != nil {
-			ss.logger.Error(err, "failed to release MinReplicas on standalone PodGroups", "PodGangName", expectedPG.fqn)
-			result.recordError(err)
-			continue
-		}
-
 		// Reconcile the PodGang Scheduled and Ready conditions and their timestamps from live pod
 		// observation. Initialized is set to True only once all pods are created, and is never reset.
 		if err := r.reconcilePodGangStatus(ctx, ss, expectedPG, allPodsCreatedErr == nil); err != nil {
 			ss.logger.Error(err, "failed to reconcile PodGang status", "PodGangName", expectedPG.fqn)
+			result.recordError(err)
+			continue
+		}
+
+		// Release the standalone gang-scheduling MinReplicas constraint only after the status reconcile
+		// above has recorded that the PodGang is scheduled, so the constraint is dropped strictly after
+		// the scheduler places the minimum viable set rather than on partial live pod observation.
+		if err := r.releaseStandalonePodGroupsMinReplicas(ctx, ss, expectedPG); err != nil {
+			ss.logger.Error(err, "failed to release MinReplicas on standalone PodGroups", "PodGangName", expectedPG.fqn)
 			result.recordError(err)
 			continue
 		}
@@ -479,7 +479,7 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 }
 
 // releaseStandalonePodGroupsMinReplicas sets MinReplicas to 0 on the PodGang PodGroups of standalone
-// PodCliques once the PodGang has been scheduled for the first time. The gang-scheduling MinReplicas
+// PodCliques once the PodGang reports it has been scheduled. The gang-scheduling MinReplicas
 // constraint governs only the initial atomic placement of the minimum viable set. Keeping it
 // afterwards would stop the scheduler from placing further standalone replicas independently.
 // PodGroups of PodCliques that belong to a PodCliqueScalingGroup keep their MinReplicas.
@@ -488,12 +488,10 @@ func (r _resource) releaseStandalonePodGroupsMinReplicas(ctx context.Context, ss
 	if err != nil {
 		return err
 	}
-	// LastScheduled is set once the gang first reaches Scheduled True. A non-nil value means the
-	// release already ran on a prior reconcile, so skip without issuing a no-op patch.
-	if pg.Status.LastScheduled != nil {
-		return nil
-	}
-	if !r.arePodGangMinReplicasScheduled(ss, pgi) {
+	// Release only after the PodGang reflects that it has been scheduled. LastScheduled is stamped by
+	// reconcilePodGangStatus once the gang first reaches Scheduled True, so a nil value means the
+	// scheduler has not yet placed the minimum viable set and the constraint must stay.
+	if pg.Status.LastScheduled == nil {
 		return nil
 	}
 	standaloneFQNs := sets.New[string]()
@@ -502,14 +500,18 @@ func (r _resource) releaseStandalonePodGroupsMinReplicas(ctx context.Context, ss
 			standaloneFQNs.Insert(pclq.fqn)
 		}
 	}
-	if standaloneFQNs.Len() == 0 {
-		return nil
-	}
 	patch := client.MergeFromWithOptions(pg.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	released := false
 	for i := range pg.Spec.PodGroups {
-		if standaloneFQNs.Has(pg.Spec.PodGroups[i].Name) {
+		if standaloneFQNs.Has(pg.Spec.PodGroups[i].Name) && pg.Spec.PodGroups[i].MinReplicas != 0 {
 			pg.Spec.PodGroups[i].MinReplicas = 0
+			released = true
 		}
+	}
+	// Every standalone PodGroup already has MinReplicas released, so a settled PodGang does not churn
+	// on every reconcile.
+	if !released {
+		return nil
 	}
 	if err := r.client.Patch(ctx, pg, patch); err != nil {
 		if apierrors.IsConflict(err) {
