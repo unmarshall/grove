@@ -212,6 +212,70 @@ func TestMutateUpdatedReplica(t *testing.T) {
 	}
 }
 
+// TestMutateLastScheduled verifies Status.LastScheduled is stamped on a fresh transition of the
+// PodCliqueScheduled condition to True, is left unchanged while the PodClique stays scheduled, and
+// advances when the PodClique is scheduled again after previously going unscheduled.
+func TestMutateLastScheduled(t *testing.T) {
+	schedCond := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: constants.ConditionTypePodCliqueScheduled, Status: status}}
+	}
+	earlier := metav1.NewTime(time.Now().Add(-time.Hour))
+
+	tests := []struct {
+		name           string
+		originalStatus grovecorev1alpha1.PodCliqueStatus
+		currentStatus  grovecorev1alpha1.PodCliqueStatus
+		wantSet        bool
+		wantAdvanced   bool
+	}{
+		{
+			name:           "not scheduled before or now - stays nil",
+			originalStatus: grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			currentStatus:  grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			wantSet:        false,
+		},
+		{
+			name:           "transitions to scheduled this reconcile - sets LastScheduled",
+			originalStatus: grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			currentStatus:  grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			wantSet:        true,
+			wantAdvanced:   true,
+		},
+		{
+			name:           "stays scheduled - does not change existing LastScheduled",
+			originalStatus: grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			currentStatus:  grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue), LastScheduled: &earlier},
+			wantSet:        true,
+			wantAdvanced:   false,
+		},
+		{
+			name:           "scheduled again after previously going unscheduled - advances LastScheduled",
+			originalStatus: grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			currentStatus:  grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue), LastScheduled: &earlier},
+			wantSet:        true,
+			wantAdvanced:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pclq := &grovecorev1alpha1.PodClique{Status: *tc.currentStatus.DeepCopy()}
+			mutateLastScheduled(pclq, &tc.originalStatus)
+			actual := pclq.Status.LastScheduled
+			if !tc.wantSet {
+				assert.Nil(t, actual)
+				return
+			}
+			require.NotNil(t, actual)
+			if tc.wantAdvanced {
+				assert.True(t, actual.After(earlier.Time), "LastScheduled should be a newer time than the pre-existing value")
+			} else {
+				assert.Equal(t, earlier, *actual, "LastScheduled should be unchanged")
+			}
+		})
+	}
+}
+
 // TestReconcileStatusConvergesWhenReadyPodMatchesDesiredHash covers the live
 // latch where PCLQ metadata and the Ready pod already carry the desired
 // pod-template hash, but Status.CurrentPodTemplateHash is stale and

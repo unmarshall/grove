@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -464,65 +463,9 @@ func (r _resource) createOrUpdatePodGangs(ctx context.Context, ss *syncState) sy
 			result.recordError(err)
 			continue
 		}
-
-		// Release the standalone gang-scheduling MinReplicas constraint only after the status reconcile
-		// above has recorded that the PodGang is scheduled, so the constraint is dropped strictly after
-		// the scheduler places the minimum viable set rather than on partial live pod observation.
-		if err := r.releaseStandalonePodGroupsMinReplicas(ctx, ss, expectedPG); err != nil {
-			ss.logger.Error(err, "failed to release MinReplicas on standalone PodGroups", "PodGangName", expectedPG.fqn)
-			result.recordError(err)
-			continue
-		}
 	}
 
 	return result
-}
-
-// releaseStandalonePodGroupsMinReplicas sets MinReplicas to 0 on the PodGang PodGroups of standalone
-// PodCliques once the PodGang reports it has been scheduled. The gang-scheduling MinReplicas
-// constraint governs only the initial atomic placement of the minimum viable set. Keeping it
-// afterwards would stop the scheduler from placing further standalone replicas independently.
-// PodGroups of PodCliques that belong to a PodCliqueScalingGroup keep their MinReplicas.
-func (r _resource) releaseStandalonePodGroupsMinReplicas(ctx context.Context, ss *syncState, pgi *podGangInfo) error {
-	pg, err := componentutils.GetPodGang(ctx, r.client, pgi.fqn, ss.pcs.Namespace)
-	if err != nil {
-		return err
-	}
-	// Release only after the PodGang reflects that it has been scheduled. LastScheduled is stamped by
-	// reconcilePodGangStatus once the gang first reaches Scheduled True, so a nil value means the
-	// scheduler has not yet placed the minimum viable set and the constraint must stay.
-	if pg.Status.LastScheduled == nil {
-		return nil
-	}
-	standaloneFQNs := sets.New[string]()
-	for _, pclq := range pgi.pclqs {
-		if pclq.isStandalone {
-			standaloneFQNs.Insert(pclq.fqn)
-		}
-	}
-	patch := client.MergeFromWithOptions(pg.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	released := false
-	for i := range pg.Spec.PodGroups {
-		if standaloneFQNs.Has(pg.Spec.PodGroups[i].Name) && pg.Spec.PodGroups[i].MinReplicas != 0 {
-			pg.Spec.PodGroups[i].MinReplicas = 0
-			released = true
-		}
-	}
-	// Every standalone PodGroup already has MinReplicas released, so a settled PodGang does not churn
-	// on every reconcile.
-	if !released {
-		return nil
-	}
-	if err := r.client.Patch(ctx, pg, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			return groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
-				fmt.Sprintf("conflict patching PodGang %s to release standalone MinReplicas from a stale cache, re-queueing", pgi.fqn))
-		}
-		return groveerr.WrapError(err, errCodeReleaseMinReplicas, component.OperationSync,
-			fmt.Sprintf("failed to release MinReplicas on standalone PodGroups of PodGang %s", pgi.fqn))
-	}
-	ss.logger.Info("Released MinReplicas on standalone PodGroups of PodGang", "podGang", pgi.fqn, "standalonePodGroups", standaloneFQNs.UnsortedList())
-	return nil
 }
 
 // reconcilePodGangStatus reconciles the PodGang status from live pods.

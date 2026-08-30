@@ -931,6 +931,10 @@ func (in *PodCliqueStatus) DeepCopyInto(out *PodCliqueStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.LastScheduled != nil {
+		in, out := &in.LastScheduled, &out.LastScheduled
+		*out = (*in).DeepCopy()
+	}
 	if in.Selector != nil {
 		in, out := &in.Selector, &out.Selector
 		*out = new(string)

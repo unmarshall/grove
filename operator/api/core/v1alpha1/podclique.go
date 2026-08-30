@@ -129,6 +129,12 @@ type PodCliqueStatus struct {
 	// ScheduledReplicas is the number of Pods that have been scheduled by the backend scheduler.
 	// +kubebuilder:default=0
 	ScheduledReplicas int32 `json:"scheduledReplicas"`
+	// LastScheduled is the time at which the PodCliqueScheduled condition most recently became True.
+	// It is nil until the PodClique is first scheduled and is never reset to nil once set. If the
+	// PodClique later drops below its scheduled count and is then scheduled again, this advances to
+	// the time of that later transition.
+	// +optional
+	LastScheduled *metav1.Time `json:"lastScheduled,omitempty"`
 	// Selector is the label selector that determines which pods are part of the PodClique.
 	// PodClique is a unit of scale and this selector is used by HPA to scale the PodClique based on metrics captured
 	// for the pods that match this selector.

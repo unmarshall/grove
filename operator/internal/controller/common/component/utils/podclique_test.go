@@ -415,58 +415,24 @@ func TestIsLastPCLQUpdateCompleted(t *testing.T) {
 	}
 }
 
-// TestWasPCLQEverScheduled covers the wasScheduled signal used to gate gang-termination
-// actions. The signal is True if PodCliqueScheduled is currently True, or if it is currently
-// False but its LastTransitionTime is sufficiently after the PCLQ's CreationTimestamp (which
-// means the condition must have flipped at least once since creation — i.e. through True).
+// TestWasPCLQEverScheduled verifies the signal used to gate gang-termination reads the durable
+// Status.LastScheduled marker: set means the PodClique was scheduled at least once, nil means never.
 func TestWasPCLQEverScheduled(t *testing.T) {
-	created := metav1.Now()
-	wellAfterCreate := metav1.NewTime(created.Add(InitialScheduleGrace + time.Second))
-	withinGraceOfCreate := metav1.NewTime(created.Add(time.Millisecond * 100))
-
+	scheduledAt := metav1.Now()
 	tests := []struct {
 		name string
 		pclq *grovecorev1alpha1.PodClique
 		want bool
 	}{
 		{
-			name: "no PodCliqueScheduled condition (fresh, before first reconcile) — never scheduled",
-			pclq: &grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}},
+			name: "LastScheduled nil (never scheduled)",
+			pclq: &grovecorev1alpha1.PodClique{},
 			want: false,
 		},
 		{
-			name: "PodCliqueScheduled=False set near creation — never scheduled",
+			name: "LastScheduled set (scheduled at least once)",
 			pclq: &grovecorev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created},
-				Status: grovecorev1alpha1.PodCliqueStatus{Conditions: []metav1.Condition{{
-					Type:               constants.ConditionTypePodCliqueScheduled,
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: withinGraceOfCreate,
-				}}},
-			},
-			want: false,
-		},
-		{
-			name: "PodCliqueScheduled=True now — currently scheduled",
-			pclq: &grovecorev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created},
-				Status: grovecorev1alpha1.PodCliqueStatus{Conditions: []metav1.Condition{{
-					Type:               constants.ConditionTypePodCliqueScheduled,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: wellAfterCreate,
-				}}},
-			},
-			want: true,
-		},
-		{
-			name: "PodCliqueScheduled=False but flipped well after create — was scheduled, regressed",
-			pclq: &grovecorev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created},
-				Status: grovecorev1alpha1.PodCliqueStatus{Conditions: []metav1.Condition{{
-					Type:               constants.ConditionTypePodCliqueScheduled,
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: wellAfterCreate,
-				}}},
+				Status: grovecorev1alpha1.PodCliqueStatus{LastScheduled: &scheduledAt},
 			},
 			want: true,
 		},
@@ -474,7 +440,8 @@ func TestWasPCLQEverScheduled(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, WasPCLQEverScheduled(tc.pclq))
+			actual := WasPCLQEverScheduled(tc.pclq)
+			assert.Equal(t, tc.want, actual)
 		})
 	}
 }
@@ -545,44 +512,30 @@ func TestWasPCSGEverHealthy(t *testing.T) {
 // have MinAvailableBreached=True but were never PodCliqueScheduled=True are excluded from the
 // candidate list — gang-termination must not fire on them.
 func TestGetMinAvailableBreachedPCLQInfoFiltersNeverScheduled(t *testing.T) {
-	created := metav1.Now()
-	wellAfterCreate := metav1.NewTime(created.Add(InitialScheduleGrace + time.Second))
-	withinGraceOfCreate := metav1.NewTime(created.Add(time.Millisecond * 100))
-
+	scheduledAt := metav1.Now()
 	pclqBreachedNeverScheduled := grovecorev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: "never-scheduled", CreationTimestamp: created},
-		Status: grovecorev1alpha1.PodCliqueStatus{Conditions: []metav1.Condition{
-			{
-				Type:               constants.ConditionTypePodCliqueScheduled,
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: withinGraceOfCreate,
-			},
-			{
-				Type:               constants.ConditionTypeMinAvailableBreached,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: withinGraceOfCreate,
-			},
-		}},
+		ObjectMeta: metav1.ObjectMeta{Name: "never-scheduled"},
+		Status: grovecorev1alpha1.PodCliqueStatus{
+			Conditions: []metav1.Condition{{
+				Type:   constants.ConditionTypeMinAvailableBreached,
+				Status: metav1.ConditionTrue,
+			}},
+		},
 	}
-	pclqBreachedAfterHealthy := grovecorev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: "regressed", CreationTimestamp: created},
-		Status: grovecorev1alpha1.PodCliqueStatus{Conditions: []metav1.Condition{
-			{
-				Type:               constants.ConditionTypePodCliqueScheduled,
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: wellAfterCreate,
-			},
-			{
-				Type:               constants.ConditionTypeMinAvailableBreached,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: wellAfterCreate,
-			},
-		}},
+	pclqBreachedAfterScheduled := grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{Name: "scheduled-once"},
+		Status: grovecorev1alpha1.PodCliqueStatus{
+			LastScheduled: &scheduledAt,
+			Conditions: []metav1.Condition{{
+				Type:   constants.ConditionTypeMinAvailableBreached,
+				Status: metav1.ConditionTrue,
+			}},
+		},
 	}
 
-	pclqs := []grovecorev1alpha1.PodClique{pclqBreachedNeverScheduled, pclqBreachedAfterHealthy}
-	names, _ := GetMinAvailableBreachedPCLQInfo(pclqs, time.Hour, time.Now())
-	assert.Equal(t, []string{"regressed"}, names, "never-scheduled PCLQ must be filtered out")
+	pclqs := []grovecorev1alpha1.PodClique{pclqBreachedNeverScheduled, pclqBreachedAfterScheduled}
+	actual, _ := GetMinAvailableBreachedPCLQInfo(pclqs, time.Hour, time.Now())
+	assert.Equal(t, []string{"scheduled-once"}, actual, "never-scheduled PodClique must be filtered out")
 }
 
 func TestGroupPCLQsByPCSReplicaIndex(t *testing.T) {
