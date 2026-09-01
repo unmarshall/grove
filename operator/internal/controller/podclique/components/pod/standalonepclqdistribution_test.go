@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	configv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
@@ -88,33 +90,97 @@ func TestBuildDesiredCountByPodGang(t *testing.T) {
 	})
 }
 
-// TestComputeCountDeltaByPodGang verifies the per-PodGang delta is desired minus live, positive for
-// creation and negative for deletion, omitting matches and covering PodGangs present only in the live
-// set.
+// TestComputeCountDeltaByPodGang verifies the per-PodGang delta is desired minus the effective pod
+// count (live plus outstanding create expectations minus outstanding delete expectations), positive
+// for creation and negative for deletion, omitting matches and covering PodGangs present only in the
+// live set. The expectation accounting keeps an in-flight create or delete from a prior reconcile,
+// not yet reflected in the informer cache, from being repeated.
 func TestComputeCountDeltaByPodGang(t *testing.T) {
+	pclq := testutils.NewPodCliqueBuilder(testPCSName, "uid", testCliqueName, testNamespace, testPCSReplicaIndex).Build()
+	keyFor := func(podGangName string) string {
+		key, err := componentutils.PodGangScopedExpectationsStoreKey(pclq.ObjectMeta, podGangName)
+		require.NoError(t, err)
+		return key
+	}
+
 	tests := []struct {
-		name     string
-		desired  map[string]int32
-		live     map[string]int32
-		expected map[string]int32
+		name         string
+		desired      map[string]int32
+		livePods     map[string][]*corev1.Pod
+		createExpUID map[string][]types.UID // pending creates per PodGang
+		deleteExpUID map[string][]types.UID // pending deletes per PodGang
+		expected     map[string]int32
 	}{
-		{"deficit needs creation", map[string]int32{"pg-a": 3}, map[string]int32{"pg-a": 1}, map[string]int32{"pg-a": 2}},
-		{"excess needs deletion", map[string]int32{"pg-a": 1}, map[string]int32{"pg-a": 3}, map[string]int32{"pg-a": -2}},
-		{"matching count is omitted", map[string]int32{"pg-a": 2}, map[string]int32{"pg-a": 2}, map[string]int32{}},
-		{"live PodGang absent from desired is fully deleted", map[string]int32{}, map[string]int32{"pg-a": 2}, map[string]int32{"pg-a": -2}},
+		{
+			name:     "deficit needs creation",
+			desired:  map[string]int32{"pg-a": 3},
+			livePods: map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a")}},
+			expected: map[string]int32{"pg-a": 2},
+		},
+		{
+			name:     "excess needs deletion",
+			desired:  map[string]int32{"pg-a": 1},
+			livePods: map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a"), gatedPod("pod-c", "pg-a")}},
+			expected: map[string]int32{"pg-a": -2},
+		},
+		{
+			name:     "matching count is omitted",
+			desired:  map[string]int32{"pg-a": 2},
+			livePods: map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a")}},
+			expected: map[string]int32{},
+		},
+		{
+			name:     "live PodGang absent from desired is fully deleted",
+			desired:  map[string]int32{},
+			livePods: map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a")}},
+			expected: map[string]int32{"pg-a": -2},
+		},
+		{
+			// A pod was created in a prior reconcile but the informer cache has not shown it yet. The
+			// outstanding create expectation covers the deficit, so no duplicate is created.
+			name:         "pending create covers the deficit so no duplicate is created",
+			desired:      map[string]int32{"pg-a": 3},
+			livePods:     map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a")}},
+			createExpUID: map[string][]types.UID{"pg-a": {"pending-create"}},
+			expected:     map[string]int32{},
+		},
+		{
+			// A pod was deleted in a prior reconcile but the cache still shows it live. The outstanding
+			// delete expectation offsets it, so another pod is not deleted.
+			name:         "pending delete offsets the live count so no extra pod is deleted",
+			desired:      map[string]int32{"pg-a": 2},
+			livePods:     map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a"), podWithUID("pod-c", "pg-a", "pending-delete")}},
+			deleteExpUID: map[string][]types.UID{"pg-a": {"pending-delete"}},
+			expected:     map[string]int32{},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := computeCountDeltaByPodGang(tc.desired, tc.live)
+			store := expect.NewExpectationsStore()
+			podsByPodGang := make(map[string]podGangPods, len(tc.livePods))
+			for podGangName, pods := range tc.livePods {
+				podsByPodGang[podGangName] = podGangPods{nonTerminating: pods}
+				if uids := tc.createExpUID[podGangName]; len(uids) > 0 {
+					require.NoError(t, store.ExpectCreations(logr.Discard(), keyFor(podGangName), uids...))
+				}
+				if uids := tc.deleteExpUID[podGangName]; len(uids) > 0 {
+					require.NoError(t, store.ExpectDeletions(logr.Discard(), keyFor(podGangName), uids...))
+				}
+			}
+			r := _resource{expectationsStore: store}
+			ss := &syncSnapshot{pclq: pclq}
+
+			actual, err := r.computeCountDeltaByPodGang(ss, tc.desired, podsByPodGang)
+			require.NoError(t, err)
 			assert.Equal(t, tc.expected, actual)
 		})
 	}
 }
 
-// TestReconcileLabellessPods verifies labelless standalone pods are relabeled to the single anchor
+// TestReconcileUnassignedPods verifies unassigned standalone pods are relabeled to the single anchor
 // PodGang, or deleted when multiple anchors make the target ambiguous, and that a clean set is a
 // no-op.
-func TestReconcileLabellessPods(t *testing.T) {
+func TestReconcileUnassignedPods(t *testing.T) {
 	anchor0 := podGangNameForEpoch(testAnchor0Epoch)
 	anchor1 := podGangNameForEpoch(testAnchor1Epoch)
 
@@ -123,7 +189,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileUnassignedPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
 		require.NoError(t, err)
 		assert.True(t, repaired)
 
@@ -137,7 +203,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileUnassignedPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
 		require.NoError(t, err)
 		assert.True(t, repaired)
 
@@ -145,12 +211,11 @@ func TestReconcileLabellessPods(t *testing.T) {
 		assert.True(t, apierrors.IsNotFound(err), "labelless pod should be deleted")
 	})
 
-	t.Run("no labelless pods is a no-op", func(t *testing.T) {
-		pod := gatedPod("pod-a", anchor0)
-		cl := testutils.NewTestClientBuilder().WithObjects(pod).Build()
+	t.Run("no unassigned pods is a no-op", func(t *testing.T) {
+		cl := testutils.NewTestClientBuilder().Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileUnassignedPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, nil)
 		require.NoError(t, err)
 		assert.False(t, repaired)
 	})
@@ -162,7 +227,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 			Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileUnassignedPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3}, []*corev1.Pod{pod})
 		require.Error(t, err)
 		assert.False(t, repaired)
 	})
@@ -174,7 +239,7 @@ func TestReconcileLabellessPods(t *testing.T) {
 			Build()
 		r := &_resource{client: cl}
 
-		repaired, err := r.reconcileLabellessPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
+		repaired, err := r.reconcileUnassignedPods(context.Background(), logr.Discard(), map[string]int32{anchor0: 3, anchor1: 2}, []*corev1.Pod{pod})
 		require.Error(t, err)
 		assert.False(t, repaired)
 	})
@@ -256,8 +321,7 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
 			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3})),
-			pclqExpectationsStoreKey: testNamespace + "/" + pclq.Name,
-		}
+					}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.NoError(t, err)
@@ -275,8 +339,7 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
 			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
 			existingPCLQPods:         excess,
-			pclqExpectationsStoreKey: testNamespace + "/" + pclq.Name,
-		}
+					}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.NoError(t, err)
@@ -296,73 +359,51 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
 			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
 			existingPCLQPods:         excess,
-			pclqExpectationsStoreKey: testNamespace + "/" + pclq.Name,
-		}
+					}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.Error(t, err)
 	})
 }
 
-// TestPartitionPodsByTermination verifies pods are split into the non-terminating slice and the
-// terminating and non-terminating UID lists in a single pass.
-func TestPartitionPodsByTermination(t *testing.T) {
-	alive := newPod("alive", "uid-alive", false)
-	dying := newPod("dying", "uid-dying", true)
-
-	tests := []struct {
-		name                    string
-		pods                    []*corev1.Pod
-		expectedNonTerminating  []types.UID
-		expectedTerminatingUIDs []types.UID
-	}{
-		{"all pods non-terminating", []*corev1.Pod{alive}, []types.UID{"uid-alive"}, []types.UID{}},
-		{"all pods terminating", []*corev1.Pod{dying}, []types.UID{}, []types.UID{"uid-dying"}},
-		{"mixed pods split by termination", []*corev1.Pod{alive, dying}, []types.UID{"uid-alive"}, []types.UID{"uid-dying"}},
-		{"no pods yields empty lists", nil, []types.UID{}, []types.UID{}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			nonTerminatingPods, terminatingPodUIDs, nonTerminatingPodUIDs := partitionPodsByTermination(tc.pods)
-			assert.Equal(t, tc.expectedNonTerminating, nonTerminatingPodUIDs)
-			assert.Equal(t, tc.expectedTerminatingUIDs, terminatingPodUIDs)
-			assert.Equal(t, tc.expectedNonTerminating, uidsOf(nonTerminatingPods))
-		})
-	}
-}
-
-// TestGroupPodsByPodGang verifies pods are grouped by their grove.io/podgang label and labelless
-// pods are skipped.
+// TestGroupPodsByPodGang verifies pods are grouped by their grove.io/podgang label into their
+// non-terminating and terminating pods, non-terminating pods without the label are returned as
+// unassigned, and terminating pods without the label are ignored.
 func TestGroupPodsByPodGang(t *testing.T) {
-	t.Run("groups pods by their PodGang label", func(t *testing.T) {
-		podsByPodGang := groupPodsByPodGang([]*corev1.Pod{gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a"), gatedPod("pod-c", "pg-b")})
-		assert.ElementsMatch(t, []string{"pod-a", "pod-b"}, podNamesOf(podsByPodGang["pg-a"]))
-		assert.ElementsMatch(t, []string{"pod-c"}, podNamesOf(podsByPodGang["pg-b"]))
+	t.Run("groups labeled pods by PodGang and termination state", func(t *testing.T) {
+		aliveA1 := gatedPod("pod-a1", "pg-a")
+		aliveA2 := gatedPod("pod-a2", "pg-a")
+		dyingA := gatedPod("pod-a3", "pg-a")
+		dyingA.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		aliveB := gatedPod("pod-b1", "pg-b")
+
+		podsByPodGang, unassignedPods := groupPodsByPodGang([]*corev1.Pod{aliveA1, aliveA2, dyingA, aliveB})
+
+		assert.ElementsMatch(t, []string{"pod-a1", "pod-a2"}, podNamesOf(podsByPodGang["pg-a"].nonTerminating))
+		assert.ElementsMatch(t, []string{"pod-a3"}, podNamesOf(podsByPodGang["pg-a"].terminating))
+		assert.ElementsMatch(t, []string{"pod-b1"}, podNamesOf(podsByPodGang["pg-b"].nonTerminating))
+		assert.Empty(t, unassignedPods)
 	})
 
-	t.Run("skips a pod without the PodGang label", func(t *testing.T) {
+	t.Run("returns a non-terminating pod without the label as unassigned", func(t *testing.T) {
 		labelless := testutils.NewPodBuilder("pod-a", testNamespace).Build()
-		podsByPodGang := groupPodsByPodGang([]*corev1.Pod{labelless})
+		podsByPodGang, unassignedPods := groupPodsByPodGang([]*corev1.Pod{labelless})
 		assert.Empty(t, podsByPodGang)
+		assert.ElementsMatch(t, []string{"pod-a"}, podNamesOf(unassignedPods))
 	})
 
-	t.Run("returns an empty map for no pods", func(t *testing.T) {
-		assert.Empty(t, groupPodsByPodGang(nil))
-	})
-}
-
-// TestLiveCountByPodGang verifies grouped pods project to a per-PodGang live count.
-func TestLiveCountByPodGang(t *testing.T) {
-	t.Run("counts the pods in each PodGang group", func(t *testing.T) {
-		podsByPodGang := map[string][]*corev1.Pod{
-			"pg-a": {gatedPod("pod-a", "pg-a"), gatedPod("pod-b", "pg-a")},
-			"pg-b": {gatedPod("pod-c", "pg-b")},
-		}
-		assert.Equal(t, map[string]int32{"pg-a": 2, "pg-b": 1}, liveCountByPodGang(podsByPodGang))
+	t.Run("ignores a terminating pod without the label", func(t *testing.T) {
+		labelless := testutils.NewPodBuilder("pod-a", testNamespace).Build()
+		labelless.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		podsByPodGang, unassignedPods := groupPodsByPodGang([]*corev1.Pod{labelless})
+		assert.Empty(t, podsByPodGang)
+		assert.Empty(t, unassignedPods)
 	})
 
-	t.Run("returns an empty map for no groups", func(t *testing.T) {
-		assert.Empty(t, liveCountByPodGang(nil))
+	t.Run("returns an empty map and no unassigned pods for no pods", func(t *testing.T) {
+		podsByPodGang, unassignedPods := groupPodsByPodGang(nil)
+		assert.Empty(t, podsByPodGang)
+		assert.Empty(t, unassignedPods)
 	})
 }
 
@@ -394,22 +435,22 @@ func TestBuildPerPodGangDeletionTasks(t *testing.T) {
 	t.Run("builds one task per excess pod picking the Pending pod first", func(t *testing.T) {
 		pending := testutils.NewPodBuilder("pod-pending", testNamespace).WithPhase(corev1.PodPending).Build()
 		running := testutils.NewPodBuilder("pod-running", testNamespace).WithPhase(corev1.PodRunning).Build()
-		livePodsByPodGang := map[string][]*corev1.Pod{"pg-a": {running, pending}}
+		podsByPodGang := map[string]podGangPods{"pg-a": {nonTerminating: []*corev1.Pod{running, pending}}}
 
-		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": -1}, []string{"pg-a"}, livePodsByPodGang)
+		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": -1}, []string{"pg-a"}, podsByPodGang)
 
 		require.Len(t, tasks, 1)
 		assert.Contains(t, tasks[0].Name, "pod-pending")
 	})
 
 	t.Run("skips a PodGang whose delta is non-negative", func(t *testing.T) {
-		livePodsByPodGang := map[string][]*corev1.Pod{"pg-a": {gatedPod("pod-a", "pg-a")}}
-		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": 0}, []string{"pg-a"}, livePodsByPodGang)
+		podsByPodGang := map[string]podGangPods{"pg-a": {nonTerminating: []*corev1.Pod{gatedPod("pod-a", "pg-a")}}}
+		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": 0}, []string{"pg-a"}, podsByPodGang)
 		assert.Empty(t, tasks)
 	})
 
 	t.Run("skips a PodGang with no live pods", func(t *testing.T) {
-		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": -2}, []string{"pg-a"}, map[string][]*corev1.Pod{})
+		tasks := r.buildPerPodGangDeletionTasks(logr.Discard(), ss, map[string]int32{"pg-a": -2}, []string{"pg-a"}, map[string]podGangPods{})
 		assert.Empty(t, tasks)
 	})
 }
@@ -464,27 +505,16 @@ func listPodsForPodGang(t *testing.T, cl client.Client, podGangName string) []co
 	return matching
 }
 
-// newPod returns a pod carrying the given UID, optionally marked for termination.
-func newPod(name string, uid types.UID, terminating bool) *corev1.Pod {
-	builder := testutils.NewPodBuilder(name, testNamespace)
-	if terminating {
-		builder = builder.MarkForTermination()
-	}
-	pod := builder.Build()
-	pod.UID = uid
-	return pod
-}
-
-// uidsOf returns the UIDs of the given pods.
-func uidsOf(pods []*corev1.Pod) []types.UID {
-	return lo.Map(pods, func(pod *corev1.Pod, _ int) types.UID {
-		return pod.GetUID()
-	})
-}
-
 // podNamesOf returns the names of the given pods.
 func podNamesOf(pods []*corev1.Pod) []string {
 	return lo.Map(pods, func(pod *corev1.Pod, _ int) string {
 		return pod.GetName()
 	})
+}
+
+// podWithUID builds a scheduling-gated pod labeled for podGangName and carrying the given UID.
+func podWithUID(name, podGangName string, uid types.UID) *corev1.Pod {
+	pod := gatedPod(name, podGangName)
+	pod.UID = uid
+	return pod
 }

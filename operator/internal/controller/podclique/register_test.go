@@ -17,8 +17,9 @@ package podclique
 import (
 	"testing"
 
-	"github.com/ai-dynamo/grove/operator/api/common"
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
@@ -44,23 +45,28 @@ func TestControllerConstants(t *testing.T) {
 // The predicate must call ObserveDeletions so the pod's UID is removed from create expectations (uidsToAdd),
 // allowing the controller to recreate the pod on the next reconcile instead of treating it as "informer slow".
 func TestPodPredicate_Delete(t *testing.T) {
-	const ns, pclqName, podName = "default", "pclq-1", "pclq-1-0"
-	pclqKey, err := expect.ControlleeKeyFunc(&grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: pclqName}})
+	const ns, pclqName, podName, podGangName = "default", "pclq-1", "pclq-1-0", "pclq-1-pg-0"
+	pclqObjMeta := metav1.ObjectMeta{Namespace: ns, Name: pclqName}
+	// The observer records and lowers expectations under the pod's PodGang-scoped key.
+	expectationsKey, err := componentutils.PodGangScopedExpectationsStoreKey(pclqObjMeta, podGangName)
 	require.NoError(t, err)
 
 	t.Run("managed pod with PodClique owner: ObserveDeletions removes UID from create expectations so pod can be recreated", func(t *testing.T) {
 		store := expect.NewExpectationsStore()
 		podUID := types.UID("pod-deleted-manually")
-		require.NoError(t, store.ExpectCreations(logr.Discard(), pclqKey, podUID))
+		require.NoError(t, store.ExpectCreations(logr.Discard(), expectationsKey, podUID))
 
-		createExpectations := store.GetCreateExpectations(pclqKey)
+		createExpectations := store.GetCreateExpectations(expectationsKey)
 		require.Contains(t, createExpectations, podUID, "setup: create expectation should contain pod UID")
 
 		r := &Reconciler{expectationsStore: store}
 		pred := r.podPredicate()
 		pod := testutils.NewPodBuilder(podName, ns).
 			WithOwner(pclqName).
-			WithLabels(map[string]string{common.LabelManagedByKey: common.LabelManagedByValue}).
+			WithLabels(map[string]string{
+				apicommon.LabelManagedByKey: apicommon.LabelManagedByValue,
+				apicommon.LabelPodGang:      podGangName,
+			}).
 			Build()
 		pod.UID = podUID
 
@@ -68,7 +74,7 @@ func TestPodPredicate_Delete(t *testing.T) {
 		require.True(t, ok, "predicate must be predicate.Funcs")
 		result := funcs.DeleteFunc(event.DeleteEvent{Object: pod})
 
-		createExpectationsAfter := store.GetCreateExpectations(pclqKey)
+		createExpectationsAfter := store.GetCreateExpectations(expectationsKey)
 		assert.NotContains(t, createExpectationsAfter, podUID,
 			"ObserveDeletions should remove the deleted pod UID from uidsToAdd so next reconcile can recreate the pod")
 		assert.True(t, result, "predicate should allow the event so the handler enqueues reconcile")
@@ -88,7 +94,7 @@ func TestPodPredicateUpdate(t *testing.T) {
 	managedPod := func(conds ...corev1.PodCondition) *corev1.Pod {
 		b := testutils.NewPodBuilder(podName, ns).
 			WithOwner(pclqName).
-			WithLabels(map[string]string{common.LabelManagedByKey: common.LabelManagedByValue})
+			WithLabels(map[string]string{apicommon.LabelManagedByKey: apicommon.LabelManagedByValue})
 		for _, c := range conds {
 			b = b.WithCondition(c)
 		}

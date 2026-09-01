@@ -26,7 +26,6 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
-	"github.com/ai-dynamo/grove/operator/internal/expect"
 	"github.com/ai-dynamo/grove/operator/internal/index"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
@@ -37,7 +36,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -68,12 +66,6 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pclq
 			component.OperationSync,
 			fmt.Sprintf("failed to compute pod clique template hash for PodClique: %v in PodCliqueSet", pclqObjectKey),
 		)
-	}
-
-	// get the PCLQ expectations key
-	ss.pclqExpectationsStoreKey, err = getPodCliqueExpectationsStoreKey(logger, component.OperationSync, pclq.ObjectMeta)
-	if err != nil {
-		return nil, err
 	}
 
 	ss.cliqueName, err = utils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
@@ -212,20 +204,20 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 			return result
 		}
 
-		// A PodCliqueScalingGroup-owned PodClique belongs to a single PodGang, so a scalar diff drives
-		// creation and deletion.
-		diff := r.syncExpectationsAndComputeDifference(logger, ss)
-		if diff < 0 {
-			logger.Info("found fewer pods than desired", "pclq.spec.replicas", ss.pclq.Spec.Replicas, "delta", diff)
-			diff *= -1
-			numScheduleGatedPods, err := r.createPods(ctx, logger, ss, diff)
+		// A PodCliqueScalingGroup-owned PodClique belongs to a single PodGang, so a scalar delta drives
+		// creation and deletion. A positive delta creates pods, a negative delta deletes them.
+		delta, err := r.computePodCountDelta(ss)
+		if err != nil {
+			result.recordError(err)
+		} else if delta > 0 {
+			numScheduleGatedPods, err := r.createPods(ctx, logger, ss, delta)
 			if err != nil {
 				logger.Error(err, "failed to create pods")
 				result.recordError(err)
 			}
 			logger.Info("created unassigned and scheduled gated pods", "numberOfCreatedPods", numScheduleGatedPods)
-		} else if diff > 0 {
-			if err := r.deleteExcessPods(ctx, logger, ss, diff); err != nil {
+		} else if delta < 0 {
+			if err := r.deleteExcessPods(ctx, logger, ss, -delta); err != nil {
 				result.recordError(err)
 			}
 		}
@@ -245,38 +237,18 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 	return result
 }
 
-// syncExpectationsAndComputeDifference reconciles create/delete expectations with actual pod state and computes the replica difference
-// It takes in the existing pods and adjusts the captured create/delete expectations in the ExpectationStore. Post synchronization
-// it computes the difference of pods using => as-is-pods + pods-expecting-creation - desired-pods - pods-expecting-deletion
-func (r _resource) syncExpectationsAndComputeDifference(logger logr.Logger, ss *syncSnapshot) int {
-	terminatingPodUIDs, nonTerminatingPodUIDs := getTerminatingAndNonTerminatingPodUIDs(ss.existingPCLQPods)
-	r.expectationsStore.SyncExpectations(ss.pclqExpectationsStoreKey, nonTerminatingPodUIDs, terminatingPodUIDs)
-	createExpectations := r.expectationsStore.GetCreateExpectations(ss.pclqExpectationsStoreKey)
-	deleteExpectations := r.expectationsStore.GetDeleteExpectations(ss.pclqExpectationsStoreKey)
-	diff := len(ss.existingPCLQPods) + len(createExpectations) - int(ss.pclq.Spec.Replicas) - len(deleteExpectations)
-
-	logger.V(4).Info("synced expectations",
-		"pclq.spec.replicas", ss.pclq.Spec.Replicas,
-		"existingPCLPodNames", lo.Map(ss.existingPCLQPods, func(pod *corev1.Pod, _ int) string { return pod.Name }),
-		"createExpectations", createExpectations,
-		"deleteExpectations", deleteExpectations,
-		"diff", diff,
-	)
-	return diff
-}
-
-// getTerminatingAndNonTerminatingPodUIDs categorizes pod UIDs based on termination status
-func getTerminatingAndNonTerminatingPodUIDs(existingPCLQPods []*corev1.Pod) (terminatingUIDs, nonTerminatingUIDs []types.UID) {
-	nonTerminatingUIDs = make([]types.UID, 0, len(existingPCLQPods))
-	terminatingUIDs = make([]types.UID, 0, len(existingPCLQPods))
-	for _, pod := range existingPCLQPods {
-		if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
-			terminatingUIDs = append(terminatingUIDs, pod.GetUID())
-		} else {
-			nonTerminatingUIDs = append(nonTerminatingUIDs, pod.GetUID())
-		}
+// computePodCountDelta returns desired minus the live pod count reconciled with expectations for a
+// PodCliqueScalingGroup-owned PodClique, which belongs to a single PodGang. Reconciling with
+// outstanding create and delete expectations keeps an operation from a prior reconcile, not yet
+// reflected in the informer cache, from being repeated. A positive value is pods to create, a
+// negative value is pods to delete.
+func (r _resource) computePodCountDelta(ss *syncSnapshot) (int, error) {
+	podsByPodGang, _ := groupPodsByPodGang(ss.existingPCLQPods)
+	reconciledCount, err := r.reconcileLivePodCountWithExpectations(ss.pclq.ObjectMeta, ss.pcsgReplicaPodGangName, podsByPodGang[ss.pcsgReplicaPodGangName])
+	if err != nil {
+		return 0, err
 	}
-	return
+	return int(ss.pclq.Spec.Replicas) - int(reconciledCount), nil
 }
 
 // deleteExcessPods deletes `diff` number of excess Pods from this PodClique concurrently.
@@ -290,7 +262,7 @@ func (r _resource) deleteExcessPods(ctx context.Context, logger logr.Logger, ss 
 
 	deleteTasks := make([]utils.Task, 0, len(selectedPodsToDelete))
 	for _, podToDelete := range selectedPodsToDelete {
-		deleteTasks = append(deleteTasks, r.createPodDeletionTask(logger, ss.pclq, podToDelete, ss.pclqExpectationsStoreKey))
+		deleteTasks = append(deleteTasks, r.createPodDeletionTask(logger, ss.pclq, podToDelete))
 	}
 
 	if runResult := utils.RunConcurrentlyWithSlowStart(ctx, logger, 1, deleteTasks); runResult.HasErrors() {
@@ -545,12 +517,18 @@ func (r _resource) createPods(ctx context.Context, logger logr.Logger, ss *syncS
 			fmt.Sprintf("error getting available indices for Pods in PodClique %v", client.ObjectKeyFromObject(ss.pclq)),
 		)
 	}
+	// A PodCliqueScalingGroup-owned PodClique belongs to a single PodGang, so every created pod
+	// records its create expectation under that PodGang's scoped key.
+	expectationsKey, err := componentutils.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, ss.pcsgReplicaPodGangName)
+	if err != nil {
+		return 0, err
+	}
 	createTasks := make([]utils.Task, 0, numPods)
 	for i := range numPods {
 		// Get the available Pod host name index. This ensures that we fill the holes in the indices if there are any when creating
 		// new pods.
 		podHostNameIndex := availableIndices[i]
-		createTasks = append(createTasks, r.createPodCreationTask(logger, ss.pcs, ss.pclq, ss.pcsgReplicaPodGangName, ss.pclqExpectationsStoreKey, i, podHostNameIndex))
+		createTasks = append(createTasks, r.createPodCreationTask(logger, ss.pcs, ss.pclq, ss.pcsgReplicaPodGangName, expectationsKey, i, podHostNameIndex))
 	}
 	runResult := utils.RunConcurrentlyWithSlowStart(ctx, logger, 1, createTasks)
 	if runResult.HasErrors() {
@@ -574,7 +552,6 @@ type syncSnapshot struct {
 	cliqueName               string
 	pcsgReplicaPodGangName   string
 	existingPCLQPods         []*corev1.Pod
-	pclqExpectationsStoreKey string
 	expectedPodTemplateHash  string
 }
 
@@ -609,19 +586,4 @@ func (sfr *syncFlowResult) recordPendingScheduleGatedPods(podNames []string) {
 // hasErrors returns true if any errors occurred during the sync flow
 func (sfr *syncFlowResult) hasErrors() bool {
 	return len(sfr.errs) > 0
-}
-
-// getPodCliqueExpectationsStoreKey creates the PodClique key against which expectations will be stored in the ExpectationStore.
-func getPodCliqueExpectationsStoreKey(logger logr.Logger, operation string, pclqObjMeta metav1.ObjectMeta) (string, error) {
-	pclqObjKey := k8sutils.GetObjectKeyFromObjectMeta(pclqObjMeta)
-	pclqExpStoreKey, err := expect.ControlleeKeyFunc(&grovecorev1alpha1.PodClique{ObjectMeta: pclqObjMeta})
-	if err != nil {
-		logger.Error(err, "failed to construct expectations store key", "pclq", pclqObjKey)
-		return "", groveerr.WrapError(err,
-			errCodeCreatePodCliqueExpectationsStoreKey,
-			operation,
-			fmt.Sprintf("failed to construct expectations store key for PodClique %v", pclqObjKey),
-		)
-	}
-	return pclqExpStoreKey, nil
 }

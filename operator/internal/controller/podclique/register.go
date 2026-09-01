@@ -18,11 +18,11 @@ import (
 	"context"
 	"strings"
 
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	grovectrlutils "github.com/ai-dynamo/grove/operator/internal/controller/utils"
-	"github.com/ai-dynamo/grove/operator/internal/expect"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
@@ -125,14 +125,17 @@ func (r *Reconciler) recordPodDeletionInExpectations(pod *corev1.Pod) {
 	if pclqOwnerRef == nil {
 		return // nothing to do
 	}
-	pclqObjMeta := metav1.ObjectMeta{Namespace: pod.Namespace, Name: pclqOwnerRef.Name}
-	controlleeKey, err := expect.ControlleeKeyFunc(&grovecorev1alpha1.PodClique{ObjectMeta: pclqObjMeta})
 	logger := ctrllogger.Log.WithName(controllerName)
-	if err != nil {
-		logger.Error(err, "cannot observe deletion, unable to get controllee key from the expectations store", "pclqNamespace", pclqObjMeta.Namespace, "pclqName", pclqObjMeta.Name)
+	podGangName, ok := pod.Labels[apicommon.LabelPodGang]
+	if !ok {
+		// A pod not yet labeled for a PodGang has no PodGang-scoped delete expectation recorded, so
+		// there is nothing to lower.
 		return
 	}
-	r.expectationsStore.ObserveDeletions(logger, controlleeKey, pod.UID)
+	pclqObjMeta := metav1.ObjectMeta{Namespace: pod.Namespace, Name: pclqOwnerRef.Name}
+	if err := componentutils.ObservePodDeletion(logger, r.expectationsStore, pclqObjMeta, podGangName, pod.UID); err != nil {
+		logger.Error(err, "cannot observe deletion, unable to build the PodGang-scoped expectations key", "pclqNamespace", pclqObjMeta.Namespace, "pclqName", pclqObjMeta.Name, "podGang", podGangName)
+	}
 }
 
 // hasPodSpecChanged checks if the Pod's spec has changed by comparing generation values

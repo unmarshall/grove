@@ -22,6 +22,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
@@ -353,6 +354,7 @@ func TestRemovePodGangSchedulingGate(t *testing.T) {
 func TestSelectExcessPodsToDelete_ExcludesPodsAlreadyBeingDeleted(t *testing.T) {
 	createdAt := metav1.NewTime(time.Now())
 	const templateHash = "hash-1"
+	const podGangName = "pclq-1-pg-0"
 
 	newPod := func(name string, terminating bool) *corev1.Pod {
 		pod := &corev1.Pod{
@@ -360,7 +362,7 @@ func TestSelectExcessPodsToDelete_ExcludesPodsAlreadyBeingDeleted(t *testing.T) 
 				Name:              name,
 				UID:               types.UID("uid-" + name),
 				CreationTimestamp: createdAt,
-				Labels:            map[string]string{apicommon.LabelPodTemplateHash: templateHash},
+				Labels:            map[string]string{apicommon.LabelPodTemplateHash: templateHash, apicommon.LabelPodGang: podGangName},
 			},
 			Spec: corev1.PodSpec{NodeName: "node-a"},
 			Status: corev1.PodStatus{
@@ -422,7 +424,7 @@ func TestSelectExcessPodsToDelete_ExcludesPodsAlreadyBeingDeleted(t *testing.T) 
 				ObjectMeta: metav1.ObjectMeta{Name: "pclq-1", Namespace: testNamespace},
 				Spec:       grovecorev1alpha1.PodCliqueSpec{Replicas: tt.replicas},
 			}
-			key, err := getPodCliqueExpectationsStoreKey(logr.Discard(), "sync", pclq.ObjectMeta)
+			key, err := componentutils.PodGangScopedExpectationsStoreKey(pclq.ObjectMeta, podGangName)
 			require.NoError(t, err)
 
 			var pods []*corev1.Pod
@@ -439,9 +441,8 @@ func TestSelectExcessPodsToDelete_ExcludesPodsAlreadyBeingDeleted(t *testing.T) 
 			}
 
 			sc := &syncSnapshot{
-				pclq:                     pclq,
-				existingPCLQPods:         pods,
-				pclqExpectationsStoreKey: key,
+				pclq:             pclq,
+				existingPCLQPods: pods,
 			}
 
 			selected := r.selectExcessPodsToDelete(sc, logr.Discard())
