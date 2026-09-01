@@ -52,8 +52,8 @@ func ListPodGangMapsForPCS(ctx context.Context, cl client.Client, pcsObjectKey c
 
 // PodGangMapByPCSReplicaIndex groups PodGangMaps by their PCS replica index.
 // A PodCliqueSetReplicaIndex label that is missing or not a valid integer is a contract violation and returns an error.
-func PodGangMapByPCSReplicaIndex(pgms []grovecorev1alpha1.PodGangMap) (map[int]grovecorev1alpha1.PodGangMap, error) {
-	pgmByReplicaIndex := make(map[int]grovecorev1alpha1.PodGangMap, len(pgms))
+func PodGangMapByPCSReplicaIndex(pgms []grovecorev1alpha1.PodGangMap) (map[int]*grovecorev1alpha1.PodGangMap, error) {
+	pgmByReplicaIndex := make(map[int]*grovecorev1alpha1.PodGangMap, len(pgms))
 	for i := range pgms {
 		labelValue, ok := pgms[i].Labels[apicommon.LabelPodCliqueSetReplicaIndex]
 		if !ok {
@@ -63,7 +63,7 @@ func PodGangMapByPCSReplicaIndex(pgms []grovecorev1alpha1.PodGangMap) (map[int]g
 		if err != nil {
 			return nil, fmt.Errorf("%s label on PodGangMap %s is not a valid integer: %q", apicommon.LabelPodCliqueSetReplicaIndex, pgms[i].Name, labelValue)
 		}
-		pgmByReplicaIndex[pcsReplicaIndex] = pgms[i]
+		pgmByReplicaIndex[pcsReplicaIndex] = &pgms[i]
 	}
 	return pgmByReplicaIndex, nil
 }

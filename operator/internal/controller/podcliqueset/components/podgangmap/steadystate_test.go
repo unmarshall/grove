@@ -15,7 +15,6 @@
 package podgangmap
 
 import (
-	"strconv"
 	"testing"
 	"time"
 
@@ -66,17 +65,11 @@ func TestBuildBootstrapEntries(t *testing.T) {
 				WithScalingGroupConfig(testPCSGName, []string{"c"}, 2, 2).
 				WithPodCliqueSetGenerationHash(ptr.To(testGenHash)).
 				Build(),
-			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
-				grovecorev1alpha1.PodGangEntryRoleAnchor,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
-			},
+			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{grovecorev1alpha1.PodGangEntryRoleAnchor},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
 				assert.Empty(t, anchor.PodCliques)
 				assert.Equal(t, []int32{0, 1}, anchor.PCSGReplicaIndices[testPCSGName])
-				scaleOut := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleScaleOut)
-				assert.Empty(t, scaleOut.PCSGReplicaIndices[testPCSGName])
-				assert.Equal(t, []string{anchor.Epoch}, scaleOut.DependsOn)
 			},
 		},
 		{
@@ -88,7 +81,6 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
 				grovecorev1alpha1.PodGangEntryRoleAnchor,
 				grovecorev1alpha1.PodGangEntryRoleTail,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
 			},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
@@ -109,7 +101,6 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
 				grovecorev1alpha1.PodGangEntryRoleAnchor,
 				grovecorev1alpha1.PodGangEntryRoleTail,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
 			},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
@@ -147,7 +138,6 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
 				grovecorev1alpha1.PodGangEntryRoleAnchor,
 				grovecorev1alpha1.PodGangEntryRoleTail,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
 			},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
@@ -168,7 +158,6 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
 				grovecorev1alpha1.PodGangEntryRoleAnchor,
 				grovecorev1alpha1.PodGangEntryRoleTail,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
 			},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
@@ -191,11 +180,10 @@ func TestBuildBootstrapEntries(t *testing.T) {
 			expectedRoles: []grovecorev1alpha1.PodGangEntryRole{
 				grovecorev1alpha1.PodGangEntryRoleAnchor,
 				grovecorev1alpha1.PodGangEntryRoleTail,
-				grovecorev1alpha1.PodGangEntryRoleScaleOut,
 			},
 			assertEntries: func(t *testing.T, entries []grovecorev1alpha1.PodGangEntry) {
 				// No anchor PodGang to reuse, so all epochs are assigned from the clock and the orphan
-				// tail epoch is ignored. anchor < tail < scaleOut holds.
+				// tail epoch is ignored. anchor < tail holds.
 				anchor := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
 				tail := testutils.EntryByRole(entries, grovecorev1alpha1.PodGangEntryRoleTail)
 				assert.NotEqual(t, "600", tail.Epoch)
@@ -222,7 +210,7 @@ func TestBuildBootstrapEntries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clk := clocktesting.NewFakeClock(time.Unix(0, 1000))
-			actual := buildBootstrapEntries(tt.pcs, clk, tt.existingPodGangs)
+			actual, _ := buildBootstrapEntries(clk, tt.pcs, tt.existingPodGangs)
 			assert.Equal(t, tt.expectedRoles, testutils.RolesOf(actual))
 			tt.assertEntries(t, actual)
 		})
@@ -287,8 +275,6 @@ func TestEpochByRoleFromPodGangs(t *testing.T) {
 }
 
 func TestSyncEntries(t *testing.T) {
-	scaleOutEpoch := strconv.FormatInt(time.Unix(0, 5000).UnixNano(), 10)
-
 	tests := []struct {
 		name            string
 		pcs             *grovecorev1alpha1.PodCliqueSet
@@ -385,7 +371,9 @@ func TestSyncEntries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual, err := reconcileEntries(tt.pcs, tt.existingEntries, tt.standalonePCLQs, tt.pcsgs, 0, scaleOutEpoch)
+			clk := clocktesting.NewFakeClock(time.Unix(0, 5000))
+			pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: tt.existingEntries}}
+			actual, err := reconcileEntries(clk, tt.pcs, 0, pgm, nil, tt.standalonePCLQs, tt.pcsgs)
 			require.NoError(t, err)
 			tt.assertResult(t, actual)
 		})

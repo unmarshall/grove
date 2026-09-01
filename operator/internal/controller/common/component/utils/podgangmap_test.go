@@ -121,7 +121,7 @@ func pgmNames(pgms []grovecorev1alpha1.PodGangMap) []string {
 	return names
 }
 
-func indicesOf(byIndex map[int]grovecorev1alpha1.PodGangMap) []int {
+func indicesOf(byIndex map[int]*grovecorev1alpha1.PodGangMap) []int {
 	idx := make([]int, 0, len(byIndex))
 	for i := range byIndex {
 		idx = append(idx, i)

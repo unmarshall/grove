@@ -82,7 +82,7 @@ func TestSyncReusesEpochFromExistingPodGangsWhenPodGangMapIsMissing(t *testing.T
 		Build()
 
 	// The PodGangMap for replica 0 is gone, but its anchor PodGang still carries the epoch its pods use.
-	anchorPodGang := podGangForReplica(t, "pcs-0-1500", "pcs", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
+	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
 
 	cl := testutils.CreateDefaultFakeClient([]client.Object{pcs, anchorPodGang})
 	// A clock at 9999 would assign a different epoch, so reusing 1500 proves the epoch came from the PodGang.
@@ -94,6 +94,88 @@ func TestSyncReusesEpochFromExistingPodGangsWhenPodGangMapIsMissing(t *testing.T
 	pgm := getPodGangMap(t, cl, "pcs-0")
 	anchor := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
 	assert.Equal(t, "1500", anchor.Epoch)
+}
+
+func TestSyncReconstructsScaledOutPCSGWhenPodGangMapIsMissing(t *testing.T) {
+	// A PCSG scaled out to 2 while its PodGangMap was deleted. Reconstruction must reflect the live
+	// PCSG replica count, not the template count of 1, so the scaled-out replica keeps a PodGang.
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithReplicas(1).
+		WithScalingGroupConfig("sg", []string{"c"}, 1, 1).
+		WithPodCliqueSetGenerationHash(ptr.To("hash1")).
+		Build()
+	pcsg := testutils.NewPodCliqueScalingGroupBuilder("pcs-0-sg", "default", "pcs", 0).
+		WithReplicas(2).
+		Build()
+	// The PodGangMap is gone, but the anchor and scale-out PodGangs still carry their epochs.
+	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
+	scaleOutPodGang := podGangForReplica(t, "pcs-0-1502-sg-1", 0, "1502", grovecorev1alpha1.PodGangEntryRoleScaleOut)
+
+	cl := testutils.CreateDefaultFakeClient([]client.Object{pcs, pcsg, anchorPodGang, scaleOutPodGang})
+	operator := New(cl, groveclientscheme.Scheme, clocktesting.NewFakeClock(time.Unix(0, 9999)))
+
+	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	require.NoError(t, err)
+
+	pgm := getPodGangMap(t, cl, "pcs-0")
+	anchor := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
+	assert.Equal(t, []int32{0}, anchor.PCSGReplicaIndices["sg"])
+	scaleOut := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleScaleOut)
+	assert.Equal(t, []int32{1}, scaleOut.PCSGReplicaIndices["sg"])
+	// The scale-out epoch is reused from the existing scale-out PodGang, not minted from the clock.
+	assert.Equal(t, "1502", scaleOut.Epoch)
+}
+
+func TestSyncReconstructsScaledOutPCSGWithoutExistingScaleOutPodGang(t *testing.T) {
+	// A PCSG scaled out to 2 while its PodGangMap was deleted, and the scale-out PodGang was never
+	// materialized (only the anchor exists). Reconstruction must still place index 1 in the ScaleOut
+	// entry. This exercises the ordering that ensures the ScaleOut entry exists before the PCSG index
+	// diff runs, so the scaled-out index has a place to land.
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithReplicas(1).
+		WithScalingGroupConfig("sg", []string{"c"}, 1, 1).
+		WithPodCliqueSetGenerationHash(ptr.To("hash1")).
+		Build()
+	pcsg := testutils.NewPodCliqueScalingGroupBuilder("pcs-0-sg", "default", "pcs", 0).
+		WithReplicas(2).
+		Build()
+	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
+
+	cl := testutils.CreateDefaultFakeClient([]client.Object{pcs, pcsg, anchorPodGang})
+	operator := New(cl, groveclientscheme.Scheme, clocktesting.NewFakeClock(time.Unix(0, 9999)))
+
+	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	require.NoError(t, err)
+
+	pgm := getPodGangMap(t, cl, "pcs-0")
+	anchor := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
+	assert.Equal(t, []int32{0}, anchor.PCSGReplicaIndices["sg"])
+	scaleOut := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleScaleOut)
+	assert.Equal(t, []int32{1}, scaleOut.PCSGReplicaIndices["sg"])
+}
+
+func TestSyncReconstructsScaledStandalonePCLQWhenPodGangMapIsMissing(t *testing.T) {
+	// A standalone PodClique scaled to 4 while its PodGangMap was deleted. Reconstruction must reflect
+	// the live PodClique replica count, not the template count of 1.
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithReplicas(1).
+		WithStandaloneCliqueReplicas("clq-a", 1).
+		WithPodCliqueSetGenerationHash(ptr.To("hash1")).
+		Build()
+	pclq := testutils.NewPodCliqueBuilder("pcs", types.UID("uid"), "clq-a", "default", 0).
+		WithReplicas(4).
+		Build()
+	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
+
+	cl := testutils.CreateDefaultFakeClient([]client.Object{pcs, pclq, anchorPodGang})
+	operator := New(cl, groveclientscheme.Scheme, clocktesting.NewFakeClock(time.Unix(0, 9999)))
+
+	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	require.NoError(t, err)
+
+	pgm := getPodGangMap(t, cl, "pcs-0")
+	anchor := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
+	assert.Equal(t, int32(4), anchor.PodCliques["clq-a"])
 }
 
 func TestSyncIgnoresLegacyPodGangsWithoutEpochLabelWhenPodGangMapIsMissing(t *testing.T) {
@@ -230,17 +312,19 @@ func oldHashPodGangMap(pcsName, namespace string, replicaIndex int) *grovecorev1
 // podGangForReplica builds a PodGang for a PCS replica carrying the labels the PodGangMap component
 // selects, groups, and reads epochs on: the PodGang selector labels, the replica index, the epoch, and
 // the role.
-func podGangForReplica(t *testing.T, name, pcsName string, replicaIndex int, epoch string, role grovecorev1alpha1.PodGangEntryRole) *groveschedulerv1alpha1.PodGang {
+//
+//nolint:unparam // replicaIndex is a genuine label dimension; current tests only need replica 0.
+func podGangForReplica(t *testing.T, name string, replicaIndex int, epoch string, role grovecorev1alpha1.PodGangEntryRole) *groveschedulerv1alpha1.PodGang {
 	t.Helper()
 	labels := lo.Assign(
-		componentutils.GetPodGangSelectorLabels(metav1.ObjectMeta{Name: pcsName}),
+		componentutils.GetPodGangSelectorLabels(metav1.ObjectMeta{Name: testPCSName}),
 		map[string]string{
 			apicommon.LabelPodCliqueSetReplicaIndex: strconv.Itoa(replicaIndex),
 			apicommon.LabelEpoch:                    epoch,
 			apicommon.LabelPodGangRole:              string(role),
 		},
 	)
-	return testutils.NewPodGangBuilder(name, "default").WithLabels(labels).Build()
+	return testutils.NewPodGangBuilder(name, testNamespace).WithLabels(labels).Build()
 }
 
 func getPodGangMap(t *testing.T, cl client.Client, name string) *grovecorev1alpha1.PodGangMap {
