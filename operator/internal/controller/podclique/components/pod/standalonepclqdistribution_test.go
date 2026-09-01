@@ -320,8 +320,8 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3})),
-					}
+			pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3})),
+		}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.NoError(t, err)
@@ -337,9 +337,9 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
-			existingPCLQPods:         excess,
-					}
+			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+			existingPCLQPods: excess,
+		}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.NoError(t, err)
@@ -357,9 +357,9 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm:                      pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
-			existingPCLQPods:         excess,
-					}
+			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+			existingPCLQPods: excess,
+		}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
 		require.Error(t, err)

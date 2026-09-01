@@ -544,15 +544,15 @@ func (r _resource) createPods(ctx context.Context, logger logr.Logger, ss *syncS
 
 // syncSnapshot holds the relevant state required during the sync flow run.
 type syncSnapshot struct {
-	pcs                      *grovecorev1alpha1.PodCliqueSet
-	pclq                     *grovecorev1alpha1.PodClique
-	pcsReplicaIndex          int
-	pgm                      *grovecorev1alpha1.PodGangMap
-	isStandalonePCLQ         bool
-	cliqueName               string
-	pcsgReplicaPodGangName   string
-	existingPCLQPods         []*corev1.Pod
-	expectedPodTemplateHash  string
+	pcs                     *grovecorev1alpha1.PodCliqueSet
+	pclq                    *grovecorev1alpha1.PodClique
+	pcsReplicaIndex         int
+	pgm                     *grovecorev1alpha1.PodGangMap
+	isStandalonePCLQ        bool
+	cliqueName              string
+	pcsgReplicaPodGangName  string
+	existingPCLQPods        []*corev1.Pod
+	expectedPodTemplateHash string
 }
 
 // syncFlowResult captures the result of a sync flow run.
