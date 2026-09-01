@@ -280,13 +280,16 @@ func mutatePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) {
 }
 
 // mutateLastScheduled advances Status.LastScheduled to now when the PodCliqueScheduled condition
-// transitions to True in this reconcile. It compares the condition before the mutators ran against
-// the condition now, so it re-stamps only on a fresh transition to True and not on every reconcile
-// while the PodClique stays scheduled. It is never reset to nil once set.
+// transitions to True in this reconcile, and backfills it when the PodClique is already scheduled
+// but has no LastScheduled yet. The backfill covers a PodClique upgraded from a version that
+// predates LastScheduled, whose PodCliqueScheduled is already True so no fresh transition occurs.
+// It is never reset to nil once set.
 func mutateLastScheduled(pclq *grovecorev1alpha1.PodClique, originalStatus *grovecorev1alpha1.PodCliqueStatus) {
 	scheduledNow := meta.IsStatusConditionTrue(pclq.Status.Conditions, constants.ConditionTypePodCliqueScheduled)
 	scheduledBefore := meta.IsStatusConditionTrue(originalStatus.Conditions, constants.ConditionTypePodCliqueScheduled)
-	if scheduledNow && !scheduledBefore {
+	freshlyScheduled := scheduledNow && !scheduledBefore
+	needsBackfill := scheduledNow && pclq.Status.LastScheduled == nil
+	if freshlyScheduled || needsBackfill {
 		pclq.Status.LastScheduled = ptr.To(metav1.Now())
 	}
 }

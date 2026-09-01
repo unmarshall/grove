@@ -228,7 +228,11 @@ func buildStandalonePCLQInfosForAnchorEntry(ss *syncState, pcsReplicaIndex int, 
 	pclqInfos := make([]pclqInfo, 0, len(ss.pcs.Spec.Template.Cliques))
 	for _, cliqueTemplate := range ss.pcs.Spec.Template.Cliques {
 		desiredPCLQReplicas, ok := pgEntry.PodCliques[cliqueTemplate.Name]
-		if !ok {
+		// A scale-in can leave a zero count on an anchor entry that survives for its other
+		// constituents. Skip it so this PodGang carries no PodGroup with zero pods but a positive
+		// MinReplicas, which would keep the PodGang from ever becoming Scheduled or Ready. This
+		// mirrors the standalone pod distribution, which also skips zero counts.
+		if !ok || desiredPCLQReplicas == 0 {
 			continue
 		}
 		pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: ss.pcs.Name, Replica: pcsReplicaIndex}, cliqueTemplate.Name)
@@ -654,34 +658,21 @@ func (r _resource) getPodsForPodCliquesPendingCreation(ss *syncState, podGang *p
 	}, 0)
 }
 
-// getPodsPendingCreationOrAssociation counts pods not yet created or labeled for the PodGang.
-func (r _resource) getPodsPendingCreationOrAssociation(ss *syncState, podGang *podGangInfo) int {
+// getPodsPendingCreationOrAssociation counts pods this PodGang still needs before it is ready. For
+// each constituent PodClique it takes this PodGang's share (pclqInfo.replicas) and subtracts the
+// pods already associated to this PodGang (pclqInfo.associatedPodNames). Only associated pods count
+// towards the share, so a pod not yet associated to this PodGang keeps it pending until labeled.
+func (r _resource) getPodsPendingCreationOrAssociation(ss *syncState, pgi *podGangInfo) int {
 	// Find the number of expected pods from PodCliques that are pending creation
-	numPodsPendingPCLQCreate := r.getPodsForPodCliquesPendingCreation(ss, podGang)
+	numPodsPendingPCLQCreate := r.getPodsForPodCliquesPendingCreation(ss, pgi)
 
-	// Find the number of pods pending creation of existing PodCliques
+	// Find the number of pods pending creation or association for existing PodCliques
 	var numPodsPendingCreateOrAssociate int
-	pclqs := ss.getPodCliques(podGang)
-	for _, pclq := range pclqs {
-		existingPCLQPods := ss.existingPCLQPods[pclq.Name]
-		// If there is a difference between the expected replicas and the existing pods, we need to account for that.
-		// If the difference is positive, it means there are pending pods to create.
-		// If the difference is negative, it means there are more existing pods than expected. In this case, we do not need to create any new pods, therefore we can ignore the negative difference.
-		numPodsPendingCreateOrAssociate += max(0, int(pclq.Spec.Replicas)-len(existingPCLQPods))
-
-		// For all existing pods in the PCLQ, check if they have the PodGang label set. If that is not set then add them to numPodsPendingCreateOrAssociate.
-		for _, existingPod := range existingPCLQPods {
-			podGangLabelValue, ok := existingPod.GetLabels()[apicommon.LabelPodGang]
-			if !ok {
-				ss.logger.Info("Pod does not have a PodGang label yet", "podObjectKey", client.ObjectKeyFromObject(&existingPod), "expectedPodGangName", podGang.fqn)
-				numPodsPendingCreateOrAssociate += 1
-				continue
-			}
-			if podGangLabelValue != podGang.fqn {
-				ss.logger.Error(nil, "PodGang label does not match expected PodGang name. This should ideally never happen and indicates a coding error", "podObjectKey", client.ObjectKeyFromObject(&existingPod), "expectedPodGangName", podGang.fqn, "podGangLabelValue", podGangLabelValue)
-				numPodsPendingCreateOrAssociate += 1
-			}
+	for _, pclq := range pgi.pclqs {
+		if _, ok := ss.existingPCLQByName[pclq.fqn]; !ok {
+			continue
 		}
+		numPodsPendingCreateOrAssociate += max(0, int(pclq.replicas)-len(pclq.associatedPodNames))
 	}
 	return numPodsPendingPCLQCreate + numPodsPendingCreateOrAssociate
 }

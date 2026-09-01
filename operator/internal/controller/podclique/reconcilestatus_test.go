@@ -255,6 +255,13 @@ func TestMutateLastScheduled(t *testing.T) {
 			wantSet:        true,
 			wantAdvanced:   true,
 		},
+		{
+			name:           "already scheduled with no LastScheduled - backfills on upgrade",
+			originalStatus: grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			currentStatus:  grovecorev1alpha1.PodCliqueStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			wantSet:        true,
+			wantAdvanced:   true,
+		},
 	}
 
 	for _, tc := range tests {
