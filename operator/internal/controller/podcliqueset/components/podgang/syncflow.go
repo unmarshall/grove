@@ -209,12 +209,15 @@ func (r _resource) buildPodGangInfosFromEntry(ss *syncState, pcsReplicaIndex int
 	return r.buildNonAnchorPodGangInfos(ss, pcsReplicaIndex, pgEntry)
 }
 
-// buildAdditionalLabelsFromPodGangEntry returns the epoch and role labels stamped on a PodGang
-// materialized from the given entry.
+// buildAdditionalLabelsFromPodGangEntry returns the epoch, role and generation hash labels stamped on a
+// PodGang materialized from the given entry. The generation hash comes from the entry, so a PodGang
+// carries the generation it belongs to. During a coherent update this can differ from the current
+// PodCliqueSet generation hash.
 func buildAdditionalLabelsFromPodGangEntry(pgEntry grovecorev1alpha1.PodGangEntry) map[string]string {
 	return map[string]string{
-		apicommon.LabelEpoch:       pgEntry.Epoch,
-		apicommon.LabelPodGangRole: string(pgEntry.Role),
+		apicommon.LabelEpoch:                      pgEntry.Epoch,
+		apicommon.LabelPodGangRole:                string(pgEntry.Role),
+		apicommon.LabelPodCliqueSetGenerationHash: pgEntry.PodCliqueSetGenerationHash,
 	}
 }
 

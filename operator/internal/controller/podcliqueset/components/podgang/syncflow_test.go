@@ -1904,6 +1904,25 @@ func TestReconcilePodGangStatus(t *testing.T) {
 	})
 }
 
+// TestBuildAdditionalLabelsFromPodGangEntry pins that a PodGang materialized from an entry carries the
+// entry's generation hash, epoch and role.
+func TestBuildAdditionalLabelsFromPodGangEntry(t *testing.T) {
+	entry := grovecorev1alpha1.PodGangEntry{
+		Epoch:                      "1500",
+		Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+		PodCliqueSetGenerationHash: "hash-1",
+	}
+
+	actual := buildAdditionalLabelsFromPodGangEntry(entry)
+
+	expected := map[string]string{
+		apicommon.LabelEpoch:                      "1500",
+		apicommon.LabelPodGangRole:                string(grovecorev1alpha1.PodGangEntryRoleAnchor),
+		apicommon.LabelPodCliqueSetGenerationHash: "hash-1",
+	}
+	assert.Equal(t, expected, actual)
+}
+
 func podNames(pods []v1.Pod) []string {
 	return lo.Map(pods, func(pod v1.Pod, _ int) string { return pod.Name })
 }
