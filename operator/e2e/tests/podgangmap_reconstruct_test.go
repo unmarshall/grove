@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/e2e/grove/podgang"
 	"github.com/ai-dynamo/grove/operator/e2e/grove/podgangmap"
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 
@@ -43,7 +45,7 @@ const pgmReconstructTimeout = 1 * time.Minute
 // 4. Delete the PodGangMap for replica 0
 // 5. Verify the recreated PodGangMap has anchor sg-x indices [0,1], scale-out sg-x index [2] with the
 //    same epoch, and the standalone pc-a count 2
-// 6. Verify all 14 pods remain running, so the scaled-out replica is not stranded
+// 6. Verify the scaled-out PodGang was not recreated (stable UID) and all 14 pods remain running
 func Test_PGMR1_ReconstructScaledPCSGAfterPodGangMapDelete(t *testing.T) {
 	ctx := t.Context()
 
@@ -79,6 +81,16 @@ func Test_PGMR1_ReconstructScaledPCSGAfterPodGangMapDelete(t *testing.T) {
 	}
 	scaleOutEpoch := scaleOutEpochOf(t, ctx, verifier, pcsNsName)
 
+	// Capture the scaled-out PodGang's UID so a delete-and-recreate can be detected after reconstruction.
+	pgVerifier := podgang.NewVerifier(tc.Client, Logger)
+	scaleOutPodGangName := apicommon.GenerateNonAnchorPodGangName(
+		apicommon.ResourceNameReplica{Name: "workload1", Replica: 0}, scaleOutEpoch, "sg-x", 2)
+	scaleOutPodGang, err := pgVerifier.Get(ctx, tc.Namespace, scaleOutPodGangName)
+	if err != nil {
+		t.Fatalf("Failed to get scaled-out PodGang %s: %v", scaleOutPodGangName, err)
+	}
+	uidBefore := scaleOutPodGang.UID
+
 	Logger.Info("4. Delete the PodGangMap for replica 0")
 	deletePodGangMap(t, tc, "workload1-0")
 
@@ -92,7 +104,12 @@ func Test_PGMR1_ReconstructScaledPCSGAfterPodGangMapDelete(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 
-	Logger.Info("6. Verify all 14 pods remain running, so the scaled-out replica is not stranded")
+	Logger.Info("6. Verify the scaled-out PodGang was not churned and all 14 pods remain running")
+	// Reconstruction reflects the scaled counts up front, so the scaled-out PodGang is never dropped
+	// and recreated. A stable UID proves it is the same object.
+	if err := pgVerifier.VerifyByName(ctx, tc.Namespace, scaleOutPodGangName, podgang.SameUIDCheckFn(uidBefore)); err != nil {
+		t.Fatalf("scaled-out PodGang %s churned: %v", scaleOutPodGangName, err)
+	}
 	if err := tc.WaitForRunningPods(14); err != nil {
 		t.Fatalf("Pods not all running after PodGangMap reconstruction: %v", err)
 	}
