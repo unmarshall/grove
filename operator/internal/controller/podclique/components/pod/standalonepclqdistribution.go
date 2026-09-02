@@ -207,7 +207,7 @@ func (r _resource) reconcileLivePodCountWithExpectations(pclqObjMeta metav1.Obje
 		int32(len(r.expectationsStore.GetDeleteExpectations(key))), nil
 }
 
-// applyCountDeltaByPodGang creates the deficit and deletes the excess pods for each PodGang.
+// applyCountDeltaByPodGang deletes the excess pods and creates the deficit for each PodGang.
 func (r _resource) applyCountDeltaByPodGang(ctx context.Context, logger logr.Logger, ss *syncSnapshot, countDeltaByPodGang map[string]int32, podsByPodGang map[string]podGangPods) error {
 	if len(countDeltaByPodGang) == 0 {
 		return nil
@@ -221,19 +221,21 @@ func (r _resource) applyCountDeltaByPodGang(ctx context.Context, logger logr.Log
 	}
 	deleteTasks := r.buildPerPodGangDeletionTasks(logger, ss, countDeltaByPodGang, orderedPodGangNames, podsByPodGang)
 
-	if len(createTasks) > 0 {
-		if runResult := utils.RunConcurrentlyWithSlowStart(ctx, logger, 1, createTasks); runResult.HasErrors() {
-			err = runResult.GetAggregatedError()
-			logger.Error(err, "failed to create pods for PCLQ", "runSummary", runResult.GetSummary())
-			return err
-		}
-	}
+	// delete the excess pods first so replacements are created only after the old pods are taken down.
 	if len(deleteTasks) > 0 {
 		if runResult := utils.RunConcurrentlyWithSlowStart(ctx, logger, 1, deleteTasks); runResult.HasErrors() {
 			err = runResult.GetAggregatedError()
 			logger.Error(err, "failed to delete pods for PCLQ", "runSummary", runResult.GetSummary())
 			return groveerr.WrapError(err, errCodeDeletePod, component.OperationSync,
 				fmt.Sprintf("failed to delete pods for PodClique %v", client.ObjectKeyFromObject(ss.pclq)))
+		}
+	}
+
+	if len(createTasks) > 0 {
+		if runResult := utils.RunConcurrentlyWithSlowStart(ctx, logger, 1, createTasks); runResult.HasErrors() {
+			err = runResult.GetAggregatedError()
+			logger.Error(err, "failed to create pods for PCLQ", "runSummary", runResult.GetSummary())
+			return err
 		}
 	}
 	return nil
