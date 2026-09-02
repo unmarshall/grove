@@ -21,6 +21,7 @@ import (
 	"time"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	groveclientscheme "github.com/ai-dynamo/grove/operator/internal/client"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
@@ -106,6 +107,7 @@ func TestSyncReconstructsScaledOutPCSGWhenPodGangMapIsMissing(t *testing.T) {
 		Build()
 	pcsg := testutils.NewPodCliqueScalingGroupBuilder("pcs-0-sg", "default", "pcs", 0).
 		WithReplicas(2).
+		WithOwnerReference(constants.KindPodCliqueSet, testPCSName, testPCSUID).
 		Build()
 	// The PodGangMap is gone, but the anchor and scale-out PodGangs still carry their epochs.
 	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
@@ -138,6 +140,7 @@ func TestSyncReconstructsScaledOutPCSGWithoutExistingScaleOutPodGang(t *testing.
 		Build()
 	pcsg := testutils.NewPodCliqueScalingGroupBuilder("pcs-0-sg", "default", "pcs", 0).
 		WithReplicas(2).
+		WithOwnerReference(constants.KindPodCliqueSet, testPCSName, testPCSUID).
 		Build()
 	anchorPodGang := podGangForReplica(t, "pcs-0-1500", 0, "1500", grovecorev1alpha1.PodGangEntryRoleAnchor)
 
@@ -324,7 +327,10 @@ func podGangForReplica(t *testing.T, name string, replicaIndex int, epoch string
 			apicommon.LabelPodGangRole:              string(role),
 		},
 	)
-	return testutils.NewPodGangBuilder(name, testNamespace).WithLabels(labels).Build()
+	return testutils.NewPodGangBuilder(name, testNamespace).
+		WithLabels(labels).
+		WithOwnerReference(constants.KindPodCliqueSet, testPCSName, testPCSUID).
+		Build()
 }
 
 func getPodGangMap(t *testing.T, cl client.Client, name string) *grovecorev1alpha1.PodGangMap {

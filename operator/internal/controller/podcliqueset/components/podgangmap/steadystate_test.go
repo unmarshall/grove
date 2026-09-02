@@ -33,6 +33,7 @@ import (
 const (
 	testNamespace = "default"
 	testPCSName   = "pcs"
+	testPCSUID    = "uid"
 	testGenHash   = "hash1"
 	testPCSGName  = "sg"
 )

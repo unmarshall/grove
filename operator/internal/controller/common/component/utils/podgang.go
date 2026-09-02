@@ -52,5 +52,9 @@ func GetExistingPodGangs(ctx context.Context, cl client.Client, pcsObjectMeta me
 		client.MatchingLabels(GetPodGangSelectorLabels(pcsObjectMeta))); err != nil {
 		return nil, err
 	}
-	return podGangs.Items, nil
+	// Exclude PodGangs controlled by an older PodCliqueSet of the same name. A recreated PodCliqueSet
+	// reuses the name, so a name-label match can return a deleted PodCliqueSet's leftover children.
+	return lo.Filter(podGangs.Items, func(podGang groveschedulerv1alpha1.PodGang, _ int) bool {
+		return metav1.IsControlledBy(&podGang, &pcsObjectMeta)
+	}), nil
 }
