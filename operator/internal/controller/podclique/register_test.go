@@ -32,6 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // TestControllerConstants tests the controller constants
@@ -353,4 +354,116 @@ func Test_isMarkedForDeletion(t *testing.T) {
 			assert.Equalf(t, tt.want, isMarkedForDeletion(tt.updateEvent), "isMarkedForDeletionChanged(%v)", tt.updateEvent)
 		})
 	}
+}
+
+// TestPodGangMapPredicate verifies the PodGangMap watch predicate. It must fire on Create so a
+// reconstructed PodGangMap that already carries a multi-anchor distribution is processed, and on an
+// Update that moves a standalone PodClique between entries or changes its count. It must not fire
+// when only PodCliqueScalingGroup replica indices change, which the PodClique controller does not
+// consume.
+func TestPodGangMapPredicate(t *testing.T) {
+	const ns, pcsName, hash = "default", "pcs", "gen"
+	pred, ok := podGangMapPredicate().(predicate.Funcs)
+	require.True(t, ok, "predicate must be predicate.Funcs")
+
+	pgmWith := func(entries ...grovecorev1alpha1.PodGangEntry) *grovecorev1alpha1.PodGangMap {
+		return testutils.NewPodGangMapBuilder(pcsName, ns, "pcs-uid", 0).WithEntries(entries...).Build()
+	}
+	anchor := func(epoch string, anchorIndex int32, podCliques map[string]int32) grovecorev1alpha1.PodGangEntry {
+		return testutils.NewPodGangEntryBuilder(hash, epoch).
+			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+			WithAnchorIndex(anchorIndex).
+			WithPodCliques(podCliques).
+			Build()
+	}
+
+	tests := []struct {
+		name     string
+		isCreate bool
+		old      *grovecorev1alpha1.PodGangMap
+		new      *grovecorev1alpha1.PodGangMap
+		want     bool
+	}{
+		{
+			name:     "create always fires",
+			isCreate: true,
+			new:      pgmWith(anchor("100", 0, map[string]int32{"frontend": 6})),
+			want:     true,
+		},
+		{
+			name: "same-total redistribution across anchors fires",
+			old:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 6})),
+			new: pgmWith(
+				anchor("100", 0, map[string]int32{"frontend": 3}),
+				anchor("200", 1, map[string]int32{"frontend": 3}),
+			),
+			want: true,
+		},
+		{
+			name: "count change on the same anchor fires",
+			old:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 6})),
+			new:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 5})),
+			want: true,
+		},
+		{
+			name: "a standalone PodClique moving entirely to a new epoch fires",
+			old:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 3})),
+			new:  pgmWith(anchor("200", 0, map[string]int32{"frontend": 3})),
+			want: true,
+		},
+		{
+			name: "unchanged distribution does not fire",
+			old:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 6})),
+			new:  pgmWith(anchor("100", 0, map[string]int32{"frontend": 6})),
+			want: false,
+		},
+		{
+			name: "only PodCliqueScalingGroup indices change does not fire",
+			old: pgmWith(testutils.NewPodGangEntryBuilder(hash, "100").
+				WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).
+				WithPodCliques(map[string]int32{"frontend": 6}).
+				WithPCSGReplicaIndices(map[string][]int32{"sga": {0, 1, 2}}).Build()),
+			new: pgmWith(testutils.NewPodGangEntryBuilder(hash, "100").
+				WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).
+				WithPodCliques(map[string]int32{"frontend": 6}).
+				WithPCSGReplicaIndices(map[string][]int32{"sga": {0, 1}}).Build()),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got bool
+			if tt.isCreate {
+				got = pred.CreateFunc(event.CreateEvent{Object: tt.new})
+			} else {
+				got = pred.UpdateFunc(event.UpdateEvent{ObjectOld: tt.old, ObjectNew: tt.new})
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestMapPodGangMapToPCLQs verifies that the PodGangMap mapper enqueues one reconcile request per
+// standalone PodClique named across the entries, using the PodCliqueSet name from the part-of label
+// and the replica index from the spec.
+func TestMapPodGangMapToPCLQs(t *testing.T) {
+	const ns, pcsName, hash = "default", "pcs", "gen"
+	mapFn := mapPodGangMapToPCLQs()
+
+	pgm := testutils.NewPodGangMapBuilder(pcsName, ns, "pcs-uid", 0).WithEntries(
+		testutils.NewPodGangEntryBuilder(hash, "100").
+			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).
+			WithPodCliques(map[string]int32{"frontend": 3, "backend": 2}).Build(),
+		testutils.NewPodGangEntryBuilder(hash, "200").
+			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(1).
+			WithPodCliques(map[string]int32{"frontend": 3}).Build(),
+	).Build()
+
+	actual := mapFn(t.Context(), pgm)
+
+	expected := []reconcile.Request{
+		{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-frontend"}},
+		{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-backend"}},
+	}
+	assert.ElementsMatch(t, expected, actual)
 }

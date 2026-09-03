@@ -16,6 +16,7 @@ package podclique
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -78,6 +79,11 @@ func (r *Reconciler) RegisterWithManager(mgr ctrl.Manager) error {
 			&groveschedulerv1alpha1.PodGang{},
 			handler.EnqueueRequestsFromMapFunc(mapPodGangToPCLQs()),
 			builder.WithPredicates(podGangPredicate()),
+		).
+		Watches(
+			&grovecorev1alpha1.PodGangMap{},
+			handler.EnqueueRequestsFromMapFunc(mapPodGangMapToPCLQs()),
+			builder.WithPredicates(podGangMapPredicate()),
 		).
 		Complete(r)
 }
@@ -364,6 +370,76 @@ func podGangPredicate() predicate.Predicate {
 		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 	}
+}
+
+// mapPodGangMapToPCLQs maps a PodGangMap to reconcile.Request(s) for the standalone PodCliques whose
+// per-PodGang distribution it carries. A coherent-update sub-step can redistribute a standalone
+// PodClique across anchor entries without changing its total, and no PodClique, PodGang or
+// PodCliqueSet watch observes that move, so the PodGangMap is the only signal. The requests cover
+// every standalone PodClique named across the entries.
+func mapPodGangMapToPCLQs() handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []reconcile.Request {
+		pgm, ok := obj.(*grovecorev1alpha1.PodGangMap)
+		if !ok {
+			return nil
+		}
+		pcsName := componentutils.GetPodCliqueSetName(pgm.ObjectMeta)
+		rnr := apicommon.ResourceNameReplica{Name: pcsName, Replica: int(pgm.Spec.PodCliqueSetReplicaIndex)}
+		cliqueNames := make(map[string]struct{})
+		for _, entry := range pgm.Spec.Entries {
+			for cliqueName := range entry.PodCliques {
+				cliqueNames[cliqueName] = struct{}{}
+			}
+		}
+		requests := make([]reconcile.Request, 0, len(cliqueNames))
+		for cliqueName := range cliqueNames {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: pgm.Namespace,
+				Name:      apicommon.GeneratePodCliqueName(rnr, cliqueName),
+			}})
+		}
+		return requests
+	}
+}
+
+// podGangMapPredicate triggers the PodClique controller on a PodGangMap create and on an update that
+// changes the standalone PodClique placement. It does not fire on other spec churn such as
+// PodCliqueScalingGroup replica-index moves, which the PodClique controller does not consume.
+func podGangMapPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(_ event.CreateEvent) bool { return true },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+		GenericFunc: func(_ event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPGM, okOld := e.ObjectOld.(*grovecorev1alpha1.PodGangMap)
+			newPGM, okNew := e.ObjectNew.(*grovecorev1alpha1.PodGangMap)
+			if !okOld || !okNew {
+				return false
+			}
+			return standaloneDistributionChanged(oldPGM, newPGM)
+		},
+	}
+}
+
+// standaloneDistributionChanged reports whether the standalone PodClique counts differ between the
+// two PodGangMaps. It compares the maps returned by standaloneDistribution. Because those maps key a
+// count by both the entry epoch and the PodClique name, moving a PodClique from one entry to another
+// with the same total still counts as a change.
+func standaloneDistributionChanged(oldPGM, newPGM *grovecorev1alpha1.PodGangMap) bool {
+	return !maps.Equal(standaloneDistribution(oldPGM), standaloneDistribution(newPGM))
+}
+
+// standaloneDistribution returns the standalone PodClique count of every entry. The key of each count
+// is the entry epoch and the PodClique name joined together, so the same PodClique under two
+// different epochs yields two distinct keys. Entries with no standalone PodCliques contribute no keys.
+func standaloneDistribution(pgm *grovecorev1alpha1.PodGangMap) map[string]int32 {
+	dist := make(map[string]int32)
+	for _, entry := range pgm.Spec.Entries {
+		for cliqueName, count := range entry.PodCliques {
+			dist[entry.Epoch+"/"+cliqueName] = count
+		}
+	}
+	return dist
 }
 
 // isPodGangInitialized checks if a PodGang has Initialized condition set to True.
