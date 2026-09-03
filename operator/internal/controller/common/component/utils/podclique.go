@@ -175,13 +175,14 @@ func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, termin
 }
 
 // GetPodCliquesWithParentPCS retrieves PodClique objects that are not part of any PodCliqueScalingGroup for the given PodCliqueSet.
-func GetPodCliquesWithParentPCS(ctx context.Context, cl client.Client, pcsObjKey client.ObjectKey) ([]grovecorev1alpha1.PodClique, error) {
+// GetPodCliquesWithParentPCS retrieves PodClique objects that are not part of any PodCliqueScalingGroup for the given PodCliqueSet.
+func GetPodCliquesWithParentPCS(ctx context.Context, cl client.Client, pcsObjMeta metav1.ObjectMeta) ([]grovecorev1alpha1.PodClique, error) {
 	pclqList := &grovecorev1alpha1.PodCliqueList{}
 	err := cl.List(ctx,
 		pclqList,
-		client.InNamespace(pcsObjKey.Namespace),
+		client.InNamespace(pcsObjMeta.Namespace),
 		client.MatchingLabels(lo.Assign(
-			apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsObjKey.Name),
+			apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsObjMeta.Name),
 			map[string]string{
 				apicommon.LabelComponentKey: apicommon.LabelComponentNamePodCliqueSetPodClique,
 			},
@@ -190,7 +191,11 @@ func GetPodCliquesWithParentPCS(ctx context.Context, cl client.Client, pcsObjKey
 	if err != nil {
 		return nil, err
 	}
-	return pclqList.Items, nil
+	// Exclude PodCliques controlled by an older PodCliqueSet of the same name, so a recreated
+	// PodCliqueSet does not ingest a deleted one's leftover children.
+	return lo.Filter(pclqList.Items, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
+		return metav1.IsControlledBy(&pclq, &pcsObjMeta)
+	}), nil
 }
 
 // groupPCLQsByLabel groups PodCliques by the value of the specified label key

@@ -144,7 +144,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 	// Fetch all PCSGs for this PCS, then drop any stray PCSGs (not part of the spec) using O(1)
 	// set lookup. slices.DeleteFunc compacts in-place; safe here because the slice came from a
 	// fresh fetch and isn't aliased.
-	pcsgs, err := componentutils.GetPCSGsForPCS(ctx, r.client, pcsObjectKey)
+	pcsgs, err := componentutils.GetPCSGsForPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return stats, err
 	}
@@ -154,7 +154,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 	})
 
 	// Fetch all standalone PodCliques for this PCS and drop strays the same way.
-	standalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, pcsObjectKey)
+	standalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return stats, err
 	}

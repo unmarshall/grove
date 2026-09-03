@@ -24,6 +24,7 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 
 	"github.com/samber/lo"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -42,12 +43,16 @@ func FindScalingGroupConfigForClique(scalingGroupConfigs []grovecorev1alpha1.Pod
 }
 
 // GetPCSGsForPCS fetches all PodCliqueScalingGroups for a PodCliqueSet.
-func GetPCSGsForPCS(ctx context.Context, cl client.Client, pcsObjKey client.ObjectKey) ([]grovecorev1alpha1.PodCliqueScalingGroup, error) {
-	pcsgList, err := doGetPCSGsForPCS(ctx, cl, pcsObjKey, nil)
+func GetPCSGsForPCS(ctx context.Context, cl client.Client, pcsObjMeta metav1.ObjectMeta) ([]grovecorev1alpha1.PodCliqueScalingGroup, error) {
+	pcsgList, err := doGetPCSGsForPCS(ctx, cl, client.ObjectKey{Namespace: pcsObjMeta.Namespace, Name: pcsObjMeta.Name}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return pcsgList.Items, nil
+	// Exclude PodCliqueScalingGroups controlled by an older PodCliqueSet of the same name, so a
+	// recreated PodCliqueSet does not ingest a deleted one's leftover children.
+	return lo.Filter(pcsgList.Items, func(pcsg grovecorev1alpha1.PodCliqueScalingGroup, _ int) bool {
+		return metav1.IsControlledBy(&pcsg, &pcsObjMeta)
+	}), nil
 }
 
 // doGetPCSGsForPCS is a helper function that fetches PodCliqueScalingGroups with optional additional label filtering

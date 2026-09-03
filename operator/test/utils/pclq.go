@@ -104,12 +104,13 @@ func (b *PodCliqueBuilder) WithAutoScaleMaxReplicas(maximum int32) *PodCliqueBui
 	return b
 }
 
-// WithOwnerReference sets the owner reference for the PodClique from individual values.
+// WithOwnerReference sets a controller owner reference for the PodClique from individual values.
 func (b *PodCliqueBuilder) WithOwnerReference(kind, name string, uid types.UID) *PodCliqueBuilder {
 	ownerRef := metav1.OwnerReference{
-		Kind: kind,
-		Name: name,
-		UID:  types.UID("test-uid"),
+		Kind:       kind,
+		Name:       name,
+		UID:        types.UID("test-uid"),
+		Controller: ptr.To(true),
 	}
 	if uid != "" {
 		ownerRef.UID = uid

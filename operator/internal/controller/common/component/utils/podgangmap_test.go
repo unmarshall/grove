@@ -57,12 +57,15 @@ func TestListPodGangMapsForPCS(t *testing.T) {
 
 	pgm0 := testutils.NewPodGangMapBuilder(pcsName, namespace, pcsUID, 0).Build()
 	pgm1 := testutils.NewPodGangMapBuilder(pcsName, namespace, pcsUID, 1).Build()
-	// A PodGangMap owned by a different PodCliqueSet must not be returned.
+	// A PodGangMap owned by a PodCliqueSet of a different name must not be returned.
 	otherPGM := testutils.NewPodGangMapBuilder("other-pcs", namespace, types.UID("other-uid"), 0).Build()
+	// A PodGangMap of the same name but controlled by an older PodCliqueSet UID must not be returned,
+	// modelling a same-name recreation before garbage collection removed the old PodGangMap.
+	stalePGM := testutils.NewPodGangMapBuilder(pcsName, namespace, types.UID("old-uid"), 2).Build()
 
-	fakeClient := testutils.CreateDefaultFakeClient([]client.Object{pgm0, pgm1, otherPGM})
+	fakeClient := testutils.CreateDefaultFakeClient([]client.Object{pgm0, pgm1, otherPGM, stalePGM})
 
-	actual, err := ListPodGangMapsForPCS(context.Background(), fakeClient, client.ObjectKey{Namespace: namespace, Name: pcsName})
+	actual, err := ListPodGangMapsForPCS(context.Background(), fakeClient, metav1.ObjectMeta{Namespace: namespace, Name: pcsName, UID: pcsUID})
 	require.NoError(t, err)
 
 	assert.ElementsMatch(t, []string{pgm0.Name, pgm1.Name}, pgmNames(actual))
@@ -121,7 +124,7 @@ func pgmNames(pgms []grovecorev1alpha1.PodGangMap) []string {
 	return names
 }
 
-func indicesOf(byIndex map[int]grovecorev1alpha1.PodGangMap) []int {
+func indicesOf(byIndex map[int]*grovecorev1alpha1.PodGangMap) []int {
 	idx := make([]int, 0, len(byIndex))
 	for i := range byIndex {
 		idx = append(idx, i)

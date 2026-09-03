@@ -19,12 +19,15 @@ import (
 	"testing"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/grove/operator/api/common/constants"
+	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -149,20 +152,19 @@ func TestGetExistingPodGangs(t *testing.T) {
 
 	pcsName := "test-pcs"
 	namespace := "default"
+	const pcsUID = types.UID("pcs-uid")
 	pcsObjectMeta := metav1.ObjectMeta{
 		Name:      pcsName,
 		Namespace: namespace,
+		UID:       pcsUID,
 	}
 	matchingLabels := GetPodGangSelectorLabels(pcsObjectMeta)
 
 	t.Run("returns matching podgangs", func(t *testing.T) {
-		managed := &groveschedulerv1alpha1.PodGang{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pg-1",
-				Namespace: namespace,
-				Labels:    matchingLabels,
-			},
-		}
+		managed := testutils.NewPodGangBuilder("pg-1", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, pcsUID).
+			Build()
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(managed).
@@ -176,20 +178,14 @@ func TestGetExistingPodGangs(t *testing.T) {
 	})
 
 	t.Run("returns multiple matching podgangs", func(t *testing.T) {
-		pg1 := &groveschedulerv1alpha1.PodGang{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pg-1",
-				Namespace: namespace,
-				Labels:    matchingLabels,
-			},
-		}
-		pg2 := &groveschedulerv1alpha1.PodGang{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pg-2",
-				Namespace: namespace,
-				Labels:    matchingLabels,
-			},
-		}
+		pg1 := testutils.NewPodGangBuilder("pg-1", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, pcsUID).
+			Build()
+		pg2 := testutils.NewPodGangBuilder("pg-2", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, pcsUID).
+			Build()
 		cl := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(pg1, pg2).
@@ -202,13 +198,10 @@ func TestGetExistingPodGangs(t *testing.T) {
 	})
 
 	t.Run("excludes podgangs belonging to a different PodCliqueSet", func(t *testing.T) {
-		ownedPG := &groveschedulerv1alpha1.PodGang{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pg-owned",
-				Namespace: namespace,
-				Labels:    matchingLabels,
-			},
-		}
+		ownedPG := testutils.NewPodGangBuilder("pg-owned", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, pcsUID).
+			Build()
 		otherLabels := GetPodGangSelectorLabels(metav1.ObjectMeta{Name: "other-pcs"})
 		otherPG := &groveschedulerv1alpha1.PodGang{
 			ObjectMeta: metav1.ObjectMeta{
@@ -227,6 +220,30 @@ func TestGetExistingPodGangs(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result, 1)
 		assert.Equal(t, "pg-owned", result[0].Name)
+	})
+
+	t.Run("excludes podgangs controlled by a same-named PodCliqueSet of a different UID", func(t *testing.T) {
+		// A PodCliqueSet deleted and recreated with the same name reuses the name labels, so a
+		// leftover PodGang from the old instance still matches. It is controlled by the old UID and
+		// must be excluded so its stale counts and epochs do not enter the new PodGangMap.
+		currentPG := testutils.NewPodGangBuilder("pg-current", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, pcsUID).
+			Build()
+		stalePG := testutils.NewPodGangBuilder("pg-stale", namespace).
+			WithLabels(matchingLabels).
+			WithOwnerReference(constants.KindPodCliqueSet, pcsName, types.UID("old-pcs-uid")).
+			Build()
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(currentPG, stalePG).
+			Build()
+
+		result, err := GetExistingPodGangs(t.Context(), cl, pcsObjectMeta, namespace)
+
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		assert.Equal(t, "pg-current", result[0].Name)
 	})
 
 	t.Run("excludes podgangs without managed-by label", func(t *testing.T) {

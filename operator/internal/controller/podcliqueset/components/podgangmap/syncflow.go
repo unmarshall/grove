@@ -38,7 +38,7 @@ type syncSnapshot struct {
 	pcs                              *grovecorev1alpha1.PodCliqueSet
 	existingStandalonePCLQsByReplica map[int][]grovecorev1alpha1.PodClique
 	existingPCSGsByReplica           map[int][]grovecorev1alpha1.PodCliqueScalingGroup
-	existingPGMByReplica             map[int]grovecorev1alpha1.PodGangMap
+	existingPGMByReplica             map[int]*grovecorev1alpha1.PodGangMap
 	existingPodGangsByReplica        map[int][]groveschedulerv1alpha1.PodGang
 }
 
@@ -69,7 +69,7 @@ func (r _resource) takeSnapshot(ctx context.Context, logger logr.Logger, pcs *gr
 
 // getExistingStandalonePCLQsByReplica fetches all standalone PodCliques for the PCS and groups them by PCS replica index.
 func (r _resource) getExistingStandalonePCLQsByReplica(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (map[int][]grovecorev1alpha1.PodClique, error) {
-	existingStandalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, client.ObjectKeyFromObject(pcs))
+	existingStandalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeListPCLQs,
@@ -90,7 +90,7 @@ func (r _resource) getExistingStandalonePCLQsByReplica(ctx context.Context, pcs 
 
 // getExistingPCSGsByReplica fetches all PodCliqueScalingGroups for the PCS and groups them by PCS replica index.
 func (r _resource) getExistingPCSGsByReplica(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (map[int][]grovecorev1alpha1.PodCliqueScalingGroup, error) {
-	existingPCSGs, err := componentutils.GetPCSGsForPCS(ctx, r.client, client.ObjectKeyFromObject(pcs))
+	existingPCSGs, err := componentutils.GetPCSGsForPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeListPCSGs,
@@ -110,8 +110,8 @@ func (r _resource) getExistingPCSGsByReplica(ctx context.Context, pcs *grovecore
 }
 
 // getExistingPGMByReplica fetches all PodGangMaps for the PCS and groups them by PCS replica index.
-func (r _resource) getExistingPGMByReplica(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (map[int]grovecorev1alpha1.PodGangMap, error) {
-	existingPGMs, err := componentutils.ListPodGangMapsForPCS(ctx, r.client, client.ObjectKeyFromObject(pcs))
+func (r _resource) getExistingPGMByReplica(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (map[int]*grovecorev1alpha1.PodGangMap, error) {
+	existingPGMs, err := componentutils.ListPodGangMapsForPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeListPodGangMaps,
@@ -186,27 +186,16 @@ func (r _resource) runSyncFlow(ctx context.Context, syncSnap *syncSnapshot) erro
 			)
 		}
 
-		var (
-			entries []grovecorev1alpha1.PodGangEntry
-			err     error
-		)
-		if !pgmExists {
-			entries = buildBootstrapEntries(syncSnap.pcs, r.clk, syncSnap.existingPodGangsByReplica[pcsReplicaIndex])
-		} else {
-			// Deep-copy the existing entries so mutations here do not alias the snapshot's PodGangMap.
-			entries = clonePodGangEntries(pgm.Spec.Entries)
-			if shouldAdvanceEntriesGenerationHash(syncSnap.pcs, entries) {
-				advanceEntriesGenerationHash(entries, *syncSnap.pcs.Status.CurrentGenerationHash)
-			}
-			scaleOutEpoch := strconv.FormatInt(r.clk.Now().UnixNano(), 10)
-			entries, err = reconcileEntries(syncSnap.pcs, entries,
-				syncSnap.existingStandalonePCLQsByReplica[pcsReplicaIndex],
-				syncSnap.existingPCSGsByReplica[pcsReplicaIndex],
-				pcsReplicaIndex, scaleOutEpoch)
-			if err != nil {
-				return err
-			}
+		entries, err := reconcileEntries(r.clk,
+			syncSnap.pcs, pcsReplicaIndex,
+			pgm,
+			syncSnap.existingPodGangsByReplica[pcsReplicaIndex],
+			syncSnap.existingStandalonePCLQsByReplica[pcsReplicaIndex],
+			syncSnap.existingPCSGsByReplica[pcsReplicaIndex])
+		if err != nil {
+			return err
 		}
+
 		pgmName := apicommon.GeneratePodGangMapName(apicommon.ResourceNameReplica{Name: syncSnap.pcs.Name, Replica: pcsReplicaIndex})
 		if err = r.createOrPatchPodGangMap(ctx, syncSnap.pcs, pgmName, pcsReplicaIndex, entries); err != nil {
 			return err
@@ -239,7 +228,7 @@ func (r _resource) deleteOrphanedPodGangMaps(ctx context.Context, syncSnap *sync
 		if pcsReplicaIndex < int(syncSnap.pcs.Spec.Replicas) {
 			continue
 		}
-		if err := r.client.Delete(ctx, &pgm); err != nil {
+		if err := r.client.Delete(ctx, pgm); err != nil {
 			return groveerr.WrapError(err,
 				errCodeDeletePodGangMaps,
 				component.OperationSync,

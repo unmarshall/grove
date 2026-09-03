@@ -205,10 +205,9 @@ func emptyPodGang(objKey client.ObjectKey) *groveschedulerv1alpha1.PodGang {
 
 func (r _resource) buildLabels(pcs *grovecorev1alpha1.PodCliqueSet, pgi *podGangInfo, schedulerName string) map[string]string {
 	pgLabels := map[string]string{
-		apicommon.LabelComponentKey:               apicommon.LabelComponentNamePodGang,
-		apicommon.LabelPodCliqueSetReplicaIndex:   strconv.Itoa(pgi.pcsReplicaIndex),
-		apicommon.LabelSchedulerName:              schedulerName,
-		apicommon.LabelPodCliqueSetGenerationHash: *pcs.Status.CurrentGenerationHash,
+		apicommon.LabelComponentKey:             apicommon.LabelComponentNamePodGang,
+		apicommon.LabelPodCliqueSetReplicaIndex: strconv.Itoa(pgi.pcsReplicaIndex),
+		apicommon.LabelSchedulerName:            schedulerName,
 	}
 	return lo.Assign(
 		apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcs.Name),

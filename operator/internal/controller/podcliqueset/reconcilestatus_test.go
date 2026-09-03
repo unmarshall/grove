@@ -66,13 +66,15 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 				return []client.Object{
 					// Healthy PCSGs
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					// Healthy standalone PodCliques
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 1).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
@@ -90,12 +92,14 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGMinAvailableBreached()).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 1).
 						WithOptions(testutils.WithPCLQTerminating(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
@@ -113,9 +117,9 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				// Missing PCSG, extra standalone PodClique
 				return []client.Object{
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "test-pcs-0-worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "test-pcs-0-worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQAvailable(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "test-pcs-0-extra", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "test-pcs-0-extra", testNamespace, 0).
 						WithOptions(testutils.WithPCLQAvailable(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
@@ -143,13 +147,13 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			},
 			childResources: func() []client.Object {
 				return []client.Object{
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "monitor", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "monitor", testNamespace, 0).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 1).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "monitor", testNamespace, 1).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "monitor", testNamespace, 1).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
@@ -168,12 +172,16 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-storage", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-storage", testNamespace, testPCSName, 1).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 				}
 			},
@@ -190,7 +198,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			},
 			childResources: func() []client.Object {
 				return []client.Object{
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "test-pcs-0-worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "test-pcs-0-worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQTerminating(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
@@ -208,6 +216,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGUnknownCondition()).Build(),
 				}
 			},
@@ -224,7 +233,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			},
 			childResources: func() []client.Object {
 				return []client.Object{
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "test-pcs-0-worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "test-pcs-0-worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQNoConditions()).Build(),
 				}
 			},
@@ -254,9 +263,10 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			},
 			childResources: func() []client.Object {
 				return []client.Object{
-					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+					testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 0).
 						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-unexpected", testNamespace, testPCSName, 0).
+						WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 				}
 			},
@@ -685,13 +695,13 @@ func TestComputePCSUpdateProgressCounts(t *testing.T) {
 	makePCSG := func(replicaIndex int, hash string) *grovecorev1alpha1.PodCliqueScalingGroup {
 		return testutils.NewPodCliqueScalingGroupBuilder(
 			pcsgName(replicaIndex), testNamespace, testPCSName, replicaIndex,
-		).WithOptions(testutils.WithPCSGCurrentPCSGenerationHash(hash)).Build()
+		).WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).WithOptions(testutils.WithPCSGCurrentPCSGenerationHash(hash)).Build()
 	}
 	// makePCSGNoHash builds a PCSG with no CurrentPodCliqueSetGenerationHash (not yet updated).
 	makePCSGNoHash := func(replicaIndex int) *grovecorev1alpha1.PodCliqueScalingGroup {
 		return testutils.NewPodCliqueScalingGroupBuilder(
 			pcsgName(replicaIndex), testNamespace, testPCSName, replicaIndex,
-		).Build()
+		).WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).Build()
 	}
 
 	testCases := []struct {
@@ -812,8 +822,10 @@ func TestPCSMutateReplicasWritesUpdateProgressCounts(t *testing.T) {
 		pcs := b.Build()
 		children := []client.Object{
 			testutils.NewPodCliqueScalingGroupBuilder(pcsgName(0), testNamespace, testPCSName, 0).
+				WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 				WithOptions(testutils.WithPCSGCurrentPCSGenerationHash(pcsHash)).Build(),
 			testutils.NewPodCliqueScalingGroupBuilder(pcsgName(1), testNamespace, testPCSName, 1).
+				WithOwnerReference(apicommonconstants.KindPodCliqueSet, testPCSName, pcsUID).
 				WithOptions(testutils.WithPCSGCurrentPCSGenerationHash(pcsHash)).Build(),
 			markStandalonePCLQConverged(t, pcs, testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 0).Build(), pcsHash),
 			markStandalonePCLQConverged(t, pcs, testutils.NewPodCliqueBuilder(testPCSName, pcsUID, "worker", testNamespace, 1).Build(), pcsHash),
