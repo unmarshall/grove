@@ -71,7 +71,7 @@ func SetMigrationGateForLegacyPodCliqueSets(ctx context.Context, cl client.Clien
 			logger.V(4).Info("PodGang migration gate already set on PodCliqueSet", "podCliqueSet", client.ObjectKeyFromObject(pcs))
 			continue
 		}
-		pgms, err := componentutils.ListPodGangMapsForPCS(ctx, cl, client.ObjectKeyFromObject(pcs))
+		pgms, err := componentutils.ListPodGangMapsForPCS(ctx, cl, pcs.ObjectMeta)
 		if err != nil {
 			return fmt.Errorf("failed to list PodGangMaps for PodCliqueSet %v: %w", client.ObjectKeyFromObject(pcs), err)
 		}

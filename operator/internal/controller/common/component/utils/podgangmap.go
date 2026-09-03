@@ -23,6 +23,7 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 
 	"github.com/samber/lo"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -37,17 +38,21 @@ func GetPodGangMap(ctx context.Context, cl client.Client, pcsObjectKey client.Ob
 }
 
 // ListPodGangMapsForPCS fetches all PodGangMaps owned by a PodCliqueSet.
-func ListPodGangMapsForPCS(ctx context.Context, cl client.Client, pcsObjectKey client.ObjectKey) ([]grovecorev1alpha1.PodGangMap, error) {
+func ListPodGangMapsForPCS(ctx context.Context, cl client.Client, pcsObjMeta metav1.ObjectMeta) ([]grovecorev1alpha1.PodGangMap, error) {
 	pgmList := &grovecorev1alpha1.PodGangMapList{}
 	if err := cl.List(ctx, pgmList,
-		client.InNamespace(pcsObjectKey.Namespace),
+		client.InNamespace(pcsObjMeta.Namespace),
 		client.MatchingLabels(lo.Assign(
-			apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsObjectKey.Name),
+			apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsObjMeta.Name),
 			map[string]string{apicommon.LabelComponentKey: apicommon.LabelComponentNamePodGangMap},
 		))); err != nil {
 		return nil, err
 	}
-	return pgmList.Items, nil
+	// Exclude PodGangMaps controlled by an older PodCliqueSet of the same name, so a recreated
+	// PodCliqueSet does not pick up a deleted one's stale PodGangMap.
+	return lo.Filter(pgmList.Items, func(pgm grovecorev1alpha1.PodGangMap, _ int) bool {
+		return metav1.IsControlledBy(&pgm, &pcsObjMeta)
+	}), nil
 }
 
 // PodGangMapByPCSReplicaIndex groups PodGangMaps by their PCS replica index.

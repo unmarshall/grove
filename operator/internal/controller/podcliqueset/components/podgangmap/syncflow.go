@@ -111,7 +111,7 @@ func (r _resource) getExistingPCSGsByReplica(ctx context.Context, pcs *grovecore
 
 // getExistingPGMByReplica fetches all PodGangMaps for the PCS and groups them by PCS replica index.
 func (r _resource) getExistingPGMByReplica(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) (map[int]*grovecorev1alpha1.PodGangMap, error) {
-	existingPGMs, err := componentutils.ListPodGangMapsForPCS(ctx, r.client, client.ObjectKeyFromObject(pcs))
+	existingPGMs, err := componentutils.ListPodGangMapsForPCS(ctx, r.client, pcs.ObjectMeta)
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeListPodGangMaps,
