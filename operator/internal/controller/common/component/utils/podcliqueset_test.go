@@ -603,3 +603,26 @@ func TestGetPCSGReplicasFromPCSTemplateSpec(t *testing.T) {
 		})
 	}
 }
+
+// TestIsStandalonePCLQ verifies a PodClique is standalone unless it is a member of a
+// PodCliqueScalingGroup.
+func TestIsStandalonePCLQ(t *testing.T) {
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithStandaloneClique("standalone-clq").
+		WithScalingGroupConfig("sg", []string{"member-clq"}, 4, 2).
+		Build()
+	tests := []struct {
+		name       string
+		cliqueName string
+		expected   bool
+	}{
+		{"clique not in any scaling group is standalone", "standalone-clq", true},
+		{"clique that is a scaling group member is not standalone", "member-clq", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := IsStandalonePCLQ(pcs, tc.cliqueName)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}

@@ -20,7 +20,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ai-dynamo/grove/operator/api/common"
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 
 	"github.com/go-logr/logr"
@@ -58,9 +59,9 @@ func TestComputeUpdateWork(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := &syncSnapshot{
-				existingPCLQPods:         []*corev1.Pod{tt.pod},
-				expectedPodTemplateHash:  testNewHash,
-				pclqExpectationsStoreKey: "test-key",
+				pclq:                    &grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pclq-1", Namespace: testNamespace}},
+				existingPCLQPods:        []*corev1.Pod{tt.pod},
+				expectedPodTemplateHash: testNewHash,
 			}
 			work := r.computeUpdateWork(logr.Discard(), sc)
 
@@ -100,7 +101,7 @@ func newTestPod(name, templateHash string, opts ...func(*corev1.Pod)) *corev1.Po
 			Name:      name,
 			Namespace: testNS,
 			Labels: map[string]string{
-				common.LabelPodTemplateHash: templateHash,
+				apicommon.LabelPodTemplateHash: templateHash,
 			},
 		},
 	}

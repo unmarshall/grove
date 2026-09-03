@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/ai-dynamo/grove/operator/api/common"
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
@@ -31,7 +31,6 @@ import (
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -47,11 +46,10 @@ type updateWork struct {
 }
 
 // getPodNamesPendingUpdate returns names of pods with old template hash that are not already being deleted
-func (w *updateWork) getPodNamesPendingUpdate(deletionExpectedPodUIDs []types.UID) []string {
+func (r _resource) getPodNamesPendingUpdate(ss *syncSnapshot, w *updateWork) []string {
 	allOldPods := lo.Union(w.oldTemplateHashPendingPods, w.oldTemplateHashUnhealthyPods, w.oldTemplateHashStartingPods, w.oldTemplateHashUncategorizedPods, w.oldTemplateHashReadyPods)
-	deletionExpectedPodUIDSet := componentutils.NewSet(deletionExpectedPodUIDs)
 	return lo.FilterMap(allOldPods, func(pod *corev1.Pod, _ int) (string, bool) {
-		if deletionExpectedPodUIDSet.Has(pod.UID) {
+		if r.hasPodDeletionBeenTriggered(ss, pod) {
 			return "", false
 		}
 		return pod.Name, true
@@ -91,7 +89,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	// If we are here, then it means that either no ready pod has been selected for update or the current ready pod update is complete.
 	// In either of these cases we should pick up next pod to update if there are any pending pods to update.
 	var nextPodToUpdate *corev1.Pod
-	if podNamesPendingUpdate := uw.getPodNamesPendingUpdate(r.expectationsStore.GetDeleteExpectations(ss.pclqExpectationsStoreKey)); len(podNamesPendingUpdate) > 0 {
+	if podNamesPendingUpdate := r.getPodNamesPendingUpdate(ss, uw); len(podNamesPendingUpdate) > 0 {
 		if pclq.Status.ReadyReplicas < *pclq.Spec.MinAvailable {
 			return groveerr.New(
 				groveerr.ErrCodeContinueReconcileAndRequeue,
@@ -112,7 +110,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		}
 
 		// trigger deletion of nextPodToUpdate
-		deletionTask := r.createPodDeletionTask(logger, pclq, nextPodToUpdate, ss.pclqExpectationsStoreKey)
+		deletionTask := r.createPodDeletionTask(logger, pclq, nextPodToUpdate)
 		if err := deletionTask.Fn(ctx); err != nil {
 			return groveerr.WrapError(
 				err,
@@ -139,7 +137,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 func (r _resource) computeUpdateWork(logger logr.Logger, ss *syncSnapshot) *updateWork {
 	work := &updateWork{}
 	for _, pod := range ss.existingPCLQPods {
-		if pod.Labels[common.LabelPodTemplateHash] != ss.expectedPodTemplateHash {
+		if pod.Labels[apicommon.LabelPodTemplateHash] != ss.expectedPodTemplateHash {
 			// Old-hash pod — skip if deletion already in flight.
 			if r.hasPodDeletionBeenTriggered(ss, pod) {
 				logger.Info("skipping old Pod since its deletion has already been triggered", "pod", client.ObjectKeyFromObject(pod))
@@ -171,8 +169,16 @@ func (r _resource) computeUpdateWork(logger logr.Logger, ss *syncSnapshot) *upda
 }
 
 // hasPodDeletionBeenTriggered checks if a pod is already terminating or has a delete expectation recorded
+// under its PodGang-scoped key.
 func (r _resource) hasPodDeletionBeenTriggered(ss *syncSnapshot, pod *corev1.Pod) bool {
-	return k8sutils.IsResourceTerminating(pod.ObjectMeta) || r.expectationsStore.HasDeleteExpectation(ss.pclqExpectationsStoreKey, pod.GetUID())
+	if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
+		return true
+	}
+	key, err := componentutils.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, pod.Labels[apicommon.LabelPodGang])
+	if err != nil {
+		return false
+	}
+	return r.expectationsStore.HasDeleteExpectation(key, pod.GetUID())
 }
 
 // deleteOldNonReadyPods removes old-hash pods that are not Ready: pending, unhealthy, starting (startup probe),
@@ -186,7 +192,7 @@ func (r _resource) deleteOldNonReadyPods(ctx context.Context, logger logr.Logger
 	}
 
 	podsToDelete := lo.Union(work.oldTemplateHashPendingPods, work.oldTemplateHashUnhealthyPods, work.oldTemplateHashStartingPods, work.oldTemplateHashUncategorizedPods)
-	deletionTasks := r.createPodDeletionTasks(logger, ss.pclq, podsToDelete, ss.pclqExpectationsStoreKey)
+	deletionTasks := r.createPodDeletionTasks(logger, ss.pclq, podsToDelete)
 
 	if len(deletionTasks) == 0 {
 		logger.Info("no non-ready pods having old PodTemplateHash found")

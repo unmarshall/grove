@@ -94,35 +94,18 @@ func GroupPCLQsByPCSReplicaIndex(pclqs []grovecorev1alpha1.PodClique) (map[int][
 	return grouped, nil
 }
 
-// InitialScheduleGrace is the small window after PodClique / PodCliqueScalingGroup creation in
-// which a flipped Status of a status condition is treated as the first-time-set rather than a
-// transition from a different state. WasPCLQEverScheduled / WasPCSGEverHealthy use it to absorb
-// the gap between the apiserver setting CreationTimestamp and the first reconcile that mutates
-// the relevant condition.
+// InitialScheduleGrace is the small window after PodCliqueScalingGroup creation in which a flipped
+// status condition is treated as the first-time-set rather than a transition from a different state.
+// WasPCSGEverHealthy uses it to absorb the gap between the apiserver setting CreationTimestamp and
+// the first reconcile that mutates the MinAvailableBreached condition.
 const InitialScheduleGrace = 5 * time.Second
 
-// WasPCLQEverScheduled reports whether the PodClique has ever reached the
-// PodCliqueScheduled=True state since creation. The signal is derived from the
-// PodCliqueScheduled condition: either it is currently True, or it is currently False with a
-// LastTransitionTime sufficiently after CreationTimestamp that the condition must have flipped
-// since creation (i.e. through True). Used to gate gang-termination actions so a workload that
-// has never been healthy is left alone — only regressions get recycled.
-//
-// Limitation: like every status-derived check in the operator, this only sees transitions the
-// operator actually observed and persisted. If the condition flipped while no reconcile ran
-// (e.g. the operator was down), that transition is lost and the PCLQ is treated as
-// never-scheduled. This is a deliberate design trade-off: the gate errs on the side of NOT
-// gang-terminating, and the system stays eventually consistent — once the operator observes a
-// healthy state the gate re-arms and a later regression is recycled normally.
+// WasPCLQEverScheduled reports whether the PodClique has ever reached the PodCliqueScheduled=True
+// state. It reads Status.LastScheduled, a durable marker stamped in the same status reconcile that
+// first sets PodCliqueScheduled to True and never reset once set. A nil value means no reconcile has
+// yet observed the PodClique meet its scheduled count.
 func WasPCLQEverScheduled(pclq *grovecorev1alpha1.PodClique) bool {
-	sched := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypePodCliqueScheduled)
-	if sched == nil {
-		return false
-	}
-	if sched.Status == metav1.ConditionTrue {
-		return true
-	}
-	return sched.LastTransitionTime.After(pclq.CreationTimestamp.Add(InitialScheduleGrace))
+	return pclq.Status.LastScheduled != nil
 }
 
 // WasPCSGEverHealthy reports whether the PodCliqueScalingGroup has ever reached the

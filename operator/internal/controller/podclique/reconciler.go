@@ -49,17 +49,21 @@ type Reconciler struct {
 }
 
 // NewReconciler creates a new instance of the PodClique Reconciler.
-func NewReconciler(mgr ctrl.Manager, controllerCfg configv1alpha1.PodCliqueControllerConfiguration, schedRegistry scheduler.Registry) *Reconciler {
+func NewReconciler(mgr ctrl.Manager, controllerCfg configv1alpha1.PodCliqueControllerConfiguration, schedRegistry scheduler.Registry) (*Reconciler, error) {
 	eventRecorder := mgr.GetEventRecorderFor(controllerName)
 	expectationsStore := expect.NewExpectationsStore()
+	operatorRegistry, err := pclqcomponent.CreateOperatorRegistry(mgr, eventRecorder, expectationsStore, schedRegistry)
+	if err != nil {
+		return nil, err
+	}
 	return &Reconciler{
 		config:                  controllerCfg,
 		client:                  mgr.GetClient(),
 		eventRecorder:           eventRecorder,
 		reconcileStatusRecorder: ctrlcommon.NewReconcileErrorRecorder(mgr.GetClient()),
 		expectationsStore:       expectationsStore,
-		operatorRegistry:        pclqcomponent.CreateOperatorRegistry(mgr, eventRecorder, expectationsStore, schedRegistry),
-	}
+		operatorRegistry:        operatorRegistry,
+	}, nil
 }
 
 // Reconcile reconciles the `PodClique` resource.

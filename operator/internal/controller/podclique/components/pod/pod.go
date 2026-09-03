@@ -49,8 +49,8 @@ const (
 	errCodeGetAvailablePodHostNameIndices      grovecorev1alpha1.ErrorCode = "ERR_GET_AVAILABLE_POD_HOSTNAME_INDICES"
 	errCodeGetPodGang                          grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANG"
 	errCodeGetPodGangMap                       grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANGMAP"
+	errCodePodGangMapNotFound                  grovecorev1alpha1.ErrorCode = "ERR_PODGANGMAP_NOT_FOUND"
 	errCodeGetPodCliqueSet                     grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUESET"
-	errCodeGetPodClique                        grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUE"
 	errCodeListPod                             grovecorev1alpha1.ErrorCode = "ERR_LIST_POD"
 	errCodeRemovePodSchedulingGate             grovecorev1alpha1.ErrorCode = "ERR_REMOVE_POD_SCHEDULING_GATE"
 	errCodeCreatePod                           grovecorev1alpha1.ErrorCode = "ERR_CREATE_POD"
@@ -64,6 +64,8 @@ const (
 	errCodeMissingPodCliqueTemplate            grovecorev1alpha1.ErrorCode = "ERR_MISSING_PODCLIQUE_TEMPLATE"
 	errCodeGetPodCliqueTemplate                grovecorev1alpha1.ErrorCode = "ERR_GET_PODCLIQUE_TEMPLATE"
 	errCodeUpdatePodCliqueStatus               grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODCLIQUE_STATUS"
+	errCodeLabelPod                            grovecorev1alpha1.ErrorCode = "ERR_LABEL_POD"
+	errCodeRegisterExpectationsIndexers        grovecorev1alpha1.ErrorCode = "ERR_REGISTER_EXPECTATIONS_INDEXERS"
 )
 
 const (
@@ -79,14 +81,27 @@ type _resource struct {
 }
 
 // New creates a new Pod operator for managing Pod resources within PodCliques
-func New(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, expectationsStore *expect.ExpectationsStore, schedRegistry scheduler.Registry) component.Operator[grovecorev1alpha1.PodClique] {
+func New(client client.Client,
+	scheme *runtime.Scheme,
+	eventRecorder record.EventRecorder,
+	expectationsStore *expect.ExpectationsStore,
+	schedRegistry scheduler.Registry) (component.Operator[grovecorev1alpha1.PodClique], error) {
+	// The pod component groups its create and delete expectations by owning PodClique so it can clear
+	// them per PodClique in one call regardless of how many PodGangs a PodClique's pods span.
+	if err := expectationsStore.AddIndexers(componentutils.PodCliqueExpectationsIndexers()); err != nil {
+		return nil, groveerr.WrapError(err,
+			errCodeRegisterExpectationsIndexers,
+			component.OperationSync,
+			"failed to register PodClique expectations indexers on the expectations store",
+		)
+	}
 	return &_resource{
 		client:            client,
 		scheme:            scheme,
 		eventRecorder:     eventRecorder,
 		expectationsStore: expectationsStore,
 		schedRegistry:     schedRegistry,
-	}
+	}, nil
 }
 
 // GetExistingResourceNames returns the names of all the existing pods for the given PodClique.
@@ -282,11 +297,7 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pclqObjectMet
 			fmt.Sprintf("failed to delete all pods for PodClique %v", k8sutils.GetObjectKeyFromObjectMeta(pclqObjectMeta)),
 		)
 	}
-	pclqExpStoreKey, err := getPodCliqueExpectationsStoreKey(logger, component.OperationDelete, pclqObjectMeta)
-	if err != nil {
-		return err
-	}
-	if err = r.expectationsStore.DeleteExpectations(logger, pclqExpStoreKey); err != nil {
+	if err := componentutils.ClearPodCliqueExpectations(logger, r.expectationsStore, pclqObjectMeta); err != nil {
 		return groveerr.WrapError(err,
 			errCodeDeletePodCliqueExpectations,
 			component.OperationDelete,

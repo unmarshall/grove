@@ -142,3 +142,13 @@ func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
 	}
 	return "", fmt.Errorf("no AnchorIndex 0 anchor entry exists in PodGangMap %s", pgm.Name)
 }
+
+// IndexPodGangEntriesByEpoch returns a map of the PodGangMap entries keyed by their epoch. Epoch is
+// unique per entry, so each key maps to a single entry.
+func IndexPodGangEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) map[string]grovecorev1alpha1.PodGangEntry {
+	byEpoch := make(map[string]grovecorev1alpha1.PodGangEntry, len(entries))
+	for _, entry := range entries {
+		byEpoch[entry.Epoch] = entry
+	}
+	return byEpoch
+}

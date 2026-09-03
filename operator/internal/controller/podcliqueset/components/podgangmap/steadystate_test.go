@@ -15,6 +15,7 @@
 package podgangmap
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -377,6 +378,55 @@ func TestSyncEntries(t *testing.T) {
 			actual, err := reconcileEntries(clk, tt.pcs, 0, pgm, nil, tt.standalonePCLQs, tt.pcsgs)
 			require.NoError(t, err)
 			tt.assertResult(t, actual)
+		})
+	}
+}
+
+// TestReconcileStandaloneCliqueCountAcrossAnchors verifies a standalone clique's counts are driven
+// toward the desired total by adding to the highest-AnchorIndex anchor on scale-out and draining the
+// highest-AnchorIndex anchor first on scale-in, spilling to the next-highest as each empties. It does
+// not floor at MinAvailable, so a scale-in can drain every anchor to zero.
+func TestReconcileStandaloneCliqueCountAcrossAnchors(t *testing.T) {
+	const clique = "clq-a"
+	// anchorsHighestFirst builds anchor entries ordered by descending AnchorIndex, as
+	// currentGenerationAnchorsByIndexDesc returns them. The i-th count is anchor index len-1-i.
+	anchorsHighestFirst := func(countsByIndex ...int32) []*grovecorev1alpha1.PodGangEntry {
+		anchors := make([]*grovecorev1alpha1.PodGangEntry, 0, len(countsByIndex))
+		for i := len(countsByIndex) - 1; i >= 0; i-- {
+			entry := testutils.NewPodGangEntryBuilder(testGenHash, strconv.Itoa(100+i)).
+				WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+				WithAnchorIndex(int32(i)).
+				WithPodCliques(map[string]int32{clique: countsByIndex[i]}).
+				Build()
+			anchors = append(anchors, &entry)
+		}
+		return anchors
+	}
+
+	tests := []struct {
+		name         string
+		counts       []int32 // per anchor index (0..n)
+		desiredTotal int32
+		expected     []int32 // per anchor index (0..n)
+	}{
+		{"single anchor is set to the desired total", []int32{3}, 5, []int32{5}},
+		{"no change when the desired total already matches", []int32{3, 3, 3}, 9, []int32{3, 3, 3}},
+		{"scale-out adds to the highest anchor", []int32{3, 3, 3}, 11, []int32{3, 3, 5}},
+		{"scale-in drains the highest anchor first", []int32{3, 3, 3}, 7, []int32{3, 3, 1}},
+		{"scale-in spills from the highest anchor to the next-highest", []int32{3, 3, 3}, 4, []int32{3, 1, 0}},
+		{"scale-in to zero drains every anchor", []int32{3, 3, 3}, 0, []int32{0, 0, 0}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			anchors := anchorsHighestFirst(tc.counts...)
+
+			reconcileStandaloneCliqueCountAcrossAnchors(anchors, clique, tc.desiredTotal)
+
+			actual := make([]int32, len(tc.expected))
+			for _, anchor := range anchors {
+				actual[*anchor.AnchorIndex] = anchor.PodCliques[clique]
+			}
+			assert.Equal(t, tc.expected, actual)
 		})
 	}
 }

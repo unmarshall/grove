@@ -75,6 +75,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 	// This prevents prematurely setting incorrect conditions.
 	if pclq.Status.ObservedGeneration != nil {
 		mutatePodCliqueScheduledCondition(pclq)
+		mutateLastScheduled(pclq, originalStatus)
 		mutateMinAvailableBreachedCondition(pclq,
 			len(podCategories[k8sutils.PodHasAtleastOneContainerWithNonZeroExitCode]),
 			len(podCategories[k8sutils.PodStartedButNotReady]))
@@ -275,6 +276,21 @@ func mutatePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) {
 	newCondition := computePodCliqueScheduledCondition(pclq)
 	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
 		meta.SetStatusCondition(&pclq.Status.Conditions, newCondition)
+	}
+}
+
+// mutateLastScheduled advances Status.LastScheduled to now when the PodCliqueScheduled condition
+// transitions to True in this reconcile, and backfills it when the PodClique is already scheduled
+// but has no LastScheduled yet. The backfill covers a PodClique upgraded from a version that
+// predates LastScheduled, whose PodCliqueScheduled is already True so no fresh transition occurs.
+// It is never reset to nil once set.
+func mutateLastScheduled(pclq *grovecorev1alpha1.PodClique, originalStatus *grovecorev1alpha1.PodCliqueStatus) {
+	scheduledNow := meta.IsStatusConditionTrue(pclq.Status.Conditions, constants.ConditionTypePodCliqueScheduled)
+	scheduledBefore := meta.IsStatusConditionTrue(originalStatus.Conditions, constants.ConditionTypePodCliqueScheduled)
+	freshlyScheduled := scheduledNow && !scheduledBefore
+	needsBackfill := scheduledNow && pclq.Status.LastScheduled == nil
+	if freshlyScheduled || needsBackfill {
+		pclq.Status.LastScheduled = ptr.To(metav1.Now())
 	}
 }
 

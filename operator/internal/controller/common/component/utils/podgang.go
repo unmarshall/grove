@@ -16,6 +16,7 @@ package utils
 
 import (
 	"context"
+	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 
@@ -57,4 +58,31 @@ func GetExistingPodGangs(ctx context.Context, cl client.Client, pcsObjectMeta me
 	return lo.Filter(podGangs.Items, func(podGang groveschedulerv1alpha1.PodGang, _ int) bool {
 		return metav1.IsControlledBy(&podGang, &pcsObjectMeta)
 	}), nil
+}
+
+// AllPodGangsAtEpochEverScheduled reports whether every PodGang belonging to the given PodCliqueSet
+// replica and epoch has been scheduled at least once. A PodGang counts as ever-scheduled when its
+// Status.LastScheduled is set, a monotonic marker that is never cleared once the gang first reaches
+// Scheduled True. It returns false when no PodGang carries the epoch, since an absent gang cannot be
+// a satisfied dependency.
+func AllPodGangsAtEpochEverScheduled(ctx context.Context, cl client.Client, pcsObjectKey client.ObjectKey, pcsReplicaIndex int32, epoch string) (bool, error) {
+	podGangs := groveschedulerv1alpha1.PodGangList{}
+	if err := cl.List(ctx, &podGangs,
+		client.InNamespace(pcsObjectKey.Namespace),
+		client.MatchingLabels(map[string]string{
+			apicommon.LabelPartOfKey:                pcsObjectKey.Name,
+			apicommon.LabelPodCliqueSetReplicaIndex: strconv.Itoa(int(pcsReplicaIndex)),
+			apicommon.LabelEpoch:                    epoch,
+		})); err != nil {
+		return false, err
+	}
+	if len(podGangs.Items) == 0 {
+		return false, nil
+	}
+	for i := range podGangs.Items {
+		if podGangs.Items[i].Status.LastScheduled == nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }

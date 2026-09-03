@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -320,4 +321,51 @@ func TestGetExistingPodGangs(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, result)
 	})
+}
+
+// TestAllPodGangsAtEpochEverScheduled verifies an epoch counts as scheduled only when every PodGang
+// carrying it has LastScheduled set, and an epoch with no PodGangs is not scheduled.
+func TestAllPodGangsAtEpochEverScheduled(t *testing.T) {
+	const (
+		pcsName   = "test-pcs"
+		namespace = "default"
+		epoch     = "1000"
+	)
+	pcsObjectKey := client.ObjectKey{Namespace: namespace, Name: pcsName}
+
+	podGangAtEpoch := func(name string, scheduled bool) *groveschedulerv1alpha1.PodGang {
+		builder := testutils.NewPodGangBuilder(name, namespace).
+			WithLabels(map[string]string{
+				apicommon.LabelPartOfKey:                pcsName,
+				apicommon.LabelPodCliqueSetReplicaIndex: "0",
+				apicommon.LabelEpoch:                    epoch,
+			})
+		if scheduled {
+			builder = builder.WithLastScheduled()
+		}
+		return builder.Build()
+	}
+
+	tests := []struct {
+		name     string
+		podGangs []*groveschedulerv1alpha1.PodGang
+		expected bool
+	}{
+		{"epoch with no PodGangs is not scheduled", nil, false},
+		{"epoch is scheduled when all its PodGangs are scheduled", []*groveschedulerv1alpha1.PodGang{podGangAtEpoch("pg-0", true), podGangAtEpoch("pg-1", true)}, true},
+		{"epoch is not scheduled when any of its PodGangs is unscheduled", []*groveschedulerv1alpha1.PodGang{podGangAtEpoch("pg-0", true), podGangAtEpoch("pg-1", false)}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := testutils.NewTestClientBuilder()
+			for _, pg := range tc.podGangs {
+				builder = builder.WithObjects(pg)
+			}
+			cl := builder.Build()
+
+			actual, err := AllPodGangsAtEpochEverScheduled(t.Context(), cl, pcsObjectKey, 0, epoch)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
 }

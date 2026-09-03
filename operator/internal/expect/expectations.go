@@ -24,16 +24,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// ControlleeKeyFunc is a key function used to create Controllee keys that are used to uniquely identify expectations that
-// are stored in the expectations store.
-var ControlleeKeyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
-
 // ExpectationsStore is a cache where add and delete expectations are captured.
 // `controller-runtime` serves the read requests from an informer cache and will query the kube-apiserver
 // during startup or resyncs. The informer cache does not provide read-your-writes consistency which leads to stale
 // caches. Informer caches are eventually consistent but if your controller gets quick events then it is possible
 // that the controller operates on a stale state, thus leading to side effects which could include creation of adding
-// resource replicas or deletion of more then desired replicas of a resource.
+// resource replicas or deletion of more than desired replicas of a resource.
 // NOTE: Expectations is an existing pattern already used in kubernetes.
 // See [ControllerExpectationsInterface]: https://github.com/kubernetes/kubernetes/blob/e6161070d4416f6d9c1ac9961029fdceef5c9286/pkg/controller/controller_utils.go#L157
 // where expectations are used to provide a barrier when reconciling resources. If the previous expectations are not fulfilled, or they have not yet expired
@@ -43,7 +39,7 @@ var ControlleeKeyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
 // the reconciler correctly compute the desired number of creates or deletes.
 // It also attempts to resolve the 2 issues that are listed in https://github.com/kubernetes/kubernetes/issues/129795#issuecomment-2657716713
 type ExpectationsStore struct {
-	cache.Store
+	cache.Indexer
 	mu sync.Mutex
 }
 
@@ -61,10 +57,27 @@ type ControlleeExpectations struct {
 	uidsToAdd sets.Set[types.UID]
 }
 
+// Key returns the storage key this expectation is recorded under. It is the same key
+// the consumer supplied when raising create/delete expectations. The store treats the key
+// as an opaque string and imposes no structure on it.
+//
+// This accessor exists because a cache.IndexFunc registered on the store is invoked with
+// the stored expectation as an opaque value. A consumer that defines its cache.IndexFunc
+// in its own package can only read the exported surface of this type. This accessor allows
+// cache.IndexFunc to read the key.
+// As an example: A consumer that keys by "<namespace>/<name>/<sub-scope>", for instance,
+// reads Key in its cache.IndexFunc and returns the "<namespace>/<name>" prefix as the group,
+// then clears a whole group with DeleteExpectationsByIndex.
+//
+// Keeping the derivation in the consumer keeps the store agnostic to the key's structure.
+func (e *ControlleeExpectations) Key() string {
+	return e.key
+}
+
 // NewExpectationsStore creates a new expectations store.
 func NewExpectationsStore() *ExpectationsStore {
 	return &ExpectationsStore{
-		Store: cache.NewStore(getControlleeExpectationsKeyFunc()),
+		Indexer: cache.NewIndexer(getControlleeExpectationsKeyFunc(), cache.Indexers{}),
 	}
 }
 
@@ -95,6 +108,23 @@ func (s *ExpectationsStore) DeleteExpectations(logger logr.Logger, controlleeKey
 		}
 	}
 	logger.Info("Successfully deleted expectations", "controlleeKey", controlleeKey)
+	return nil
+}
+
+// DeleteExpectationsByIndex removes every expectation grouped under indexedValue in the named index.
+func (s *ExpectationsStore) DeleteExpectationsByIndex(logger logr.Logger, indexName, indexedValue string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exps, err := s.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return fmt.Errorf("%w: could not list expectations for index %s=%s", err, indexName, indexedValue)
+	}
+	for _, exp := range exps {
+		if err = s.Delete(exp); err != nil {
+			return fmt.Errorf("%w: could not delete expectations for index %s=%s", err, indexName, indexedValue)
+		}
+	}
+	logger.Info("Successfully deleted expectations by index", "indexName", indexName, "indexedValue", indexedValue)
 	return nil
 }
 
