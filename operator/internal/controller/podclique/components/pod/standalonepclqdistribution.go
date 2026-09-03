@@ -191,9 +191,12 @@ func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPo
 }
 
 // reconcileLivePodCountWithExpectations syncs the PodGang's expectations against its live pods, then
-// returns the live pod count reconciled with its outstanding expectations. It is the non-terminating
+// returns the live pod count reconciled with its outstanding expectations. The count is the existing
 // pods plus outstanding create expectations minus outstanding delete expectations, so a create or
 // delete issued in a prior reconcile, but not yet reflected in the informer cache, is not repeated.
+// A terminating pod still exists in the cache, so it is included in the existing pods. SyncExpectations
+// keeps it in the delete expectations, so it is also subtracted. The two contributions cancel, so a
+// terminating pod has no net effect on the count and is not subtracted twice.
 func (r _resource) reconcileLivePodCountWithExpectations(pclqObjMeta metav1.ObjectMeta, podGangName string, group podGangPods) (int32, error) {
 	key, err := componentutils.PodGangScopedExpectationsStoreKey(pclqObjMeta, podGangName)
 	if err != nil {
@@ -202,7 +205,8 @@ func (r _resource) reconcileLivePodCountWithExpectations(pclqObjMeta metav1.Obje
 	nonTerminatingUIDs := lo.Map(group.nonTerminating, func(pod *corev1.Pod, _ int) types.UID { return pod.GetUID() })
 	terminatingUIDs := lo.Map(group.terminating, func(pod *corev1.Pod, _ int) types.UID { return pod.GetUID() })
 	r.expectationsStore.SyncExpectations(key, nonTerminatingUIDs, terminatingUIDs)
-	return int32(len(nonTerminatingUIDs)) +
+	existingPodCount := int32(len(nonTerminatingUIDs) + len(terminatingUIDs))
+	return existingPodCount +
 		int32(len(r.expectationsStore.GetCreateExpectations(key))) -
 		int32(len(r.expectationsStore.GetDeleteExpectations(key))), nil
 }

@@ -104,12 +104,13 @@ func TestComputeCountDeltaByPodGang(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		desired      map[string]int32
-		livePods     map[string][]*corev1.Pod
-		createExpUID map[string][]types.UID // pending creates per PodGang
-		deleteExpUID map[string][]types.UID // pending deletes per PodGang
-		expected     map[string]int32
+		name            string
+		desired         map[string]int32
+		livePods        map[string][]*corev1.Pod
+		terminatingPods map[string][]*corev1.Pod
+		createExpUID    map[string][]types.UID // pending creates per PodGang
+		deleteExpUID    map[string][]types.UID // pending deletes per PodGang
+		expected        map[string]int32
 	}{
 		{
 			name:     "deficit needs creation",
@@ -153,13 +154,36 @@ func TestComputeCountDeltaByPodGang(t *testing.T) {
 			deleteExpUID: map[string][]types.UID{"pg-a": {"pending-delete"}},
 			expected:     map[string]int32{},
 		},
+		{
+			// A terminating pod is counted as present and is also carried in the delete expectations by
+			// SyncExpectations. The two cancel, so a terminating pod neither adds to nor subtracts from
+			// the effective count. With the desired count already met by non-terminating pods, no pod is
+			// created or deleted.
+			name:            "a terminating pod alongside the desired non-terminating pods triggers no change",
+			desired:         map[string]int32{"pg-a": 2},
+			livePods:        map[string][]*corev1.Pod{"pg-a": {nonTerminatingPodInPodGang("pod-a", "pg-a", ""), nonTerminatingPodInPodGang("pod-b", "pg-a", "")}},
+			terminatingPods: map[string][]*corev1.Pod{"pg-a": {terminatingPodInPodGang("pod-c", "pg-a", "terminating")}},
+			deleteExpUID:    map[string][]types.UID{"pg-a": {"terminating"}},
+			expected:        map[string]int32{},
+		},
+		{
+			// A terminating pod is counted as present and is also carried in the delete expectations, so
+			// it does not offset the deficit. The deficit is measured against the non-terminating pods
+			// alone, so a replacement is created for every missing pod.
+			name:            "a terminating pod does not offset the deficit from non-terminating pods",
+			desired:         map[string]int32{"pg-a": 3},
+			livePods:        map[string][]*corev1.Pod{"pg-a": {nonTerminatingPodInPodGang("pod-a", "pg-a", "")}},
+			terminatingPods: map[string][]*corev1.Pod{"pg-a": {terminatingPodInPodGang("pod-b", "pg-a", "terminating")}},
+			deleteExpUID:    map[string][]types.UID{"pg-a": {"terminating"}},
+			expected:        map[string]int32{"pg-a": 2},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := expect.NewExpectationsStore()
 			podsByPodGang := make(map[string]podGangPods, len(tc.livePods))
 			for podGangName, pods := range tc.livePods {
-				podsByPodGang[podGangName] = podGangPods{nonTerminating: pods}
+				podsByPodGang[podGangName] = podGangPods{nonTerminating: pods, terminating: tc.terminatingPods[podGangName]}
 				if uids := tc.createExpUID[podGangName]; len(uids) > 0 {
 					require.NoError(t, store.ExpectCreations(logr.Discard(), keyFor(podGangName), uids...))
 				}
@@ -578,5 +602,14 @@ func nonTerminatingPodInPodGang(name, podGangName, hostname string) *corev1.Pod 
 func podWithUID(name, podGangName string, uid types.UID) *corev1.Pod {
 	pod := nonTerminatingPodInPodGang(name, podGangName, "")
 	pod.UID = uid
+	return pod
+}
+
+// terminatingPodInPodGang builds a terminating pod assigned to podGangName and carrying the given
+// UID. A terminating pod has a deletion timestamp but still occupies its slot until its grace period
+// elapses.
+func terminatingPodInPodGang(name, podGangName string, uid types.UID) *corev1.Pod {
+	pod := podWithUID(name, podGangName, uid)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	return pod
 }
