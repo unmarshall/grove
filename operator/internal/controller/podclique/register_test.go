@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -466,4 +467,58 @@ func TestMapPodGangMapToPCLQs(t *testing.T) {
 		{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-backend"}},
 	}
 	assert.ElementsMatch(t, expected, actual)
+}
+
+// TestMapPodGangToPCLQs verifies mapPodGangToPCLQs derives each reconcile request from the PodGroup
+// name, which is the PodClique FQN, for every PodGroup in the PodGang. It returns no requests for a
+// non-PodGang object and for a PodGang with no PodGroups. The long-name case guards against deriving
+// the name from a pod name, which truncates the PodClique name past the GenerateName prefix limit.
+func TestMapPodGangToPCLQs(t *testing.T) {
+	const ns = "default"
+	mapFn := mapPodGangToPCLQs()
+
+	tests := []struct {
+		name     string
+		obj      client.Object
+		expected []reconcile.Request
+	}{
+		{
+			name:     "non-PodGang object yields no requests",
+			obj:      &grovecorev1alpha1.PodClique{},
+			expected: nil,
+		},
+		{
+			name:     "PodGang with no PodGroups yields no requests",
+			obj:      testutils.NewPodGangBuilder("pcs-0-1000", ns).Build(),
+			expected: []reconcile.Request{},
+		},
+		{
+			name:     "single PodGroup maps to its PodClique FQN",
+			obj:      testutils.NewPodGangBuilder("pcs-0-1000", ns).WithPodGroup("pcs-0-worker", 1).Build(),
+			expected: []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-worker"}}},
+		},
+		{
+			name: "multiple PodGroups map to each PodClique FQN",
+			obj: testutils.NewPodGangBuilder("pcs-0-1000", ns).
+				WithPodGroup("pcs-0-worker-0-worker-ldr", 1).
+				WithPodGroup("pcs-0-worker-0-worker-wkr", 1).Build(),
+			expected: []reconcile.Request{
+				{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-worker-0-worker-ldr"}},
+				{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pcs-0-worker-0-worker-wkr"}},
+			},
+		},
+		{
+			// A PodClique FQN longer than the 57-character GenerateName prefix limit. Its pods carry a
+			// truncated name, so only the PodGroup name recovers the full FQN.
+			name:     "long PodClique name is not truncated",
+			obj:      testutils.NewPodGangBuilder("pcs-0-1000", ns).WithPodGroup("p1-decodegpu-h200-4e564943a10c5baf96189162d0c47591-0-prefill", 1).Build(),
+			expected: []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: "p1-decodegpu-h200-4e564943a10c5baf96189162d0c47591-0-prefill"}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := mapFn(t.Context(), tc.obj)
+			assert.ElementsMatch(t, tc.expected, actual)
+		})
+	}
 }
