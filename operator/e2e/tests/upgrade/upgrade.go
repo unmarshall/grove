@@ -75,9 +75,14 @@ func runUpgradeTest(t *testing.T, cfg upgradeTest) {
 
 	testctx.Logger.Infof("preparing test cluster")
 	tc, cleanup := testctx.PrepareTest(t.Context(), t, cfg.nodeWorkerCount, cfg.prepareOpts...)
-	defer cleanup()
 
 	installReleasedGrove(t, tc, cfg.fromVersion)
+	// The upgrade tests share one cluster, so uninstall Grove after the test to free the release name
+	// for the next one. This defer is registered before cleanup so it runs last, after cleanup has
+	// deleted the workload while the operator is still up to process finalizers.
+	defer uninstallGrove(t, tc)
+	defer cleanup()
+
 	if cfg.preUpgrade != nil {
 		cfg.preUpgrade(t, tc)
 	}
@@ -122,6 +127,18 @@ func installReleasedGrove(t *testing.T, tc *testctx.TestContext, version string)
 	podsManager := pods.NewPodManager(tc.Client, testctx.Logger)
 	require.NoError(t, podsManager.WaitForReadyInNamespace(t.Context(), groveNamespace, 1, defaultPollTimeout, defaultPollInterval),
 		"waiting for Grove to become ready")
+}
+
+// uninstallGrove removes the Grove release so the shared cluster is clean for the next upgrade test.
+func uninstallGrove(t *testing.T, tc *testctx.TestContext) {
+	t.Helper()
+	require.NoError(t, setup.UninstallHelmChart(&setup.HelmInstallConfig{
+		RestConfig:     tc.Client.RestConfig,
+		ReleaseName:    groveReleaseName,
+		Namespace:      groveNamespace,
+		Timeout:        defaultPollTimeout,
+		HelmLoggerFunc: testctx.Logger.Infof,
+	}), "uninstall Grove chart")
 }
 
 // upgradeGrove handles the upgrade of Grove to the current codebase.

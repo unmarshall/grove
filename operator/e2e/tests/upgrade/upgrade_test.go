@@ -52,11 +52,6 @@ const (
 	upgradePCSGWorkloadNamespace = "default"
 )
 
-// TestUpgradeFromLatestGitHubRelease verifies that a workload's pods created with the latest released
-// version of Grove are not recreated during an upgrade to the operator built from the current
-// checkout.
-//
-// The initial version of Grove to install can be controlled with GROVE_UPGRADE_FROM_VERSION.
 // podSurvivalUpgrade holds the state shared between the pre-upgrade and post-upgrade steps of the pod
 // survival test. The pod list is captured before the upgrade and asserted against afterwards.
 type podSurvivalUpgrade struct {
@@ -82,12 +77,12 @@ func (s *podSurvivalUpgrade) verifyPodsSurvive(t *testing.T, tc *testctx.TestCon
 	verifyPodUIDsUnchanged(t, tc, s.podsBeforeUpgrade)
 }
 
-// TestUpgradeFromLatestGitHubRelease verifies that a workload's pods created with the latest released
+// Test_VUPG1_UpgradeFromLatestGitHubRelease verifies that a workload's pods created with the latest released
 // version of Grove are not recreated during an upgrade to the operator built from the current
 // checkout.
 //
 // The initial version of Grove to install can be controlled with GROVE_UPGRADE_FROM_VERSION.
-func TestUpgradeFromLatestGitHubRelease(t *testing.T) {
+func Test_VUPG1_UpgradeFromLatestGitHubRelease(t *testing.T) {
 	fromVersion := os.Getenv("GROVE_UPGRADE_FROM_VERSION")
 	if fromVersion == "" {
 		fromVersion = latestGitHubRelease(t)
@@ -112,12 +107,12 @@ func TestUpgradeFromLatestGitHubRelease(t *testing.T) {
 	})
 }
 
-// TestUpgradeFromAlpha11RecoversPodGangMapAfterScaleBelowMinAvailable verifies that after migrating a
+// Test_VUPG2_RecoverPodGangMapAfterScaleBelowMinAvailable verifies that after migrating a
 // legacy workload from v0.1.0-alpha.11 to the epoch-based PodGang scheme, scaling a
 // PodCliqueScalingGroup below MinAvailable drains its PodGangMap to empty without wedging, and scaling
 // it back up rebuilds the anchor and reschedules the pods. This exercises the fix for issues #808 and
 // #809 through the real migration path.
-func TestUpgradeFromAlpha11RecoversPodGangMapAfterScaleBelowMinAvailable(t *testing.T) {
+func Test_VUPG2_RecoverPodGangMapAfterScaleBelowMinAvailable(t *testing.T) {
 	runUpgradeTest(t, upgradeTest{
 		fromVersion:     "v0.1.0-alpha.11",
 		nodeWorkerCount: 4,
