@@ -114,7 +114,7 @@ func Test_PGMR1_ReconstructScaledPCSGAfterPodGangMapDelete(t *testing.T) {
 		t.Fatalf("Pods not all running after PodGangMap reconstruction: %v", err)
 	}
 
-	Logger.Info("PGMR-1 completed successfully")
+	Logger.Info("🎉 PGMR-1 completed successfully!")
 }
 
 // Test_PGMR2_ReconstructScaledStandalonePCLQAfterPodGangMapDelete verifies that a PodGangMap deleted
@@ -174,7 +174,7 @@ func Test_PGMR2_ReconstructScaledStandalonePCLQAfterPodGangMapDelete(t *testing.
 		t.Fatalf("Pods not all running after PodGangMap reconstruction: %v", err)
 	}
 
-	Logger.Info("PGMR-2 completed successfully")
+	Logger.Info("🎉 PGMR-2 completed successfully!")
 }
 
 // Test_PGMR3_ReconstructFreshBootstrapAfterPodGangMapDelete verifies that a PodGangMap deleted with no
@@ -231,7 +231,7 @@ func Test_PGMR3_ReconstructFreshBootstrapAfterPodGangMapDelete(t *testing.T) {
 		t.Fatalf("Pods not all running after PodGangMap reconstruction: %v", err)
 	}
 
-	Logger.Info("PGMR-3 completed successfully")
+	Logger.Info("🎉 PGMR-3 completed successfully!")
 }
 
 // Test_PGMR4_ReconstructAfterScaleInThenPodGangMapDelete verifies that after a PodCliqueScalingGroup is
@@ -292,7 +292,159 @@ func Test_PGMR4_ReconstructAfterScaleInThenPodGangMapDelete(t *testing.T) {
 		t.Fatalf("Pods not all running after PodGangMap reconstruction: %v", err)
 	}
 
-	Logger.Info("PGMR-4 completed successfully")
+	Logger.Info("🎉 PGMR-4 completed successfully!")
+}
+
+// Test_PGMR5_RecoverAfterScalingPCSGBelowMinAvailable verifies that scaling a PodCliqueScalingGroup
+// below MinAvailable, which drains the anchor entry to empty on an all-PCSG PodCliqueSet, does not
+// wedge the PodGangMap. The anchor and ScaleOut entries vanish together while the group is at zero, and
+// both return when the group is scaled back up, so the worker pods schedule again. This is the
+// regression behind an all-PCSG workload that could not scale back from zero.
+// Scenario PGMR-5:
+// 1. Initialize a 4-node Grove cluster
+// 2. Deploy workload WL-PCSG-ONLY (one PCSG worker=1 over worker-ldr+worker-wkr), verify 2 pods
+// 3. Verify the PodGangMap starts with an anchor holding worker index 0 and an empty ScaleOut entry
+// 4. Scale the worker group to 0, below MinAvailable, and verify both entries vanish
+// 5. Scale the worker group back to 1, and verify the anchor holding worker index 0 and the empty
+//    ScaleOut entry are both present again
+// 6. Verify both worker pods are running again
+func Test_PGMR5_RecoverAfterScalingPCSGBelowMinAvailable(t *testing.T) {
+	ctx := t.Context()
+
+	Logger.Info("1. Initialize a 4-node Grove cluster")
+	Logger.Info("2. Deploy workload WL-PCSG-ONLY, and verify 2 newly created pods")
+	tc, cleanup := testctx.PrepareTest(ctx, t, 4,
+		testctx.WithWorkload(&testctx.WorkloadConfig{
+			Name:         "workload-pcsg-only",
+			YAMLPath:     "../yaml/workload-pcsg-only.yaml",
+			Namespace:    "default",
+			ExpectedPods: 2,
+		}),
+	)
+	defer cleanup()
+
+	if _, err := tc.DeployAndVerifyWorkload(); err != nil {
+		t.Fatalf("Failed to deploy workload: %v", err)
+	}
+
+	verifier := podgangmap.NewVerifier(tc.Client, Logger)
+	pcsNsName := types.NamespacedName{Namespace: tc.Namespace, Name: "workload-pcsg-only"}
+
+	Logger.Info("3. Verify the PodGangMap starts with an anchor holding worker index 0 and an empty ScaleOut entry")
+	if err := verifier.Verify(ctx, pcsNsName, 0,
+		podgangmap.AnchorPCSGReplicaIndicesCheckFn("worker", []int32{0}),
+		podgangmap.ScaleOutPCSGReplicaIndicesCheckFn("worker", nil),
+	); err != nil {
+		t.Fatalf("PodGangMap not in expected state at baseline: %v", err)
+	}
+
+	Logger.Info("4. Scale the worker group to 0, below MinAvailable, and verify both entries vanish")
+	tc.ScalePCSGAcrossAllReplicasAndWait("workload-pcsg-only", "worker", 1, 0, 0, 0)
+	if err := podgangmap.WaitUntilVerified(ctx, verifier, pcsNsName, 0, pgmReconstructTimeout, tc.Interval,
+		podgangmap.NoEntriesCheckFn(),
+	); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	Logger.Info("5. Scale the worker group back to 1, and verify the anchor and empty ScaleOut entry are both present")
+	tc.ScalePCSGAcrossAllReplicasAndWait("workload-pcsg-only", "worker", 1, 1, 2, 0)
+	if err := podgangmap.WaitUntilVerified(ctx, verifier, pcsNsName, 0, pgmReconstructTimeout, tc.Interval,
+		podgangmap.AnchorPCSGReplicaIndicesCheckFn("worker", []int32{0}),
+		podgangmap.ScaleOutPCSGReplicaIndicesCheckFn("worker", nil),
+	); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	Logger.Info("6. Verify the anchor PodGang eventually records LastScheduled and LastReady")
+	pgVerifier := podgang.NewVerifier(tc.Client, Logger)
+	if err := podgang.WaitUntilVerified(ctx, pgVerifier, pcsNsName, pgmReconstructTimeout, tc.Interval,
+		podgang.LastScheduledSetCheckFn(true),
+		podgang.LastReadySetCheckFn(true),
+	); err != nil {
+		t.Fatalf("anchor PodGang did not record LastScheduled and LastReady: %v", err)
+	}
+
+	Logger.Info("7. Verify both worker pods are running again")
+	if err := tc.WaitForRunningPods(2); err != nil {
+		t.Fatalf("Pods not all running after scaling the group back up: %v", err)
+	}
+
+	Logger.Info("🎉 PGMR-5 completed successfully!")
+}
+
+// Test_PGMR6_RecoverAfterScalingStandalonePCLQToZero verifies that scaling the only standalone
+// PodClique of a PodCliqueSet to zero drains the anchor entry to empty and, because there is no
+// PodCliqueScalingGroup, leaves the PodGangMap with no entries at all, without wedging it. The
+// PodClique's pods are deleted as it scales to zero, and scaling it back up rebuilds the anchor and
+// recreates the pod.
+// Scenario PGMR-6:
+// 1. Initialize a 4-node Grove cluster
+// 2. Deploy workload WL-PCLQ-ONLY (one standalone PodClique solo=1), verify 1 pod
+// 3. Verify the PodGangMap starts with an anchor holding the solo PodClique count 1
+// 4. Scale solo to 0, and verify the PodGangMap holds no entries and no pods remain
+// 5. Scale solo back to 1, and verify the anchor holds the solo count 1 again
+// 6. Verify the anchor PodGang eventually records LastScheduled and LastReady
+// 7. Verify the pod is running again
+func Test_PGMR6_RecoverAfterScalingStandalonePCLQToZero(t *testing.T) {
+	ctx := t.Context()
+
+	Logger.Info("1. Initialize a 4-node Grove cluster")
+	Logger.Info("2. Deploy workload WL-PCLQ-ONLY, and verify 1 newly created pod")
+	tc, cleanup := testctx.PrepareTest(ctx, t, 4,
+		testctx.WithWorkload(&testctx.WorkloadConfig{
+			Name:         "workload-pclq-only",
+			YAMLPath:     "../yaml/workload-pclq-only.yaml",
+			Namespace:    "default",
+			ExpectedPods: 1,
+		}),
+	)
+	defer cleanup()
+
+	if _, err := tc.DeployAndVerifyWorkload(); err != nil {
+		t.Fatalf("Failed to deploy workload: %v", err)
+	}
+
+	verifier := podgangmap.NewVerifier(tc.Client, Logger)
+	pcsNsName := types.NamespacedName{Namespace: tc.Namespace, Name: "workload-pclq-only"}
+
+	Logger.Info("3. Verify the PodGangMap starts with an anchor holding the solo PodClique count 1")
+	if err := verifier.Verify(ctx, pcsNsName, 0,
+		podgangmap.AnchorStandalonePodCliqueCountCheckFn("solo", 1),
+	); err != nil {
+		t.Fatalf("PodGangMap not in expected state at baseline: %v", err)
+	}
+
+	Logger.Info("4. Scale solo to 0, and verify the PodGangMap holds no entries and no pods remain")
+	tc.ScalePodCliqueAndWait("workload-pclq-only-0-solo", 0, 0, 0)
+	if err := podgangmap.WaitUntilVerified(ctx, verifier, pcsNsName, 0, pgmReconstructTimeout, tc.Interval,
+		podgangmap.NoEntriesCheckFn(),
+	); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	Logger.Info("5. Scale solo back to 1, and verify the anchor holds the solo count 1 again")
+	tc.ScalePodCliqueAndWait("workload-pclq-only-0-solo", 1, 1, 0)
+	if err := podgangmap.WaitUntilVerified(ctx, verifier, pcsNsName, 0, pgmReconstructTimeout, tc.Interval,
+		podgangmap.AnchorStandalonePodCliqueCountCheckFn("solo", 1),
+	); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	Logger.Info("6. Verify the anchor PodGang eventually records LastScheduled and LastReady")
+	pgVerifier := podgang.NewVerifier(tc.Client, Logger)
+	if err := podgang.WaitUntilVerified(ctx, pgVerifier, pcsNsName, pgmReconstructTimeout, tc.Interval,
+		podgang.LastScheduledSetCheckFn(true),
+		podgang.LastReadySetCheckFn(true),
+	); err != nil {
+		t.Fatalf("anchor PodGang did not record LastScheduled and LastReady: %v", err)
+	}
+
+	Logger.Info("7. Verify the pod is running again")
+	if err := tc.WaitForRunningPods(1); err != nil {
+		t.Fatalf("Pod not running after scaling the PodClique back up: %v", err)
+	}
+
+	Logger.Info("🎉 PGMR-6 completed successfully!")
 }
 
 // deletePodGangMap deletes the named PodGangMap, failing the test on error.

@@ -306,8 +306,8 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 		// have regressed so verifyAllPodsCreated fails, but the live Scheduled and Ready conditions must
 		// still be reconciled to False. LastScheduled and LastReady are never cleared.
 		existingPG := makeExistingPodGang(pgName, true)
-		setScheduledCondition(existingPG, true, metav1.Now())
-		setReadyCondition(existingPG, true, metav1.Now())
+		setScheduledCondition(existingPG, &groveschedulerv1alpha1.PodGangStatus{}, true, metav1.Now())
+		setReadyCondition(existingPG, &groveschedulerv1alpha1.PodGangStatus{}, true, metav1.Now())
 
 		pclq := makePCLQ(pclqName, 2)
 		cl := testutils.NewTestClientBuilder().
@@ -1635,159 +1635,168 @@ func TestArePodGangMinReplicasReady(t *testing.T) {
 	}
 }
 
-// TestSetPodGangCondition verifies setPodGangCondition sets the condition and reports whether the
-// status changed, treating a nil prior condition and any status flip as a transition and an
-// unchanged status as not a transition.
-func TestSetPodGangCondition(t *testing.T) {
-	const condType = groveschedulerv1alpha1.PodGangConditionTypeScheduled
-	tests := []struct {
-		name        string
-		priorStatus *metav1.ConditionStatus
-		newStatus   metav1.ConditionStatus
-		wantChanged bool
-	}{
-		{
-			name:        "no prior condition is a transition",
-			priorStatus: nil,
-			newStatus:   metav1.ConditionTrue,
-			wantChanged: true,
-		},
-		{
-			name:        "status flip False to True is a transition",
-			priorStatus: ptr.To(metav1.ConditionFalse),
-			newStatus:   metav1.ConditionTrue,
-			wantChanged: true,
-		},
-		{
-			name:        "status flip True to False is a transition",
-			priorStatus: ptr.To(metav1.ConditionTrue),
-			newStatus:   metav1.ConditionFalse,
-			wantChanged: true,
-		},
-		{
-			name:        "same status is not a transition",
-			priorStatus: ptr.To(metav1.ConditionTrue),
-			newStatus:   metav1.ConditionTrue,
-			wantChanged: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pg := &groveschedulerv1alpha1.PodGang{}
-			if tc.priorStatus != nil {
-				setPodGangCondition(pg, condType, *tc.priorStatus, "PriorReason", "prior")
-			}
-			actualChanged := setPodGangCondition(pg, condType, tc.newStatus, "NewReason", "new")
-			assert.Equal(t, tc.wantChanged, actualChanged)
-			assert.True(t, meta.IsStatusConditionPresentAndEqual(pg.Status.Conditions, string(condType), tc.newStatus))
-		})
-	}
-}
-
-// TestSetScheduledCondition verifies setScheduledCondition sets the Scheduled condition and advances
-// LastScheduled on each fresh transition to True, never clearing it on a transition to False and
-// never re-stamping on an idempotent True.
+// TestSetScheduledCondition verifies setScheduledCondition sets the Scheduled condition from the live
+// scheduled count and stamps LastScheduled on a fresh transition to True, leaves it unchanged while the
+// PodGang stays scheduled, advances it when the PodGang is scheduled again after going unscheduled, and
+// backfills it when the condition is already True but LastScheduled was never set.
 func TestSetScheduledCondition(t *testing.T) {
-	earlier := metav1.NewTime(time.Now())
-	later := metav1.NewTime(earlier.Add(time.Minute))
-	type step struct {
-		scheduled bool
-		now       metav1.Time
+	schedCond := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: string(groveschedulerv1alpha1.PodGangConditionTypeScheduled), Status: status}}
 	}
+	earlier := metav1.NewTime(time.Now().Add(-time.Hour))
+	now := metav1.NewTime(time.Now())
+
 	tests := []struct {
-		name              string
-		steps             []step
-		wantConditionTrue bool
-		wantLastScheduled *metav1.Time
+		name                 string
+		originalStatus       groveschedulerv1alpha1.PodGangStatus
+		currentLastScheduled *metav1.Time
+		minReplicasScheduled bool
+		wantConditionTrue    bool
+		wantSet              bool
+		wantAdvanced         bool
 	}{
 		{
-			name:              "transition to True stamps LastScheduled",
-			steps:             []step{{true, earlier}},
-			wantConditionTrue: true,
-			wantLastScheduled: &earlier,
+			name:                 "not scheduled before or now - stays nil",
+			originalStatus:       groveschedulerv1alpha1.PodGangStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			minReplicasScheduled: false,
+			wantConditionTrue:    false,
+			wantSet:              false,
 		},
 		{
-			name:              "idempotent True does not re-stamp LastScheduled",
-			steps:             []step{{true, earlier}, {true, later}},
-			wantConditionTrue: true,
-			wantLastScheduled: &earlier,
+			name:                 "transitions to scheduled this reconcile - sets LastScheduled",
+			originalStatus:       groveschedulerv1alpha1.PodGangStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			minReplicasScheduled: true,
+			wantConditionTrue:    true,
+			wantSet:              true,
+			wantAdvanced:         true,
 		},
 		{
-			name:              "transition to False does not clear LastScheduled",
-			steps:             []step{{true, earlier}, {false, later}},
-			wantConditionTrue: false,
-			wantLastScheduled: &earlier,
+			name:                 "stays scheduled - does not change existing LastScheduled",
+			originalStatus:       groveschedulerv1alpha1.PodGangStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			currentLastScheduled: &earlier,
+			minReplicasScheduled: true,
+			wantConditionTrue:    true,
+			wantSet:              true,
+			wantAdvanced:         false,
 		},
 		{
-			name:              "re-transition to True advances LastScheduled",
-			steps:             []step{{true, earlier}, {false, earlier}, {true, later}},
-			wantConditionTrue: true,
-			wantLastScheduled: &later,
+			name:                 "scheduled again after previously going unscheduled - advances LastScheduled",
+			originalStatus:       groveschedulerv1alpha1.PodGangStatus{Conditions: schedCond(metav1.ConditionFalse)},
+			currentLastScheduled: &earlier,
+			minReplicasScheduled: true,
+			wantConditionTrue:    true,
+			wantSet:              true,
+			wantAdvanced:         true,
+		},
+		{
+			name:                 "already scheduled with no LastScheduled - backfills on upgrade",
+			originalStatus:       groveschedulerv1alpha1.PodGangStatus{Conditions: schedCond(metav1.ConditionTrue)},
+			minReplicasScheduled: true,
+			wantConditionTrue:    true,
+			wantSet:              true,
+			wantAdvanced:         true,
 		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pg := &groveschedulerv1alpha1.PodGang{}
-			for _, s := range tc.steps {
-				setScheduledCondition(pg, s.scheduled, s.now)
+			pg := &groveschedulerv1alpha1.PodGang{Status: groveschedulerv1alpha1.PodGangStatus{LastScheduled: tc.currentLastScheduled}}
+			setScheduledCondition(pg, &tc.originalStatus, tc.minReplicasScheduled, now)
+			assert.Equal(t, tc.wantConditionTrue, meta.IsStatusConditionTrue(pg.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled)))
+			actual := pg.Status.LastScheduled
+			if !tc.wantSet {
+				assert.Nil(t, actual)
+				return
 			}
-			actualConditionTrue := meta.IsStatusConditionTrue(pg.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled))
-			assert.Equal(t, tc.wantConditionTrue, actualConditionTrue)
-			assert.Equal(t, tc.wantLastScheduled, pg.Status.LastScheduled)
+			require.NotNil(t, actual)
+			if tc.wantAdvanced {
+				assert.Equal(t, now, *actual, "LastScheduled should advance to now")
+			} else {
+				assert.Equal(t, earlier, *actual, "LastScheduled should be unchanged")
+			}
 		})
 	}
 }
 
-// TestSetReadyCondition verifies setReadyCondition sets the Ready condition and advances LastReady
-// on each fresh transition to True, never clearing it on a transition to False and never
-// re-stamping on an idempotent True.
+// TestSetReadyCondition verifies setReadyCondition sets the Ready condition from the live ready count
+// and stamps LastReady on a fresh transition to True, leaves it unchanged while the PodGang stays
+// ready, advances it when the PodGang is ready again after going not-ready, and backfills it when the
+// condition is already True but LastReady was never set.
 func TestSetReadyCondition(t *testing.T) {
-	earlier := metav1.NewTime(time.Now())
-	later := metav1.NewTime(earlier.Add(time.Minute))
-	type step struct {
-		ready bool
-		now   metav1.Time
+	readyCond := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: string(groveschedulerv1alpha1.PodGangConditionTypeReady), Status: status}}
 	}
+	earlier := metav1.NewTime(time.Now().Add(-time.Hour))
+	now := metav1.NewTime(time.Now())
+
 	tests := []struct {
 		name              string
-		steps             []step
+		originalStatus    groveschedulerv1alpha1.PodGangStatus
+		currentLastReady  *metav1.Time
+		minReplicasReady  bool
 		wantConditionTrue bool
-		wantLastReady     *metav1.Time
+		wantSet           bool
+		wantAdvanced      bool
 	}{
 		{
-			name:              "transition to True stamps LastReady",
-			steps:             []step{{true, earlier}},
-			wantConditionTrue: true,
-			wantLastReady:     &earlier,
-		},
-		{
-			name:              "idempotent True does not re-stamp LastReady",
-			steps:             []step{{true, earlier}, {true, later}},
-			wantConditionTrue: true,
-			wantLastReady:     &earlier,
-		},
-		{
-			name:              "transition to False does not clear LastReady",
-			steps:             []step{{true, earlier}, {false, later}},
+			name:              "not ready before or now - stays nil",
+			originalStatus:    groveschedulerv1alpha1.PodGangStatus{Conditions: readyCond(metav1.ConditionFalse)},
+			minReplicasReady:  false,
 			wantConditionTrue: false,
-			wantLastReady:     &earlier,
+			wantSet:           false,
 		},
 		{
-			name:              "re-transition to True advances LastReady",
-			steps:             []step{{true, earlier}, {false, earlier}, {true, later}},
+			name:              "transitions to ready this reconcile - sets LastReady",
+			originalStatus:    groveschedulerv1alpha1.PodGangStatus{Conditions: readyCond(metav1.ConditionFalse)},
+			minReplicasReady:  true,
 			wantConditionTrue: true,
-			wantLastReady:     &later,
+			wantSet:           true,
+			wantAdvanced:      true,
+		},
+		{
+			name:              "stays ready - does not change existing LastReady",
+			originalStatus:    groveschedulerv1alpha1.PodGangStatus{Conditions: readyCond(metav1.ConditionTrue)},
+			currentLastReady:  &earlier,
+			minReplicasReady:  true,
+			wantConditionTrue: true,
+			wantSet:           true,
+			wantAdvanced:      false,
+		},
+		{
+			name:              "ready again after previously going not-ready - advances LastReady",
+			originalStatus:    groveschedulerv1alpha1.PodGangStatus{Conditions: readyCond(metav1.ConditionFalse)},
+			currentLastReady:  &earlier,
+			minReplicasReady:  true,
+			wantConditionTrue: true,
+			wantSet:           true,
+			wantAdvanced:      true,
+		},
+		{
+			name:              "already ready with no LastReady - backfills on upgrade",
+			originalStatus:    groveschedulerv1alpha1.PodGangStatus{Conditions: readyCond(metav1.ConditionTrue)},
+			minReplicasReady:  true,
+			wantConditionTrue: true,
+			wantSet:           true,
+			wantAdvanced:      true,
 		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pg := &groveschedulerv1alpha1.PodGang{}
-			for _, s := range tc.steps {
-				setReadyCondition(pg, s.ready, s.now)
+			pg := &groveschedulerv1alpha1.PodGang{Status: groveschedulerv1alpha1.PodGangStatus{LastReady: tc.currentLastReady}}
+			setReadyCondition(pg, &tc.originalStatus, tc.minReplicasReady, now)
+			assert.Equal(t, tc.wantConditionTrue, meta.IsStatusConditionTrue(pg.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady)))
+			actual := pg.Status.LastReady
+			if !tc.wantSet {
+				assert.Nil(t, actual)
+				return
 			}
-			actualConditionTrue := meta.IsStatusConditionTrue(pg.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady))
-			assert.Equal(t, tc.wantConditionTrue, actualConditionTrue)
-			assert.Equal(t, tc.wantLastReady, pg.Status.LastReady)
+			require.NotNil(t, actual)
+			if tc.wantAdvanced {
+				assert.Equal(t, now, *actual, "LastReady should advance to now")
+			} else {
+				assert.Equal(t, earlier, *actual, "LastReady should be unchanged")
+			}
 		})
 	}
 }
@@ -1865,8 +1874,8 @@ func TestReconcilePodGangStatus(t *testing.T) {
 		seeded := existingPodGang()
 		setPodGangCondition(seeded, groveschedulerv1alpha1.PodGangConditionTypeInitialized, metav1.ConditionTrue,
 			groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
-		setScheduledCondition(seeded, true, metav1.Now())
-		setReadyCondition(seeded, true, metav1.Now())
+		setScheduledCondition(seeded, &groveschedulerv1alpha1.PodGangStatus{}, true, metav1.Now())
+		setReadyCondition(seeded, &groveschedulerv1alpha1.PodGangStatus{}, true, metav1.Now())
 
 		cl := testutils.NewTestClientBuilder().
 			WithObjects(pcs, seeded).

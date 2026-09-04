@@ -285,6 +285,13 @@ func TestReconcileStandalonePCLQDistributionEarlyReturn(t *testing.T) {
 			ss:   &syncSnapshot{pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(1), cliqueName: testCliqueName, pgm: pgmWithEntries()},
 		},
 		{
+			name: "requeues when the PodGangMap carries no count for the clique but the clique wants replicas",
+			ss: &syncSnapshot{
+				pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(1), cliqueName: testCliqueName,
+				pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{"other-clique": 1})),
+			},
+		},
+		{
 			name: "requeues after repairing a labelless pod",
 			ss: &syncSnapshot{
 				pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(1), cliqueName: testCliqueName,
@@ -370,6 +377,24 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 
 		pods := listPodsForPodGang(t, cl, anchor0)
 		assert.Len(t, pods, 1)
+	})
+
+	t.Run("scaled to zero deletes all pods when the PodGangMap has no anchor entry", func(t *testing.T) {
+		pclq := newPCLQ(0)
+		live := []*corev1.Pod{nonTerminatingPodInPodGang("pod-a", anchor0, ""), nonTerminatingPodInPodGang("pod-b", anchor0, "")}
+		cl := testutils.NewTestClientBuilder().WithObjects(pclq, live[0], live[1]).Build()
+		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
+		ss := &syncSnapshot{
+			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
+			pgm:              pgmWithEntries(),
+			existingPCLQPods: live,
+		}
+
+		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
+		require.NoError(t, err)
+
+		pods := listPodsForPodGang(t, cl, anchor0)
+		assert.Empty(t, pods)
 	})
 
 	t.Run("propagates a pod deletion failure", func(t *testing.T) {

@@ -42,7 +42,11 @@ import (
 // grove.io/podgang label, then reconciles per PodGang against the PodGangMap counts.
 func (r _resource) reconcileStandalonePCLQDistribution(ctx context.Context, logger logr.Logger, ss *syncSnapshot) error {
 	desiredCountByPodGang := buildDesiredCountByPodGang(ss)
-	if len(desiredCountByPodGang) == 0 {
+	// An empty desired count means the PodGangMap carries no anchor entry for this PodClique. When the
+	// PodClique still wants replicas this is a transient state, the PodGangMap has not authored or
+	// absorbed the anchor entry yet, so requeue and wait. When the PodClique is scaled to zero the empty
+	// desired count is correct, so fall through and let the delta computation delete the excess pods.
+	if len(desiredCountByPodGang) == 0 && ss.pclq.Spec.Replicas > 0 {
 		return groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
 			fmt.Sprintf("PodGangMap has no anchor entry for standalone PodClique %v yet, re-queueing", client.ObjectKeyFromObject(ss.pclq)))
 	}

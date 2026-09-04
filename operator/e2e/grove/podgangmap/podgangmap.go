@@ -149,6 +149,18 @@ func AnchorEpochCheckFn(want string) Check {
 	}
 }
 
+// NoEntriesCheckFn returns a Check that verifies the PodGangMap has no entries. This is the transient
+// state after every entry drains to empty, for example when a PodCliqueScalingGroup is scaled below
+// MinAvailable on an all-PodCliqueScalingGroup PodCliqueSet.
+func NoEntriesCheckFn() Check {
+	return func(pgm *grovecorev1alpha1.PodGangMap) error {
+		if len(pgm.Spec.Entries) != 0 {
+			return fmt.Errorf("expected no entries, found %d", len(pgm.Spec.Entries))
+		}
+		return nil
+	}
+}
+
 // WaitUntilVerified polls the replica's PodGangMap until it satisfies all checks or the timeout
 // elapses. Verification is delegated to Verifier.Verify and runs immediately, then repeats every
 // interval. It returns nil once all checks pass. On timeout or context cancellation it returns an error

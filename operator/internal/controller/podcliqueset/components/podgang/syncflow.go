@@ -495,8 +495,8 @@ func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pg
 		setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeInitialized, metav1.ConditionTrue,
 			groveschedulerv1alpha1.ConditionReasonPodGangPodsCreated, "PodGang is fully initialized")
 	}
-	setScheduledCondition(pg, minReplicasScheduled, now)
-	setReadyCondition(pg, minReplicasReady, now)
+	setScheduledCondition(pg, originalStatus, minReplicasScheduled, now)
+	setReadyCondition(pg, originalStatus, minReplicasReady, now)
 
 	if equality.Semantic.DeepEqual(*originalStatus, pg.Status) {
 		return nil
@@ -552,12 +552,8 @@ func (r _resource) arePodGangMinReplicasReady(ss *syncState, pgi *podGangInfo) b
 	return true
 }
 
-// setPodGangCondition sets the given condition via meta.SetStatusCondition and returns whether the
-// condition's status changed, that is whether this call was a transition rather than an idempotent
-// re-assertion of the same status. A nil prior condition counts as a transition.
-func setPodGangCondition(pg *groveschedulerv1alpha1.PodGang, condType groveschedulerv1alpha1.PodGangConditionType, status metav1.ConditionStatus, reason, message string) bool {
-	prior := meta.FindStatusCondition(pg.Status.Conditions, string(condType))
-	changed := prior == nil || prior.Status != status
+// setPodGangCondition sets the given condition via meta.SetStatusCondition.
+func setPodGangCondition(pg *groveschedulerv1alpha1.PodGang, condType groveschedulerv1alpha1.PodGangConditionType, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&pg.Status.Conditions, metav1.Condition{
 		Type:               string(condType),
 		Status:             status,
@@ -565,12 +561,14 @@ func setPodGangCondition(pg *groveschedulerv1alpha1.PodGang, condType grovesched
 		Reason:             reason,
 		Message:            message,
 	})
-	return changed
 }
 
 // setScheduledCondition sets the Scheduled condition from the live scheduled count and advances
-// LastScheduled when the condition transitions to True. LastScheduled is never reset once set.
-func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasScheduled bool, now metav1.Time) {
+// LastScheduled to now. LastScheduled advances when the condition transitions to True in this
+// reconcile, and is backfilled when the condition is already True but LastScheduled is unset, which
+// covers a PodGang whose transition to scheduled was not observed. LastScheduled is never reset to nil
+// once set.
+func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, originalStatus *groveschedulerv1alpha1.PodGangStatus, minReplicasScheduled bool, now metav1.Time) {
 	status := metav1.ConditionFalse
 	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
 	message := "one or more PodGroups have fewer scheduled pods than MinReplicas"
@@ -579,15 +577,21 @@ func setScheduledCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasSchedu
 		reason = groveschedulerv1alpha1.ConditionReasonPodGangScheduled
 		message = "MinReplicas pods of every PodGroup are scheduled"
 	}
-	mutated := setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message)
-	if mutated && minReplicasScheduled {
+	setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeScheduled, status, reason, message)
+
+	scheduledBefore := meta.IsStatusConditionTrue(originalStatus.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled))
+	freshlyScheduled := minReplicasScheduled && !scheduledBefore
+	needsBackfill := minReplicasScheduled && pg.Status.LastScheduled == nil
+	if freshlyScheduled || needsBackfill {
 		pg.Status.LastScheduled = &now
 	}
 }
 
-// setReadyCondition sets the Ready condition from the live ready count and advances LastReady when
-// the condition transitions to True. LastReady is never reset once set.
-func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasReady bool, now metav1.Time) {
+// setReadyCondition sets the Ready condition from the live ready count and advances LastReady to now.
+// LastReady advances when the condition transitions to True in this reconcile, and is backfilled when
+// the condition is already True but LastReady is unset, which covers a PodGang whose transition to
+// ready was not observed. LastReady is never reset to nil once set.
+func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, originalStatus *groveschedulerv1alpha1.PodGangStatus, minReplicasReady bool, now metav1.Time) {
 	status := metav1.ConditionFalse
 	reason := groveschedulerv1alpha1.ConditionReasonPodGangNotReady
 	message := "one or more PodGroups have fewer ready pods than MinReplicas"
@@ -596,8 +600,12 @@ func setReadyCondition(pg *groveschedulerv1alpha1.PodGang, minReplicasReady bool
 		reason = groveschedulerv1alpha1.ConditionReasonPodGangReady
 		message = "MinReplicas pods of every PodGroup are ready"
 	}
-	mutated := setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message)
-	if mutated && minReplicasReady {
+	setPodGangCondition(pg, groveschedulerv1alpha1.PodGangConditionTypeReady, status, reason, message)
+
+	readyBefore := meta.IsStatusConditionTrue(originalStatus.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeReady))
+	freshlyReady := minReplicasReady && !readyBefore
+	needsBackfill := minReplicasReady && pg.Status.LastReady == nil
+	if freshlyReady || needsBackfill {
 		pg.Status.LastReady = &now
 	}
 }
