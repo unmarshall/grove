@@ -136,9 +136,11 @@ func buildBootstrapTailEntry(pcs *grovecorev1alpha1.PodCliqueSet, epoch, anchorE
 }
 
 // reconcileEntries authors the desired PodGangMap entries for a PCS replica and returns them for create
-// or patch. When no PodGangMap exists it starts from a fresh set of bootstrap entries, reusing the epoch
-// the replica's existing PodGangs carry. When one exists it starts from that PodGangMap's entries,
-// advancing them to the current generation hash unless a coherent update is in progress.
+// or patch. When no PodGangMap exists, or one exists with no entries, it starts from a fresh set of
+// bootstrap entries, reusing the epoch the replica's existing PodGangs carry. An entry-less PodGangMap
+// is bootstrapped the same way so a replica whose entries were all drained recovers instead of staying
+// empty. When a PodGangMap with entries exists it starts from those entries, advancing them to the
+// current generation hash unless a coherent update is in progress.
 //
 // Each entry keeps its identity (epoch, role, DependsOn, anchor index) and its already-placed replica
 // indices. Placement is not recomputed from the template. A template Replicas change does not reach an
@@ -167,7 +169,7 @@ func reconcileEntries(clk clock.Clock,
 		entries       []grovecorev1alpha1.PodGangEntry
 		scaleOutEpoch string
 	)
-	if pgm == nil {
+	if pgm == nil || len(pgm.Spec.Entries) == 0 {
 		entries, scaleOutEpoch = buildBootstrapEntries(clk, pcs, existingPodGangs)
 	} else {
 		// Deep-copy the existing entries so mutations here do not alias the snapshot's PodGangMap.
@@ -339,17 +341,30 @@ func drainPriority(entry grovecorev1alpha1.PodGangEntry) int {
 	}
 }
 
-// removeEmptyEntries drops entries that carry no pods and no replica indices. A ScaleOut entry for
-// the CURRENT generation hash is exempt, it is pre-created empty and kept as the PodGangMap-owned
-// scale-out epoch that steady-state scale-outs attach to, so it must persist even when it carries
-// nothing. A ScaleOut entry for an OLD generation hash is not exempt, once drained it is a remnant of
-// a superseded generation and is removed like any other empty entry.
+// removeEmptyEntries drops entries that carry no pods and no replica indices. A ScaleOut entry of the
+// current generation is kept even when empty, but only while a current-generation anchor entry
+// survives. A ScaleOut entry depends on its generation's anchor, so once the last current-generation
+// anchor drains to empty it is removed and its ScaleOut entry is removed with it. A ScaleOut entry of
+// an older generation is never kept when empty.
 func removeEmptyEntries(entries []grovecorev1alpha1.PodGangEntry, currentGenerationHash string) []grovecorev1alpha1.PodGangEntry {
+	keepCurrentGenerationScaleOut := hasNonEmptyCurrentGenerationAnchor(entries, currentGenerationHash)
 	return slices.DeleteFunc(entries, func(entry grovecorev1alpha1.PodGangEntry) bool {
-		if entry.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut && entry.PodCliqueSetGenerationHash == currentGenerationHash {
+		if keepCurrentGenerationScaleOut &&
+			entry.Role == grovecorev1alpha1.PodGangEntryRoleScaleOut &&
+			entry.PodCliqueSetGenerationHash == currentGenerationHash {
 			return false
 		}
 		return isPodGangEntryEmpty(entry)
+	})
+}
+
+// hasNonEmptyCurrentGenerationAnchor reports whether entries contains a current-generation anchor
+// entry that carries at least one pod or replica index, meaning it will survive empty-entry removal.
+func hasNonEmptyCurrentGenerationAnchor(entries []grovecorev1alpha1.PodGangEntry, currentGenerationHash string) bool {
+	return slices.ContainsFunc(entries, func(entry grovecorev1alpha1.PodGangEntry) bool {
+		return entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor &&
+			entry.PodCliqueSetGenerationHash == currentGenerationHash &&
+			!isPodGangEntryEmpty(entry)
 	})
 }
 

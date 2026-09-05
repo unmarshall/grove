@@ -431,6 +431,73 @@ func TestReconcileStandaloneCliqueCountAcrossAnchors(t *testing.T) {
 	}
 }
 
+// TestRemoveEmptyEntries verifies removeEmptyEntries keeps a current-generation empty ScaleOut entry
+// only while a current-generation anchor survives, drops the ScaleOut once its anchor drains to empty
+// and is removed, and never keeps an empty ScaleOut of an older generation.
+func TestRemoveEmptyEntries(t *testing.T) {
+	olderGenerationScaleOut := testutils.NewPodGangEntryBuilder("hash0", "099").
+		WithRole(grovecorev1alpha1.PodGangEntryRoleScaleOut).
+		WithDependsOn("098").
+		Build()
+	tests := []struct {
+		name      string
+		entries   []grovecorev1alpha1.PodGangEntry
+		wantRoles []grovecorev1alpha1.PodGangEntryRole
+	}{
+		{
+			name: "non-empty anchor keeps the empty current-generation ScaleOut",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{testPCSGName: {0, 1}}),
+				scaleOutEntry(nil),
+			},
+			wantRoles: []grovecorev1alpha1.PodGangEntryRole{
+				grovecorev1alpha1.PodGangEntryRoleAnchor,
+				grovecorev1alpha1.PodGangEntryRoleScaleOut,
+			},
+		},
+		{
+			name: "empty anchor is removed and its empty ScaleOut is removed with it",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{testPCSGName: {}}),
+				scaleOutEntry(nil),
+			},
+			wantRoles: []grovecorev1alpha1.PodGangEntryRole{},
+		},
+		{
+			name: "empty tail is removed while a non-empty anchor and its ScaleOut remain",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{testPCSGName: {0, 1}}),
+				tailEntry(map[string][]int32{testPCSGName: {}}),
+				scaleOutEntry(nil),
+			},
+			wantRoles: []grovecorev1alpha1.PodGangEntryRole{
+				grovecorev1alpha1.PodGangEntryRoleAnchor,
+				grovecorev1alpha1.PodGangEntryRoleScaleOut,
+			},
+		},
+		{
+			name: "empty ScaleOut of an older generation is removed even when a current anchor survives",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{testPCSGName: {0, 1}}),
+				olderGenerationScaleOut,
+			},
+			wantRoles: []grovecorev1alpha1.PodGangEntryRole{
+				grovecorev1alpha1.PodGangEntryRoleAnchor,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			retained := removeEmptyEntries(tc.entries, testGenHash)
+			actualRoles := make([]grovecorev1alpha1.PodGangEntryRole, 0, len(retained))
+			for _, entry := range retained {
+				actualRoles = append(actualRoles, entry.Role)
+			}
+			assert.Equal(t, tc.wantRoles, actualRoles)
+		})
+	}
+}
+
 // podGangWithEpochRole builds a PodGang carrying the grove.io/epoch and grove.io/podgang-role labels.
 func podGangWithEpochRole(name, epoch string, role grovecorev1alpha1.PodGangEntryRole) *groveschedulerv1alpha1.PodGang {
 	return testutils.NewPodGangBuilder(name, testNamespace).

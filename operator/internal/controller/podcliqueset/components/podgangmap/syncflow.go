@@ -170,21 +170,13 @@ func (r _resource) getExistingPodGangsByReplica(ctx context.Context, pcs *grovec
 // PCS replica scale-in. Each replica is in one of three states.
 //  1. No PodGangMap. Its entries are authored from the PCS spec, reusing the epoch its existing
 //     PodGangs carry so a rebuilt PodGangMap does not strand pods.
-//  2. A PodGangMap with no entries. A live PodGangMap always has an anchor entry, so this can only
-//     come from a coding error. The reconcile fails with a hard error.
+//  2. A PodGangMap with no entries. This happens when every entry drained to empty. It is authored
+//     the same way as a missing PodGangMap so the replica recovers instead of staying empty.
 //  3. A PodGangMap with entries. reconcileEntries re-authors them, advancing an under-update replica
 //     to the current generation hash first.
 func (r _resource) runSyncFlow(ctx context.Context, syncSnap *syncSnapshot) error {
 	for pcsReplicaIndex := range int(syncSnap.pcs.Spec.Replicas) {
-		pgm, pgmExists := syncSnap.existingPGMByReplica[pcsReplicaIndex]
-
-		if pgmExists && len(pgm.Spec.Entries) == 0 {
-			return groveerr.New(
-				errCodePodGangMapNoEntries,
-				component.OperationSync,
-				fmt.Sprintf("PodGangMap %s for replica %d of PodCliqueSet %v has no entries, this is not expected. A live PodGangMap at least has an anchor entry", pgm.Name, pcsReplicaIndex, client.ObjectKeyFromObject(syncSnap.pcs)),
-			)
-		}
+		pgm := syncSnap.existingPGMByReplica[pcsReplicaIndex]
 
 		entries, err := reconcileEntries(r.clk,
 			syncSnap.pcs, pcsReplicaIndex,

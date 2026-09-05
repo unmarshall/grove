@@ -25,7 +25,6 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	groveclientscheme "github.com/ai-dynamo/grove/operator/internal/client"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
-	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
@@ -206,22 +205,27 @@ func TestSyncIgnoresLegacyPodGangsWithoutEpochLabelWhenPodGangMapIsMissing(t *te
 	assert.Equal(t, "1000", anchor.Epoch)
 }
 
-func TestSyncErrorsWhenPodGangMapHasNoEntries(t *testing.T) {
+func TestSyncRebuildsAnchorWhenPodGangMapHasNoEntries(t *testing.T) {
 	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
 		WithReplicas(1).
 		WithStandaloneCliqueReplicas("clq-a", 1).
 		WithPodCliqueSetGenerationHash(ptr.To("hash1")).
 		Build()
 
-	// A PodGangMap that exists but has no entries can only come from a coding error, since a live
-	// PodGangMap always has an anchor entry. The sync fails with a hard error.
+	// A PodGangMap can end up with no entries when every entry drained to empty. The sync rebuilds it
+	// from the spec instead of failing, so the replica recovers.
 	emptyPGM := testutils.NewPodGangMapBuilder("pcs", "default", types.UID("uid"), 0).Build()
 
 	cl := testutils.CreateDefaultFakeClient([]client.Object{pcs, emptyPGM})
 	operator := New(cl, groveclientscheme.Scheme, clocktesting.NewFakeClock(time.Unix(0, 1000)))
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
-	testutils.AssertGroveError(t, &groveerr.GroveError{Code: errCodePodGangMapNoEntries, Operation: "Sync"}, err)
+	require.NoError(t, err)
+
+	pgm := getPodGangMap(t, cl, "pcs-0")
+	anchor := testutils.EntryByRole(pgm.Spec.Entries, grovecorev1alpha1.PodGangEntryRoleAnchor)
+	assert.Equal(t, "1000", anchor.Epoch)
+	assert.Equal(t, int32(1), anchor.PodCliques["clq-a"])
 }
 
 func TestSyncDeletesOrphanedPodGangMaps(t *testing.T) {
