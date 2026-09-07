@@ -24,7 +24,6 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/grove/operator/internal/utils"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/samber/lo"
@@ -221,7 +220,7 @@ func IsLastPCLQUpdateCompleted(pclq *grovecorev1alpha1.PodClique) bool {
 
 // GetExpectedPCLQPodTemplateHash finds the matching PodCliqueTemplateSpec from the PodCliqueSet and computes the pod template hash for the PCLQ pod spec.
 func GetExpectedPCLQPodTemplateHash(pcs *grovecorev1alpha1.PodCliqueSet, pclqObjectMeta metav1.ObjectMeta) (string, error) {
-	cliqueName, err := utils.GetPodCliqueNameFromPodCliqueFQN(pclqObjectMeta)
+	cliqueName, err := GetPodCliqueNameFromPodCliqueFQN(pclqObjectMeta)
 	if err != nil {
 		return "", err
 	}
@@ -242,4 +241,37 @@ func FindPodCliqueTemplateSpecByName(pcs *grovecorev1alpha1.PodCliqueSet, pclqNa
 		return nil
 	}
 	return matchingPCLQTemplateSpec
+}
+
+// GetPodCliqueNameFromPodCliqueFQN extracts the unqualified PodClique name from a fully qualified name.
+func GetPodCliqueNameFromPodCliqueFQN(pclqObjectMeta metav1.ObjectMeta) (string, error) {
+	pclqObjectKey := client.ObjectKey{Name: pclqObjectMeta.Name, Namespace: pclqObjectMeta.Namespace}
+	pcsgName, ok := pclqObjectMeta.Labels[apicommon.LabelPodCliqueScalingGroup]
+	if ok {
+		// get the pcsg replica index
+		pcsgReplicaIndex, replicaIndexLabelFound := pclqObjectMeta.Labels[apicommon.LabelPodCliqueScalingGroupReplicaIndex]
+		if !replicaIndexLabelFound {
+			return "", fmt.Errorf("missing label %s on PodClique: %v", apicommon.LabelPodCliqueScalingGroupReplicaIndex, pclqObjectKey)
+		}
+		pcsgReplicaIndexInt, err := strconv.Atoi(pcsgReplicaIndex)
+		if err != nil {
+			return "", fmt.Errorf("invalid label %s on PodClique: %v: %w", apicommon.LabelPodCliqueScalingGroupReplicaIndex, pclqObjectKey, err)
+		}
+		return apicommon.ExtractScalingGroupNameFromPCSGFQN(pclqObjectMeta.Name, apicommon.ResourceNameReplica{Name: pcsgName, Replica: pcsgReplicaIndexInt})
+	}
+
+	pcsName, ok := pclqObjectMeta.Labels[apicommon.LabelPartOfKey]
+	if !ok {
+		return "", fmt.Errorf("missing label %s on PodClique: %v", apicommon.LabelPartOfKey, pclqObjectKey)
+	}
+	// Get the PCS replica index
+	pcsReplicaIndex, ok := pclqObjectMeta.Labels[apicommon.LabelPodCliqueSetReplicaIndex]
+	if !ok {
+		return "", fmt.Errorf("missing label %s on PodClique: %v", apicommon.LabelPodCliqueSetReplicaIndex, pclqObjectKey)
+	}
+	pcsReplicaIndexInt, err := strconv.Atoi(pcsReplicaIndex)
+	if err != nil {
+		return "", fmt.Errorf("invalid label %s on PodClique: %v: %w", apicommon.LabelPodCliqueSetReplicaIndex, pclqObjectKey, err)
+	}
+	return apicommon.ExtractScalingGroupNameFromPCSGFQN(pclqObjectMeta.Name, apicommon.ResourceNameReplica{Name: pcsName, Replica: pcsReplicaIndexInt})
 }

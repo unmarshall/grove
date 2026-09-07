@@ -25,7 +25,6 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/resourceclaim"
-	groveutils "github.com/ai-dynamo/grove/operator/internal/utils"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
@@ -91,7 +90,7 @@ func (r _resource) Sync(ctx context.Context, _ logr.Logger, pclq *grovecorev1alp
 		)
 	}
 
-	cliqueName, err := groveutils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
+	cliqueName, err := componentutils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
 	if err != nil {
 		return groveerr.WrapError(err,
 			errSyncPCLQLevelRC,

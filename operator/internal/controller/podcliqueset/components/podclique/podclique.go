@@ -215,7 +215,7 @@ func (r _resource) createDeleteTasks(logger logr.Logger, pcs *grovecorev1alpha1.
 func getPodCliqueNamesToDelete(pcsName string, pcsReplicas int, existingPCLQNames []string) ([]string, error) {
 	pclqsToDelete := make([]string, 0, len(existingPCLQNames))
 	for _, pclqName := range existingPCLQNames {
-		extractedPCSReplica, err := utils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclqName)
+		extractedPCSReplica, err := componentutils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclqName)
 		if err != nil {
 			return nil, groveerr.WrapError(err,
 				errSyncPodClique,

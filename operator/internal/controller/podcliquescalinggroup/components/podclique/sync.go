@@ -186,7 +186,7 @@ func (r _resource) syncPCSGPodIndexOffsets(ctx context.Context, ss *syncSnapshot
 				fmt.Sprintf("PodClique %v has invalid %s value %q", client.ObjectKeyFromObject(pclq), apicommon.LabelPodCliqueScalingGroupReplicaIndex, pcsgReplicaIndexValue),
 			)
 		}
-		cliqueName, err := utils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
+		cliqueName, err := componentutils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
 		if err != nil {
 			return groveerr.WrapError(err, errCodeSyncPCSGPodIndexOffsets, component.OperationSync, "failed to get PodClique name")
 		}

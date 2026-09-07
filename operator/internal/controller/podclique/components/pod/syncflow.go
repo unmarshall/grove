@@ -70,7 +70,7 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pclq
 		)
 	}
 
-	ss.cliqueName, err = utils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
+	ss.cliqueName, err = componentutils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
 	if err != nil {
 		return nil, groveerr.WrapError(err,
 			errCodeGetPodCliqueTemplate,

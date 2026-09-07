@@ -29,7 +29,6 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/expect"
 	"github.com/ai-dynamo/grove/operator/internal/resourceclaim"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
-	"github.com/ai-dynamo/grove/operator/internal/utils"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
@@ -160,7 +159,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pclq *grovecore
 func (r _resource) buildResource(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, podGangName string, pod *corev1.Pod, podIndex int) error {
 	// Extract PCS replica index from PodClique FQN
 	pcsName := componentutils.GetPodCliqueSetName(pclq.ObjectMeta)
-	pcsReplicaIndex, err := utils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclq.Name)
+	pcsReplicaIndex, err := componentutils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclq.Name)
 	if err != nil {
 		return groveerr.WrapError(err,
 			errCodeGetPodCliqueSetReplicaIndex,
@@ -256,7 +255,7 @@ func getPCSGPodIndex(pclq *grovecorev1alpha1.PodClique, podIndex int) (*int, err
 // ResourceClaim references into a Pod's spec. It injects refs from every level
 // of the hierarchy: PCS, PCSG (if applicable), and PCLQ.
 func injectAllResourceClaimRefs(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, podSpec *corev1.PodSpec, pcsReplicaIndex, podIndex int) error {
-	cliqueName, err := utils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
+	cliqueName, err := componentutils.GetPodCliqueNameFromPodCliqueFQN(pclq.ObjectMeta)
 	if err != nil {
 		return fmt.Errorf("failed to get PodClique name: %w", err)
 	}

@@ -626,3 +626,52 @@ func TestIsStandalonePCLQ(t *testing.T) {
 		})
 	}
 }
+
+func TestGetPodCliqueSetReplicaIndexFromPodCliqueFQN(t *testing.T) {
+	testCases := []struct {
+		description   string
+		pcsName       string
+		pclqFQNName   string
+		expectedIndex int
+		expectedErr   bool
+	}{
+		{
+			description:   "PodClique and PCS name without hyphen",
+			pcsName:       "inference",
+			pclqFQNName:   "inference-0-prefill",
+			expectedIndex: 0,
+			expectedErr:   false,
+		},
+		{
+			description:   "PodClique name with hyphen and PCS name without hyphen",
+			pcsName:       "inference",
+			pclqFQNName:   "inference-1-prefill-leader",
+			expectedIndex: 1,
+			expectedErr:   false,
+		},
+		{
+			description:   "PodClique name with hyphen and PCS name with hyphen",
+			pcsName:       "pcs-inference",
+			pclqFQNName:   "pcs-inference-2-prefill-worker",
+			expectedIndex: 2,
+			expectedErr:   false,
+		},
+		{
+			description: "Malformed PodClique FQN name",
+			pcsName:     "inference",
+			pclqFQNName: "inference-prefill",
+			expectedErr: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			index, err := GetPodCliqueSetReplicaIndexFromPodCliqueFQN(tc.pcsName, tc.pclqFQNName)
+			if tc.expectedErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expectedIndex, index)
+			}
+		})
+	}
+}

@@ -16,7 +16,10 @@ package component
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -188,4 +191,15 @@ func GetPCSGReplicasFromPCSTemplateSpec(pcs *grovecorev1alpha1.PodCliqueSet) map
 		result[pcsgConfig.Name] = *pcsgConfig.Replicas
 	}
 	return result
+}
+
+// GetPodCliqueSetReplicaIndexFromPodCliqueFQN extracts the PodCliqueSet replica index from a Pod Clique FQN name.
+func GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclqFQNName string) (int, error) {
+	replicaStartIndex := len(pcsName) + 1 // +1 for the hyphen
+	hyphenIndex := strings.Index(pclqFQNName[replicaStartIndex:], "-")
+	if hyphenIndex == -1 {
+		return -1, fmt.Errorf("PodClique FQN is not in the expected format of <pcs-name>-<pcs-replica-index>-<pclq-template-name>: %s", pclqFQNName)
+	}
+	replicaEndIndex := replicaStartIndex + hyphenIndex
+	return strconv.Atoi(pclqFQNName[replicaStartIndex:replicaEndIndex])
 }
