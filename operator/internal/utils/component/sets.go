@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package utils
+package component
 
 // Set represents unique values with O(1) membership checks. Use it where callers only need
 // to test whether an element is present; use a plain map[K]V (built via lo.SliceToMap) where

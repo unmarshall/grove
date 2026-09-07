@@ -22,9 +22,10 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
-	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
+	"github.com/ai-dynamo/grove/operator/internal/controller/podclique/expectations"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/go-logr/logr"
@@ -174,7 +175,7 @@ func (r _resource) hasPodDeletionBeenTriggered(ss *syncSnapshot, pod *corev1.Pod
 	if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
 		return true
 	}
-	key, err := componentutils.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, pod.Labels[apicommon.LabelPodGang])
+	key, err := expectations.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, pod.Labels[apicommon.LabelPodGang])
 	if err != nil {
 		return false
 	}
