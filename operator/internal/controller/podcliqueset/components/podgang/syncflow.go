@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -736,7 +737,7 @@ type syncState struct {
 	existingPCLQPods       map[string][]corev1.Pod
 	existingPCLQByName     map[string]grovecorev1alpha1.PodClique
 	expectedPodGangByName  map[string]*podGangInfo
-	expectedPodGangNameSet componentutils.Set[string]
+	expectedPodGangNameSet sets.Set[string]
 	unassignedPodsByPCLQ   map[string][]corev1.Pod
 	tasEnabled             bool
 	topologyLevels         []grovecorev1alpha1.TopologyLevel
@@ -800,10 +801,12 @@ func podGangInfoByName(podGangs []*podGangInfo) map[string]*podGangInfo {
 
 // podGangInfoNameSet builds a Set of podGangInfo FQNs. Kept local for the same reason as
 // podGangInfoByName.
-func podGangInfoNameSet(podGangs []*podGangInfo) componentutils.Set[string] {
-	return componentutils.NewSetBy(podGangs, func(podGang *podGangInfo) string {
-		return podGang.fqn
-	})
+func podGangInfoNameSet(podGangs []*podGangInfo) sets.Set[string] {
+	names := sets.New[string]()
+	for _, podGang := range podGangs {
+		names.Insert(podGang.fqn)
+	}
+	return names
 }
 
 // syncFlowResult captures the result of a sync flow run.
