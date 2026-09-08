@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
+
 	"github.com/samber/lo"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -240,8 +241,8 @@ func (v *pcsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string
 		allErrs = append(allErrs, field.Required(fldPath, "at least one PodClique must be defined"))
 	}
 
-	// Get all clique names that belong to scaling groups
-	scalingGroupCliqueNames := v.getScalingGroupCliqueNames()
+	// Get all clique names that belong to scaling groups.
+	_, scalingGroupCliqueNames := componentutils.GetExpectedPCLQNamesGroupByOwner(v.pcs)
 
 	cliqueNames := make([]string, 0, len(cliqueTemplateSpecs))
 	cliqueRoles := make([]string, 0, len(cliqueTemplateSpecs))
@@ -381,6 +382,9 @@ func (v *pcsValidator) validatePodCliqueScalingGroupConfigs(fldPath *field.Path)
 			}
 		}
 
+		// validate RollingUpdate against the active update strategy.
+		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(scalingGroupConfig.RollingUpdate, fldPath.Index(i).Child("rollingUpdate"))...)
+
 		// validate PCSG-level ResourceSharing
 		allErrs = append(allErrs, v.validatePCSGResourceSharing(scalingGroupConfig, fldPath.Index(i).Child("resourceSharing"))...)
 	}
@@ -456,6 +460,16 @@ func (v *pcsValidator) validatePodCliqueTemplateSpec(cliqueTemplateSpec *groveco
 		allErrs = append(allErrs, errs...)
 	}
 
+	if scalingGroupCliqueNames.Has(cliqueTemplateSpec.Name) {
+		// A PCSG-owned PodClique is governed by the owning PodCliqueScalingGroup.
+		if cliqueTemplateSpec.RollingUpdate != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("rollingUpdate"),
+				"rollingUpdate must not be set on a PodClique that is a member of a PodCliqueScalingGroup. Set it on the PodCliqueScalingGroup instead"))
+		}
+	} else {
+		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(cliqueTemplateSpec.RollingUpdate, fldPath.Child("rollingUpdate"))...)
+	}
+
 	return warnings, allErrs
 }
 
@@ -485,13 +499,37 @@ func validateCliqueDependencies(cliques []*grovecorev1alpha1.PodCliqueTemplateSp
 	return allErrs
 }
 
-// getScalingGroupCliqueNames returns a set of all clique names that belong to scaling groups.
-func (v *pcsValidator) getScalingGroupCliqueNames() sets.Set[string] {
-	scalingGroupCliqueNames := sets.New[string]()
-	for _, scalingGroupConfig := range v.pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-		scalingGroupCliqueNames.Insert(scalingGroupConfig.CliqueNames...)
+// updateStrategyType returns the active update strategy, treating an unset strategy as
+// RollingRecreate to mirror the defaulting webhook.
+func (v *pcsValidator) updateStrategyType() grovecorev1alpha1.UpdateStrategyType {
+	if v.pcs.Spec.UpdateStrategy == nil || v.pcs.Spec.UpdateStrategy.Type == "" {
+		return grovecorev1alpha1.RollingRecreateStrategy
 	}
-	return scalingGroupCliqueNames
+	return v.pcs.Spec.UpdateStrategy.Type
+}
+
+// validateRollingUpdateConfiguration checks a component's RollingUpdate against the active update
+// strategy. OnDelete forbids it entirely. Otherwise MaxUnavailable and ProgressDeadline, when set,
+// must be greater than 0. A nil MaxUnavailable is allowed since the field is optional and the
+// consumer supplies an effective value.
+func (v *pcsValidator) validateRollingUpdateConfiguration(rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if v.updateStrategyType() == grovecorev1alpha1.OnDeleteStrategy {
+		if rollingUpdate != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath, "rollingUpdate must not be set when the update strategy is OnDelete"))
+		}
+		return allErrs
+	}
+	if rollingUpdate == nil {
+		return allErrs
+	}
+	if rollingUpdate.MaxUnavailable != nil && *rollingUpdate.MaxUnavailable <= 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxUnavailable"), *rollingUpdate.MaxUnavailable, "must be greater than 0"))
+	}
+	if rollingUpdate.ProgressDeadline != nil && rollingUpdate.ProgressDeadline.Duration <= 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("progressDeadline"), rollingUpdate.ProgressDeadline.Duration.String(), "must be greater than 0"))
+	}
+	return allErrs
 }
 
 // validateScalingGroupPodCliqueNames validates that scaling group clique references exist and meet naming constraints.

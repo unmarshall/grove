@@ -33,6 +33,9 @@ func TestDefaultPodCliqueSet(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			UpdateStrategy: &grovecorev1alpha1.PodCliqueSetUpdateStrategy{
+				Type: grovecorev1alpha1.RollingRecreateStrategy,
+			},
 			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{{
 					Name: "test",
@@ -47,6 +50,9 @@ func TestDefaultPodCliqueSet(t *testing.T) {
 							MaxReplicas: 3,
 						},
 						MinAvailable: ptr.To[int32](2),
+					},
+					RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To[int32](1),
 					},
 				}},
 				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{},
