@@ -38,6 +38,10 @@ spec:
     - jsonPath: .status.updateProgress.totalPodCliqueScalingGroupsCount
       name: PCSGs-Total
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="UpdateInProgress")].reason
+      name: Update
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
