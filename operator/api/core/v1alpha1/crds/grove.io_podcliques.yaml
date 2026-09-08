@@ -9163,6 +9163,13 @@ spec:
                 description: UpdateProgress provides details about the ongoing update
                   of the PodClique.
                 properties:
+                  lastProgressedAt:
+                    description: |-
+                      LastProgressedAt is the time at which the rolling update last made progress, meaning the number of
+                      updated replicas increased. The ProgressDeadline is measured from it, and it is nil while no update is in
+                      progress.
+                    format: date-time
+                    type: string
                   podCliqueSetGenerationHash:
                     description: |-
                       PodCliqueSetGenerationHash is the generation hash corresponding to the latest PodCliqueSet spec that this

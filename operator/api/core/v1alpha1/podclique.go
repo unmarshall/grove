@@ -162,6 +162,10 @@ type PodCliqueUpdateProgress struct {
 	// that there is no work pending on Grove. As can be observed with the OnDelete strategy, UpdateEndedAt being set does
 	// not necessarily mean that all Pods are running with the latest specifications.
 	UpdateEndedAt *metav1.Time `json:"updateEndedAt,omitempty"`
+	// LastProgressedAt is the time at which the rolling update last made progress, meaning the number of
+	// updated replicas increased. The ProgressDeadline is measured from it, and it is nil while no update is in
+	// progress.
+	LastProgressedAt *metav1.Time `json:"lastProgressedAt,omitempty"`
 	// PodCliqueSetGenerationHash is the generation hash corresponding to the latest PodCliqueSet spec that this
 	// PodClique should converge to. PodCliqueStatus.CurrentPodCliqueSetGenerationHash is set to this hash once
 	// UpdateEndedAt is set, which marks the end of the update.

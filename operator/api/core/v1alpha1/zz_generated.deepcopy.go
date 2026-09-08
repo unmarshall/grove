@@ -598,6 +598,10 @@ func (in *PodCliqueScalingGroupUpdateProgress) DeepCopyInto(out *PodCliqueScalin
 		in, out := &in.UpdateEndedAt, &out.UpdateEndedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.LastProgressedAt != nil {
+		in, out := &in.LastProgressedAt, &out.LastProgressedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.ReadyReplicaIndicesSelectedToUpdate != nil {
 		in, out := &in.ReadyReplicaIndicesSelectedToUpdate, &out.ReadyReplicaIndicesSelectedToUpdate
 		*out = new(PodCliqueScalingGroupReplicaUpdateProgress)
@@ -1032,6 +1036,10 @@ func (in *PodCliqueUpdateProgress) DeepCopyInto(out *PodCliqueUpdateProgress) {
 	in.UpdateStartedAt.DeepCopyInto(&out.UpdateStartedAt)
 	if in.UpdateEndedAt != nil {
 		in, out := &in.UpdateEndedAt, &out.UpdateEndedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.LastProgressedAt != nil {
+		in, out := &in.LastProgressedAt, &out.LastProgressedAt
 		*out = (*in).DeepCopy()
 	}
 	if in.ReadyPodsSelectedToUpdate != nil {
