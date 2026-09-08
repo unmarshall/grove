@@ -17,24 +17,31 @@ limitations under the License.
 package pod
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/expect"
+	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
 	testNewHash = "new-hash-abc"
 	testOldHash = "old-hash-xyz"
-	testNS      = "test-ns"
 )
 
 func TestComputeUpdateWork(t *testing.T) {
@@ -90,8 +97,155 @@ func TestComputeUpdateWork(t *testing.T) {
 					assert.Empty(t, pods, fmt.Sprintf("expected no pods in bucket %s", name))
 				}
 			}
+
+			wantOldHashCount := 0
+			if tt.pod.Labels[apicommon.LabelPodTemplateHash] == testOldHash {
+				wantOldHashCount = 1
+			}
+			assert.Equal(t, wantOldHashCount, work.oldHashPodCount, "unexpected oldHashPodCount")
 		})
 	}
+}
+
+func TestComputeAllowedBudget(t *testing.T) {
+	tests := []struct {
+		name                    string
+		desiredNumPods          int
+		minAvailable            int
+		numReadyPods            int
+		effectiveMaxUnavailable int
+		want                    int
+	}{
+		{"default budget of 1 with all available", 3, 2, 3, 1, 1},
+		{"budget exhausted by an in-flight disruption", 3, 2, 2, 1, 0},
+		{"minAvailable floor is the tighter bound", 5, 4, 5, 3, 1},
+		{"maxUnavailable is the tighter bound", 5, 1, 5, 2, 2},
+		{"floored at zero when below minAvailable", 3, 2, 1, 1, 0},
+		{"budget accounts for existing unavailable pods", 6, 2, 5, 3, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, computeAllowedBudget(tt.desiredNumPods, tt.minAvailable, tt.numReadyPods, tt.effectiveMaxUnavailable))
+		})
+	}
+}
+
+func TestSelectOldestPods(t *testing.T) {
+	newest := newTestPod("newest", testOldHash, withAgeMinutes(1))
+	middle := newTestPod("middle", testOldHash, withAgeMinutes(5))
+	oldest := newTestPod("oldest", testOldHash, withAgeMinutes(10))
+
+	t.Run("returns nil for non-positive n", func(t *testing.T) {
+		assert.Nil(t, selectOldestPods([]*corev1.Pod{oldest, newest}, 0))
+		assert.Nil(t, selectOldestPods([]*corev1.Pod{oldest, newest}, -1))
+	})
+	t.Run("returns nil for empty input", func(t *testing.T) {
+		assert.Nil(t, selectOldestPods(nil, 2))
+	})
+	t.Run("selects the n oldest pods in order", func(t *testing.T) {
+		got := selectOldestPods([]*corev1.Pod{newest, oldest, middle}, 2)
+		assert.Equal(t, []*corev1.Pod{oldest, middle}, got)
+	})
+	t.Run("caps at the number of available pods", func(t *testing.T) {
+		got := selectOldestPods([]*corev1.Pod{newest, oldest}, 5)
+		assert.Len(t, got, 2)
+	})
+}
+
+func TestProcessPendingUpdates(t *testing.T) {
+	pcsWithMaxUnavailable := func(maxUnavailable int32) *grovecorev1alpha1.PodCliqueSet {
+		return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, "uid").
+			WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder(testCliqueName).WithMaxUnavailable(maxUnavailable).Build()).
+			Build()
+	}
+	pclqUpdating := func(replicas, minAvailable int32) *grovecorev1alpha1.PodClique {
+		return testutils.NewPodCliqueBuilder(testPCSName, "uid", testCliqueName, testNamespace, 0).
+			WithReplicas(replicas).
+			WithMinAvailable(minAvailable).
+			WithOptions(func(p *grovecorev1alpha1.PodClique) {
+				p.Status.UpdateProgress = &grovecorev1alpha1.PodCliqueUpdateProgress{}
+			}).
+			Build()
+	}
+	readyPod := func(name, hash string, ageMinutes int) *corev1.Pod {
+		return newTestPod(name, hash, withPhase(corev1.PodRunning), withReadyCondition(), withAgeMinutes(ageMinutes))
+	}
+	newResource := func(pclq *grovecorev1alpha1.PodClique, pods []*corev1.Pod) (_resource, client.Client) {
+		objs := []client.Object{pclq}
+		for _, p := range pods {
+			objs = append(objs, p)
+		}
+		cl := testutils.NewTestClientBuilder().WithObjects(objs...).Build()
+		return _resource{
+			client:            cl,
+			scheme:            cl.Scheme(),
+			eventRecorder:     record.NewFakeRecorder(64),
+			expectationsStore: expect.NewExpectationsStore(),
+		}, cl
+	}
+	remainingPodNames := func(t *testing.T, cl client.Client) []string {
+		var list corev1.PodList
+		require.NoError(t, cl.List(context.Background(), &list, client.InNamespace(testNamespace)))
+		names := make([]string, 0, len(list.Items))
+		for _, p := range list.Items {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+	requeueErr := &groveerr.GroveError{Code: groveerr.ErrCodeContinueReconcileAndRequeue, Operation: component.OperationSync}
+
+	t.Run("completes when no old pods remain and desired new pods are ready", func(t *testing.T) {
+		pclq := pclqUpdating(2, 1)
+		pods := []*corev1.Pod{readyPod("new-0", testNewHash, 2), readyPod("new-1", testNewHash, 1)}
+		r, _ := newResource(pclq, pods)
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(1), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: pods}
+
+		require.NoError(t, r.processPendingUpdates(context.Background(), logr.Discard(), ss))
+		assert.NotNil(t, pclq.Status.UpdateProgress.UpdateEndedAt, "expected UpdateEndedAt to be set")
+	})
+
+	t.Run("waits when there are no ready old pods but replacements are not yet ready", func(t *testing.T) {
+		pclq := pclqUpdating(2, 1)
+		pods := []*corev1.Pod{readyPod("new-0", testNewHash, 1)}
+		r, cl := newResource(pclq, pods)
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(1), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: pods}
+
+		err := r.processPendingUpdates(context.Background(), logr.Discard(), ss)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.Nil(t, pclq.Status.UpdateProgress.UpdateEndedAt)
+		assert.Len(t, remainingPodNames(t, cl), 1)
+	})
+
+	t.Run("disrupts the oldest ready old pods up to the budget", func(t *testing.T) {
+		pclq := pclqUpdating(3, 1)
+		pods := []*corev1.Pod{
+			readyPod("old-0", testOldHash, 3),
+			readyPod("old-1", testOldHash, 2),
+			readyPod("old-2", testOldHash, 1),
+		}
+		r, cl := newResource(pclq, pods)
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(2), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: pods}
+
+		err := r.processPendingUpdates(context.Background(), logr.Discard(), ss)
+		testutils.AssertGroveError(t, requeueErr, err)
+		// Budget of 2 and MinAvailable headroom of 2, so the two oldest are deleted and the newest remains.
+		assert.ElementsMatch(t, []string{"old-2"}, remainingPodNames(t, cl))
+	})
+
+	t.Run("blocks when the budget is exhausted by the MinAvailable requirement", func(t *testing.T) {
+		pclq := pclqUpdating(3, 3)
+		pods := []*corev1.Pod{
+			readyPod("old-0", testOldHash, 3),
+			readyPod("old-1", testOldHash, 2),
+			readyPod("old-2", testOldHash, 1),
+		}
+		r, cl := newResource(pclq, pods)
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(1), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: pods}
+
+		err := r.processPendingUpdates(context.Background(), logr.Discard(), ss)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.Len(t, remainingPodNames(t, cl), 3, "no pod should be deleted when MinAvailable leaves no headroom")
+	})
 }
 
 // newTestPod creates a pod with the given name, template hash label, and options applied.
@@ -99,7 +253,7 @@ func newTestPod(name, templateHash string, opts ...func(*corev1.Pod)) *corev1.Po
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: testNS,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				apicommon.LabelPodTemplateHash: templateHash,
 			},
@@ -150,6 +304,12 @@ func withDeletionTimestamp() func(*corev1.Pod) {
 	}
 }
 
+func withAgeMinutes(ageMinutes int) func(*corev1.Pod) {
+	return func(pod *corev1.Pod) {
+		pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Duration(ageMinutes) * time.Minute))
+	}
+}
+
 // bucket identifies which updateWork bucket a pod should land in.
 type bucket int
 
@@ -160,5 +320,5 @@ const (
 	bucketOldUncategorized
 	bucketOldReady
 	bucketNewReady
-	bucketSkipped // terminating pods — not in any bucket
+	bucketSkipped // terminating pods, not in any bucket
 )

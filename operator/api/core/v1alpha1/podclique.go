@@ -174,11 +174,18 @@ type PodCliqueUpdateProgress struct {
 	// ReadyPodsSelectedToUpdate captures the pod names of ready Pods that are either currently being updated or have
 	// been previously updated. This field is only set for auto update strategies where Grove orchestrates Pod deletions.
 	// For the OnDelete strategy this field is not set, because Pod replacement is initiated by user-driven Pod deletions.
+	//
+	// Deprecated: the rolling update is now driven by an availability budget computed from live Pod state on each
+	// reconcile and no longer tracks a selection cursor. This field is no longer set and will be removed in a future
+	// release. Do not depend on it.
 	ReadyPodsSelectedToUpdate *PodsSelectedToUpdate `json:"readyPodsSelectedToUpdate,omitempty"`
 }
 
 // PodsSelectedToUpdate captures the current and previous set of pod names that have been selected for update in a
 // rolling recreate. It is not set in an OnDelete update.
+//
+// Deprecated: no longer set by the rolling update, which now derives its budget from live Pod state. This type will
+// be removed in a future release.
 type PodsSelectedToUpdate struct {
 	// Current captures the current pod name that is a target for update.
 	Current string `json:"current"`

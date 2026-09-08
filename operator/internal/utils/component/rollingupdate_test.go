@@ -27,17 +27,17 @@ func TestEffectiveMaxUnavailable(t *testing.T) {
 	testCases := []struct {
 		description   string
 		rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration
-		want          int32
+		want          int
 	}{
 		{
 			description:   "nil rollingUpdate returns the RollingRecreate default",
 			rollingUpdate: nil,
-			want:          DefaultRollingRecreateMaxUnavailable,
+			want:          int(DefaultRollingRecreateMaxUnavailable),
 		},
 		{
 			description:   "nil MaxUnavailable returns the RollingRecreate default",
 			rollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{},
-			want:          DefaultRollingRecreateMaxUnavailable,
+			want:          int(DefaultRollingRecreateMaxUnavailable),
 		},
 		{
 			description:   "configured MaxUnavailable is returned",

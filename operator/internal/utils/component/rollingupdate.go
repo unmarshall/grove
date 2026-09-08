@@ -31,9 +31,9 @@ const DefaultRollingRecreateMaxUnavailable int32 = 1
 // reconcile without re-admission and carry a nil MaxUnavailable. Once every PodCliqueSet has been
 // re-admitted and carries a MaxUnavailable populated by the defaulting webhook, this accessor is no
 // longer required and should be removed in favor of reading the field directly.
-func EffectiveMaxUnavailable(rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration) int32 {
+func EffectiveMaxUnavailable(rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration) int {
 	if rollingUpdate != nil && rollingUpdate.MaxUnavailable != nil {
-		return *rollingUpdate.MaxUnavailable
+		return int(*rollingUpdate.MaxUnavailable)
 	}
-	return DefaultRollingRecreateMaxUnavailable
+	return int(DefaultRollingRecreateMaxUnavailable)
 }
