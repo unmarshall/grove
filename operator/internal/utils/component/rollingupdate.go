@@ -37,3 +37,13 @@ func EffectiveMaxUnavailable(rollingUpdate *grovecorev1alpha1.RollingUpdateConfi
 	}
 	return int(DefaultRollingRecreateMaxUnavailable)
 }
+
+// ComputeAllowedBudget returns the number of units (Pods for a standalone PodClique, complete logical
+// replicas for a PodCliqueScalingGroup) that may be disrupted this reconcile. It is the MaxUnavailable
+// headroom (effectiveMaxUnavailable minus the currently unavailable units), floored at 0. MinAvailable
+// is deliberately not a bound, so a PodClique whose MinAvailable equals its replica count can still roll
+// (gang termination is suspended during an update, so the transient dip below MinAvailable is safe).
+func ComputeAllowedBudget(desiredNumUnits, numReadyUnits, effectiveMaxUnavailable int) int {
+	unavailable := desiredNumUnits - numReadyUnits
+	return max(0, effectiveMaxUnavailable-unavailable)
+}

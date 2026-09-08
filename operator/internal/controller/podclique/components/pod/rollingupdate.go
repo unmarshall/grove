@@ -50,8 +50,8 @@ type updateWork struct {
 	oldTemplateHashStartingPods []*corev1.Pod
 	// oldTemplateHashUncategorizedPods are old-hash Pods in an unrecognized state.
 	oldTemplateHashUncategorizedPods []*corev1.Pod
-	// newTemplateHashReadyPods are new-hash Pods that are Ready and not already being deleted.
-	newTemplateHashReadyPods []*corev1.Pod
+	// newReadyPodCount is the number of new-hash Pods that are Ready and not already being deleted.
+	newReadyPodCount int
 	// oldHashPodCount is the number of old-hash Pods that still exist, including those already
 	// terminating. The rolling update is complete only when this reaches 0.
 	oldHashPodCount int
@@ -77,7 +77,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	// Completion is readiness-aware. End the update only when no old-hash Pods remain and the desired
 	// number of new-hash Pods are Ready, so a rollout never completes while replacements are not yet
 	// available.
-	if uw.oldHashPodCount == 0 && len(uw.newTemplateHashReadyPods) >= desiredNumPods {
+	if uw.oldHashPodCount == 0 && uw.newReadyPodCount >= desiredNumPods {
 		return r.markRollingUpdateEnd(ctx, logger, ss.pclq)
 	}
 
@@ -91,17 +91,16 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		)
 	}
 
-	// Compute the disruption budget against the current desired count. allowedBudget is bounded by both
-	// the MaxUnavailable budget and the MinAvailable floor.
-	numReadyPods := len(uw.oldTemplateHashReadyPods) + len(uw.newTemplateHashReadyPods)
-	minAvailable := int(ptr.Deref(ss.pclq.Spec.MinAvailable, 0))
+	// Compute the disruption budget against the current desired count. allowedBudget is the MaxUnavailable
+	// headroom for this reconcile.
+	numReadyPods := len(uw.oldTemplateHashReadyPods) + uw.newReadyPodCount
 	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCLQ(ss))
-	allowedBudget := computeAllowedBudget(desiredNumPods, minAvailable, numReadyPods, effectiveMaxUnavailable)
+	allowedBudget := componentutils.ComputeAllowedBudget(desiredNumPods, numReadyPods, effectiveMaxUnavailable)
 	if allowedBudget == 0 {
 		return groveerr.New(
 			groveerr.ErrCodeContinueReconcileAndRequeue,
 			component.OperationSync,
-			fmt.Sprintf("rolling update of PodClique %v paused, disruption budget exhausted or MinAvailable floor reached, requeuing", client.ObjectKeyFromObject(ss.pclq)),
+			fmt.Sprintf("rolling update of PodClique %v paused, disruption budget exhausted, requeuing", client.ObjectKeyFromObject(ss.pclq)),
 		)
 	}
 
@@ -124,14 +123,6 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		component.OperationSync,
 		fmt.Sprintf("deleted %d Ready Pod(s) for rolling update of PodClique %v, requeuing", len(podsToUpdate), client.ObjectKeyFromObject(ss.pclq)),
 	)
-}
-
-// computeAllowedBudget returns the number of Ready Pods that may be disrupted this reconcile. It is
-// the smaller of the MaxUnavailable headroom (effectiveMaxUnavailable minus the currently
-// unavailable Pods) and the MinAvailable headroom (numReadyPods minus minAvailable), floored at 0.
-func computeAllowedBudget(desiredNumPods, minAvailable, numReadyPods, effectiveMaxUnavailable int) int {
-	unavailable := desiredNumPods - numReadyPods
-	return max(0, min(effectiveMaxUnavailable-unavailable, numReadyPods-minAvailable))
 }
 
 // selectOldestPods returns up to n Pods from the given slice, oldest first by creation timestamp.
@@ -168,7 +159,7 @@ func (r _resource) computeUpdateWork(logger logr.Logger, ss *syncSnapshot) *upda
 			// New-hash Pods need no rolling-update action. Track only those that are Ready and not
 			// being deleted, since they are what completion and the budget count as available.
 			if !deletionTriggered && k8sutils.IsPodReady(pod) {
-				work.newTemplateHashReadyPods = append(work.newTemplateHashReadyPods, pod)
+				work.newReadyPodCount++
 			}
 			continue
 		}

@@ -78,7 +78,6 @@ func TestComputeUpdateWork(t *testing.T) {
 				bucketOldStarting:      work.oldTemplateHashStartingPods,
 				bucketOldUncategorized: work.oldTemplateHashUncategorizedPods,
 				bucketOldReady:         work.oldTemplateHashReadyPods,
-				bucketNewReady:         work.newTemplateHashReadyPods,
 			}
 
 			bucketNames := map[bucket]string{
@@ -87,7 +86,6 @@ func TestComputeUpdateWork(t *testing.T) {
 				bucketOldStarting:      "oldStarting",
 				bucketOldUncategorized: "oldUncategorized",
 				bucketOldReady:         "oldReady",
-				bucketNewReady:         "newReady",
 			}
 			for b, pods := range bucketPods {
 				name := bucketNames[b]
@@ -98,34 +96,17 @@ func TestComputeUpdateWork(t *testing.T) {
 				}
 			}
 
+			wantNewReadyCount := 0
+			if tt.expected == bucketNewReady {
+				wantNewReadyCount = 1
+			}
+			assert.Equal(t, wantNewReadyCount, work.newReadyPodCount, "unexpected newReadyPodCount")
+
 			wantOldHashCount := 0
 			if tt.pod.Labels[apicommon.LabelPodTemplateHash] == testOldHash {
 				wantOldHashCount = 1
 			}
 			assert.Equal(t, wantOldHashCount, work.oldHashPodCount, "unexpected oldHashPodCount")
-		})
-	}
-}
-
-func TestComputeAllowedBudget(t *testing.T) {
-	tests := []struct {
-		name                    string
-		desiredNumPods          int
-		minAvailable            int
-		numReadyPods            int
-		effectiveMaxUnavailable int
-		want                    int
-	}{
-		{"default budget of 1 with all available", 3, 2, 3, 1, 1},
-		{"budget exhausted by an in-flight disruption", 3, 2, 2, 1, 0},
-		{"minAvailable floor is the tighter bound", 5, 4, 5, 3, 1},
-		{"maxUnavailable is the tighter bound", 5, 1, 5, 2, 2},
-		{"floored at zero when below minAvailable", 3, 2, 1, 1, 0},
-		{"budget accounts for existing unavailable pods", 6, 2, 5, 3, 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, computeAllowedBudget(tt.desiredNumPods, tt.minAvailable, tt.numReadyPods, tt.effectiveMaxUnavailable))
 		})
 	}
 }
@@ -232,7 +213,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 		assert.ElementsMatch(t, []string{"old-2"}, remainingPodNames(t, cl))
 	})
 
-	t.Run("blocks when the budget is exhausted by the MinAvailable requirement", func(t *testing.T) {
+	t.Run("rolls one pod at a time when MinAvailable equals replicas", func(t *testing.T) {
 		pclq := pclqUpdating(3, 3)
 		pods := []*corev1.Pod{
 			readyPod("old-0", testOldHash, 3),
@@ -244,7 +225,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 
 		err := r.processPendingUpdates(context.Background(), logr.Discard(), ss)
 		testutils.AssertGroveError(t, requeueErr, err)
-		assert.Len(t, remainingPodNames(t, cl), 3, "no pod should be deleted when MinAvailable leaves no headroom")
+		assert.Len(t, remainingPodNames(t, cl), 2, "MinAvailable equal to replicas must not block the roll; MaxUnavailable=1 disrupts one pod")
 	})
 }
 

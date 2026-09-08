@@ -51,3 +51,26 @@ func TestEffectiveMaxUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeAllowedBudget(t *testing.T) {
+	tests := []struct {
+		description             string
+		desiredNumUnits         int
+		numReadyUnits           int
+		effectiveMaxUnavailable int
+		want                    int
+	}{
+		{"default budget of 1 with all available", 3, 3, 1, 1},
+		{"budget of 1 when all replicas are required and ready", 2, 2, 1, 1},
+		{"budget exhausted by an in-flight disruption", 3, 2, 1, 0},
+		{"maxUnavailable allows multiple disruptions", 5, 5, 2, 2},
+		{"full disruption when maxUnavailable equals replicas", 4, 4, 4, 4},
+		{"floored at zero when unavailable exceeds the budget", 3, 1, 1, 0},
+		{"budget accounts for existing unavailable units", 6, 5, 3, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			assert.Equal(t, tt.want, ComputeAllowedBudget(tt.desiredNumUnits, tt.numReadyUnits, tt.effectiveMaxUnavailable))
+		})
+	}
+}
