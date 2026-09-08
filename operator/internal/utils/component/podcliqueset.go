@@ -26,6 +26,7 @@ import (
 
 	"github.com/samber/lo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -124,15 +125,17 @@ func IsAutoUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 }
 
 // GetExpectedPCLQNamesGroupByOwner returns the expected unqualified PodClique names which are either owned by PodCliqueSet or PodCliqueScalingGroup.
-func GetExpectedPCLQNamesGroupByOwner(pcs *grovecorev1alpha1.PodCliqueSet) (expectedPCLQNamesForPCS []string, expectedPCLQNamesForPCSG []string) {
-	pcsgConfigs := pcs.Spec.Template.PodCliqueScalingGroupConfigs
-	for _, pcsgConfig := range pcsgConfigs {
-		expectedPCLQNamesForPCSG = append(expectedPCLQNamesForPCSG, pcsgConfig.CliqueNames...)
+func GetExpectedPCLQNamesGroupByOwner(pcs *grovecorev1alpha1.PodCliqueSet) (expectedPCLQNamesForPCS sets.Set[string], expectedPCLQNamesForPCSG sets.Set[string]) {
+	expectedPCLQNamesForPCS = sets.New[string]()
+	expectedPCLQNamesForPCSG = sets.New[string]()
+	for _, pcsgConfig := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		expectedPCLQNamesForPCSG.Insert(pcsgConfig.CliqueNames...)
 	}
-	pcsCliqueNames := lo.Map(pcs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, _ int) string {
-		return pclqTemplateSpec.Name
-	})
-	expectedPCLQNamesForPCS, _ = lo.Difference(pcsCliqueNames, expectedPCLQNamesForPCSG)
+	for _, pclqTemplateSpec := range pcs.Spec.Template.Cliques {
+		if !expectedPCLQNamesForPCSG.Has(pclqTemplateSpec.Name) {
+			expectedPCLQNamesForPCS.Insert(pclqTemplateSpec.Name)
+		}
+	}
 	return
 }
 

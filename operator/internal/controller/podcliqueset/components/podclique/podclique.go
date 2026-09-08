@@ -144,7 +144,7 @@ func (r _resource) createOrUpdatePCLQs(ctx context.Context, logger logr.Logger, 
 			)
 		}
 
-		for _, expectedPCLQName := range expectedPCLQNames {
+		for expectedPCLQName := range expectedPCLQNames {
 			pclqObjectKey := client.ObjectKey{
 				Name:      apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: int(pcsReplicaIndex)}, expectedPCLQName),
 				Namespace: pcs.Namespace,

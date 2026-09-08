@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -474,8 +475,8 @@ func TestGetExpectedPCLQNamesGroupByOwner(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pcsNames, pcsgNames := GetExpectedPCLQNamesGroupByOwner(tc.pcs)
-			assert.ElementsMatch(t, tc.expectedPCLQNamesForPCS, pcsNames)
-			assert.ElementsMatch(t, tc.expectedPCLQNamesForPCSG, pcsgNames)
+			assert.Equal(t, sets.New(tc.expectedPCLQNamesForPCS...), pcsNames)
+			assert.Equal(t, sets.New(tc.expectedPCLQNamesForPCSG...), pcsgNames)
 		})
 	}
 }
