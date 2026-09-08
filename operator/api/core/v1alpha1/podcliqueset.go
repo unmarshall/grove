@@ -172,6 +172,37 @@ type PodCliqueSetReplicaUpdateProgress struct {
 	UpdateEndedAt *metav1.Time `json:"updateEndedAt,omitempty"`
 }
 
+// RollingUpdateConfiguration carries per-component knobs for a rolling update. It attaches to each
+// standalone PodCliqueTemplateSpec and to each PodCliqueScalingGroupConfig, keeping the
+// configuration next to the component it governs. These knobs are per-component because components
+// differ in how much disruption they tolerate and how long they take to make progress, so a single
+// PodCliqueSet-wide value cannot express them. The configuration is strategy-agnostic. It governs
+// the RollingRecreate strategy today and is reused by the Coherent strategy.
+type RollingUpdateConfiguration struct {
+	// MaxUnavailable is the maximum number of pods (for a standalone PodClique) or
+	// PodCliqueScalingGroup replicas (for a PCSG) that may be unavailable at any moment during an
+	// update of this component, measured against the component's desired count.
+	//
+	// Defaulting:
+	//   - RollingRecreate: defaults to 1.
+	//   - OnDelete: the whole RollingUpdate is cleared by defaulting, because it does not apply to
+	//     OnDelete. This also lets a transition away from RollingRecreate drop the stale configuration.
+	//
+	// Validation:
+	//   - When set, must be greater than 0.
+	//   - OnDelete: RollingUpdate must not be set. The PodCliqueSet validating webhook rejects a
+	//     RollingUpdateConfiguration on any component when the strategy is OnDelete.
+	// +optional
+	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
+	// ProgressDeadline tracks the progress of this component's rolling update. If the component,
+	// a PodClique or a PodCliqueScalingGroup, shows no observable progress within this duration, the
+	// breach is reported through the UpdateInProgress condition, whose Status is set to Unknown with
+	// reason ProgressDeadlineExceeded. If nil, this component does not report progress-deadline
+	// breaches and its update can wait indefinitely for progress.
+	// +optional
+	ProgressDeadline *metav1.Duration `json:"progressDeadline,omitempty"`
+}
+
 // PodCliqueSetTemplateSpec defines a template spec for a PodGang.
 // A PodGang does not have a RestartPolicy field because the restart policy is predefined:
 // If the number of pods in any of the cliques falls below the threshold, the entire PodGang will be restarted.
@@ -258,6 +289,13 @@ type PodCliqueTemplateSpec struct {
 	// PCLQs have no children to filter, so no Filter field is available.
 	// +optional
 	ResourceSharing []ResourceSharingSpec `json:"resourceSharing,omitempty"`
+	// RollingUpdate is the per-component update configuration for this PodClique. It applies only to
+	// a standalone PodClique. Setting it on a PodCliqueTemplateSpec whose Name appears in any
+	// PodCliqueScalingGroupConfig.CliqueNames (a PCSG-owned PodClique) is not allowed and is rejected
+	// by the PodCliqueSet validating webhook. A PCSG-owned PodClique is instead governed by the
+	// owning PodCliqueScalingGroup's RollingUpdate.
+	// +optional
+	RollingUpdate *RollingUpdateConfiguration `json:"rollingUpdate,omitempty"`
 	// Specification of the desired behavior of a PodClique.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 	Spec PodCliqueSpec `json:"spec"`
@@ -387,6 +425,11 @@ type PodCliqueScalingGroupConfig struct {
 	// ScaleConfig is the horizontal pod autoscaler configuration for the pod clique scaling group.
 	// +optional
 	ScaleConfig *AutoScalingConfig `json:"scaleConfig,omitempty"`
+	// RollingUpdate is the per-component update configuration for this PodCliqueScalingGroup.
+	// It governs the rolling update of every constituent member PodClique. The member
+	// PodCliqueTemplateSpecs must not carry their own RollingUpdate.
+	// +optional
+	RollingUpdate *RollingUpdateConfiguration `json:"rollingUpdate,omitempty"`
 	// ResourceSharing defines shared ResourceClaims at the PCSG level.
 	// Each entry references a template (internal or external) and specifies a Scope:
 	//   - AllReplicas: one RC for the entire PCSG, shared across all replicas

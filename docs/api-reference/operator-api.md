@@ -330,6 +330,7 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of replicas for the scaling group at template level.<br />This allows one to control the replicas of the scaling group at startup.<br />If not specified, it defaults to 1. | 1 |  |
 | `minAvailable` _integer_ | MinAvailable serves two purposes:<br />Gang Scheduling:<br />It defines the minimum number of replicas that are guaranteed to be gang scheduled.<br />Gang Termination:<br />It defines the minimum requirement of available replicas for a PodCliqueScalingGroup.<br />Violation of this threshold for a duration beyond TerminationDelay will result in termination of the PodCliqueSet replica that it belongs to.<br />Default: If not specified, it defaults to 1.<br />Constraints:<br />MinAvailable cannot be greater than Replicas.<br />If ScaleConfig is defined then its MinAvailable should not be less than ScaleConfig.MinReplicas. | 1 |  |
 | `scaleConfig` _[AutoScalingConfig](#autoscalingconfig)_ | ScaleConfig is the horizontal pod autoscaler configuration for the pod clique scaling group. |  |  |
+| `rollingUpdate` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdate is the per-component update configuration for this PodCliqueScalingGroup.<br />It governs the rolling update of every constituent member PodClique. The member<br />PodCliqueTemplateSpecs must not carry their own RollingUpdate. |  |  |
 | `resourceSharing` _[PCSGResourceSharingSpec](#pcsgresourcesharingspec) array_ | ResourceSharing defines shared ResourceClaims at the PCSG level.<br />Each entry references a template (internal or external) and specifies a Scope:<br />  - AllReplicas: one RC for the entire PCSG, shared across all replicas<br />  - PerReplica: one RC per PCSG replica, shared across all PCLQs in that replica<br />The optional Filter field controls which PodCliques receive the claims.<br />At PCSG level, only childCliqueNames filtering is available. |  |  |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint defines topology placement requirements for PodCliqueScalingGroup.<br />Must be equal to or stricter than parent PodCliqueSet constraints. |  |  |
 
@@ -631,6 +632,7 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | Annotations is an unstructured key value map stored with a resource that may be<br />set by external tools to store and retrieve arbitrary metadata. They are not<br />queryable and should be preserved when modifying objects.<br />More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations |  |  |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint defines topology placement requirements for PodClique.<br />Must be equal to or stricter than parent resource constraints. |  |  |
 | `resourceSharing` _[ResourceSharingSpec](#resourcesharingspec) array_ | ResourceSharing defines shared ResourceClaims for this PodClique.<br />Each entry references a template (internal or external) and specifies a Scope:<br />  - AllReplicas: one RC per PCLQ, shared by all replica pods<br />  - PerReplica: one RC per PCLQ replica, shared by all pods within that replica<br />This is distinct from adding ResourceClaimTemplate inside<br />Spec.PodSpec.ResourceClaims[x].ResourceClaimTemplateName, which creates a unique<br />ResourceClaim for each pod.<br />PCLQs have no children to filter, so no Filter field is available. |  |  |
+| `rollingUpdate` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdate is the per-component update configuration for this PodClique. It applies only to<br />a standalone PodClique. Setting it on a PodCliqueTemplateSpec whose Name appears in any<br />PodCliqueScalingGroupConfig.CliqueNames (a PCSG-owned PodClique) is not allowed and is rejected<br />by the PodCliqueSet validating webhook. A PCSG-owned PodClique is instead governed by the<br />owning PodCliqueScalingGroup's RollingUpdate. |  |  |
 | `spec` _[PodCliqueSpec](#podcliquespec)_ | Specification of the desired behavior of a PodClique.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status |  |  |
 
 
@@ -849,6 +851,29 @@ _Appears in:_
 | `name` _string_ | Name of the referenced template. Resolved by first looking up<br />PodCliqueSetTemplateSpec.ResourceClaimTemplates; if no match is found,<br />the operator looks for a Kubernetes ResourceClaimTemplate object in the<br />target namespace. Internal templates shadow external ones with the same name. |  |  |
 | `namespace` _string_ | Namespace of the external ResourceClaimTemplate. When set, the name is<br />resolved as an external Kubernetes ResourceClaimTemplate in the given<br />namespace. When empty, defaults to the PCS namespace during resolution. |  |  |
 | `scope` _[ResourceSharingScope](#resourcesharingscope)_ | Scope determines the sharing granularity for the ResourceClaims created from<br />this template. |  | Enum: [AllReplicas PerReplica] <br /> |
+
+
+#### RollingUpdateConfiguration
+
+
+
+RollingUpdateConfiguration carries per-component knobs for a rolling update. It attaches to each
+standalone PodCliqueTemplateSpec and to each PodCliqueScalingGroupConfig, keeping the
+configuration next to the component it governs. These knobs are per-component because components
+differ in how much disruption they tolerate and how long they take to make progress, so a single
+PodCliqueSet-wide value cannot express them. The configuration is strategy-agnostic. It governs
+the RollingRecreate strategy today and is reused by the Coherent strategy.
+
+
+
+_Appears in:_
+- [PodCliqueScalingGroupConfig](#podcliquescalinggroupconfig)
+- [PodCliqueTemplateSpec](#podcliquetemplatespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maxUnavailable` _integer_ | MaxUnavailable is the maximum number of pods (for a standalone PodClique) or<br />PodCliqueScalingGroup replicas (for a PCSG) that may be unavailable at any moment during an<br />update of this component, measured against the component's desired count.<br />Defaulting:<br />  - RollingRecreate: defaults to 1.<br />  - OnDelete: the whole RollingUpdate is cleared by defaulting, because it does not apply to<br />    OnDelete. This also lets a transition away from RollingRecreate drop the stale configuration.<br />Validation:<br />  - When set, must be greater than 0.<br />  - OnDelete: RollingUpdate must not be set. The PodCliqueSet validating webhook rejects a<br />    RollingUpdateConfiguration on any component when the strategy is OnDelete. |  |  |
+| `progressDeadline` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | ProgressDeadline tracks the progress of this component's rolling update. If the component,<br />a PodClique or a PodCliqueScalingGroup, shows no observable progress within this duration, the<br />breach is reported through the UpdateInProgress condition, whose Status is set to Unknown with<br />reason ProgressDeadlineExceeded. If nil, this component does not report progress-deadline<br />breaches and its update can wait indefinitely for progress. |  |  |
 
 
 #### SchedulerTopologyBinding
