@@ -31,7 +31,6 @@ const (
 	defaultTerminationDelay                    = 4 * time.Hour
 	defaultReplicas                      int32 = 1
 	defaultTerminationGracePeriodSeconds int64 = 30
-	defaultRollingRecreateMaxUnavailable int32 = 1
 )
 
 // defaultPodCliqueSet adds defaults to a PodCliqueSet.
@@ -144,7 +143,7 @@ func defaultRollingUpdateConfiguration(existing *grovecorev1alpha1.RollingUpdate
 	if defaulted == nil {
 		defaulted = &grovecorev1alpha1.RollingUpdateConfiguration{}
 	}
-	defaulted.MaxUnavailable = ptr.To(defaultRollingRecreateMaxUnavailable)
+	defaulted.MaxUnavailable = ptr.To(componentutils.DefaultRollingRecreateMaxUnavailable)
 	return defaulted
 }
 
