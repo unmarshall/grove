@@ -368,6 +368,19 @@ func Test_RU12_RollingUpdateWithPCSScaleInDuringUpdate(t *testing.T) {
 	})
 	defer cleanup()
 
+	// Widen the update window so waitForOrdinalUpdating reliably observes the final ordinal. On KWOK the
+	// update completes within a poll interval, so the transient CurrentlyUpdating window can close before
+	// the poll sees it. The readiness-delay stage keeps freshly created pods not-ready long enough for the
+	// window to span more than the poll interval.
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+			t.Errorf("failed to delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+
 	tests.Logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
 	// Use raw trigger since we need to wait for ordinal before starting the wait
 	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
