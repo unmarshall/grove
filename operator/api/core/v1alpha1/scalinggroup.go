@@ -138,29 +138,6 @@ type PodCliqueScalingGroupUpdateProgress struct {
 	// +optional
 	// +kubebuilder:default=0
 	TotalPodCliquesCount int32 `json:"totalPodCliquesCount,omitempty"`
-	// ReadyReplicaIndicesSelectedToUpdate provides the update progress of ready replicas of PodCliqueScalingGroup that
-	// have been selected for update. PodCliqueScalingGroup replicas that are either pending or unhealthy will be force
-	// updated and the update will not wait for these replicas to become ready. For all ready replicas, one replica is
-	// chosen at a time to update, once it is updated and becomes ready, the next ready replica is chosen for update.
-	// This field is only set for rolling update strategies where Grove orchestrates Pod deletions.
-	// For OnDelete strategy this field is not set, because Pod replacement is initiated by user-driven Pod deletions.
-	//
-	// Deprecated: the rolling update is now driven by an availability budget computed from live replica state on each
-	// reconcile and no longer tracks a selection cursor. This field is no longer set and will be removed in a future
-	// release. Do not depend on it.
-	ReadyReplicaIndicesSelectedToUpdate *PodCliqueScalingGroupReplicaUpdateProgress `json:"readyReplicaIndicesSelectedToUpdate,omitempty"`
-}
-
-// PodCliqueScalingGroupReplicaUpdateProgress provides details about the update progress of ready replicas of
-// PodCliqueScalingGroup that have been selected for update in a rolling recreate. It is not set in an OnDelete update.
-//
-// Deprecated: no longer set by the rolling update, which now derives its budget from live replica state. This type
-// will be removed in a future release.
-type PodCliqueScalingGroupReplicaUpdateProgress struct {
-	// Current is the index of the PodCliqueScalingGroup replica that is currently being updated.
-	Current int32 `json:"current"`
-	// Completed is the list of indices of PodCliqueScalingGroup replicas that have been updated to the latest PodCliqueSet spec.
-	Completed []int32 `json:"completed,omitempty"`
 }
 
 // SetLastErrors sets the last errors observed by the controller when reconciling the PodCliqueScalingGroup.

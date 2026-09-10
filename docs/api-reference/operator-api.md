@@ -335,27 +335,6 @@ _Appears in:_
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint defines topology placement requirements for PodCliqueScalingGroup.<br />Must be equal to or stricter than parent PodCliqueSet constraints. |  |  |
 
 
-#### PodCliqueScalingGroupReplicaUpdateProgress
-
-
-
-PodCliqueScalingGroupReplicaUpdateProgress provides details about the update progress of ready replicas of
-PodCliqueScalingGroup that have been selected for update in a rolling recreate. It is not set in an OnDelete update.
-
-Deprecated: no longer set by the rolling update, which now derives its budget from live replica state. This type
-will be removed in a future release.
-
-
-
-_Appears in:_
-- [PodCliqueScalingGroupUpdateProgress](#podcliquescalinggroupupdateprogress)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `current` _integer_ | Current is the index of the PodCliqueScalingGroup replica that is currently being updated. |  |  |
-| `completed` _integer array_ | Completed is the list of indices of PodCliqueScalingGroup replicas that have been updated to the latest PodCliqueSet spec. |  |  |
-
-
 #### PodCliqueScalingGroupSpec
 
 
@@ -418,7 +397,6 @@ _Appears in:_
 | `podCliqueSetGenerationHash` _string_ | PodCliqueSetGenerationHash is the generation hash corresponding to the latest PodCliqueSet spec that this<br />PodCliqueScalingGroup should converge to. PodCliqueScalingGroupStatus.CurrentPodCliqueSetGenerationHash is set to<br />this hash once UpdateEndedAt is set, which marks the end of the update. |  |  |
 | `updatedPodCliquesCount` _integer_ | UpdatedPodCliquesCount is the number of PodCliques that have been updated to the desired<br />PodCliqueSet generation hash. Recomputed each reconcile from child generation-hash labels. | 0 |  |
 | `totalPodCliquesCount` _integer_ | TotalPodCliquesCount is the total number of PodCliques expected to exist for the PodCliqueScalingGroup<br />at the current spec. | 0 |  |
-| `readyReplicaIndicesSelectedToUpdate` _[PodCliqueScalingGroupReplicaUpdateProgress](#podcliquescalinggroupreplicaupdateprogress)_ | ReadyReplicaIndicesSelectedToUpdate provides the update progress of ready replicas of PodCliqueScalingGroup that<br />have been selected for update. PodCliqueScalingGroup replicas that are either pending or unhealthy will be force<br />updated and the update will not wait for these replicas to become ready. For all ready replicas, one replica is<br />chosen at a time to update, once it is updated and becomes ready, the next ready replica is chosen for update.<br />This field is only set for rolling update strategies where Grove orchestrates Pod deletions.<br />For OnDelete strategy this field is not set, because Pod replacement is initiated by user-driven Pod deletions.<br />Deprecated: the rolling update is now driven by an availability budget computed from live replica state on each<br />reconcile and no longer tracks a selection cursor. This field is no longer set and will be removed in a future<br />release. Do not depend on it. |  |  |
 
 
 #### PodCliqueSet
@@ -658,7 +636,6 @@ _Appears in:_
 | `lastProgressedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#time-v1-meta)_ | LastProgressedAt is the time at which the rolling update last made progress, meaning the number of<br />updated replicas increased. The ProgressDeadline is measured from it, and it is nil while no update is in<br />progress. |  |  |
 | `podCliqueSetGenerationHash` _string_ | PodCliqueSetGenerationHash is the generation hash corresponding to the latest PodCliqueSet spec that this<br />PodClique should converge to. PodCliqueStatus.CurrentPodCliqueSetGenerationHash is set to this hash once<br />UpdateEndedAt is set, which marks the end of the update. |  |  |
 | `podTemplateHash` _string_ | PodTemplateHash is the template hash of the PodClique that the Pods of this PodClique should converge to.<br />This hash is used to segregate Pods which are up to date with the specification, and ones which are outdated for<br />preferential deletions in rolling update strategies, and in all strategies for scale-ins.<br />PodCliqueStatus.PodTemplateHash is set to this hash once UpdateEndedAt is set, which marks the end of the update. |  |  |
-| `readyPodsSelectedToUpdate` _[PodsSelectedToUpdate](#podsselectedtoupdate)_ | ReadyPodsSelectedToUpdate captures the pod names of ready Pods that are either currently being updated or have<br />been previously updated. This field is only set for rolling update strategies where Grove orchestrates Pod deletions.<br />For the OnDelete strategy this field is not set, because Pod replacement is initiated by user-driven Pod deletions.<br />Deprecated: the rolling update is now driven by an availability budget computed from live Pod state on each<br />reconcile and no longer tracks a selection cursor. This field is no longer set and will be removed in a future<br />release. Do not depend on it. |  |  |
 
 
 #### PodGangEntry
@@ -778,27 +755,6 @@ _Appears in:_
 | `name` _string_ | Name is the name of the PodGang. |  |  |
 | `phase` _[PodGangPhase](#podgangphase)_ | Phase is the current phase of the PodGang. |  | Enum: [Pending Starting Running Failed Succeeded] <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#condition-v1-meta) array_ | Conditions represents the latest available observations of the PodGang by its controller. |  |  |
-
-
-#### PodsSelectedToUpdate
-
-
-
-PodsSelectedToUpdate captures the current and previous set of pod names that have been selected for update in a
-rolling recreate. It is not set in an OnDelete update.
-
-Deprecated: no longer set by the rolling update, which now derives its budget from live Pod state. This type will
-be removed in a future release.
-
-
-
-_Appears in:_
-- [PodCliqueUpdateProgress](#podcliqueupdateprogress)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `current` _string_ | Current captures the current pod name that is a target for update. |  |  |
-| `completed` _string array_ | Completed captures the pod names that have already been updated. |  |  |
 
 
 #### ResourceClaimTemplateConfig
