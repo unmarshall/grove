@@ -17,6 +17,7 @@ package podclique
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -64,9 +65,10 @@ const (
 
 // processPendingUpdates advances the rolling update of a PodCliqueScalingGroup by one reconcile step.
 //
-// It always deletes old-configuration replicas that are not Ready, then, honoring both the
-// MaxUnavailable budget and the MinAvailable floor, deletes a bounded number of Ready
-// old-configuration replicas so they are recreated with the expected configuration. The update
+// It selects old-configuration replicas to replace worst-off first (pending, then unavailable, then
+// Ready) and disrupts a bounded number of them, honoring the MaxUnavailable budget, so they are
+// recreated with the expected configuration. Every disruption is bounded by the budget, so a replica
+// is never replaced based on a stale not-Ready read of a member PodClique's status. The update
 // completes only when the desired number of replicas are fully updated and Ready.
 func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger, sc *syncSnapshot) error {
 	uw, err := r.computePendingUpdateWork(sc)
@@ -77,13 +79,6 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 			fmt.Sprintf("failed to compute pending update work for PodCliqueScalingGroup %v", client.ObjectKeyFromObject(sc.pcsg)))
 	}
 
-	// Always delete old-configuration replicas that are not Ready. They are already unavailable, so
-	// deleting them does not consume the disruption budget, and they will be recreated with the
-	// expected configuration.
-	if err = r.deleteOldPendingAndUnavailableReplicas(ctx, logger, sc, uw); err != nil {
-		return err
-	}
-
 	desiredNumReplicas := int(sc.pcsg.Spec.Replicas)
 
 	// Completion is readiness-aware. End the update only when the desired number of replicas are fully
@@ -92,9 +87,12 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		return r.markRollingUpdateEnd(ctx, logger, sc.pcsg)
 	}
 
-	// No Ready old-configuration replicas to disrupt this reconcile means replacements are still in
-	// flight. Requeue and wait for them to become Ready.
-	if len(uw.oldReadyReplicaIndices) == 0 {
+	// Order old-configuration replicas worst-off first: pending, then unavailable, then Ready. Each
+	// slice is already in ascending replica-index order. This mirrors the PodCliqueSet-level
+	// orderPCSReplicaInfo selection.
+	replicaIndicesToUpdate := slices.Concat(uw.oldPendingReplicaIndices, uw.oldUnavailableReplicaIndices, uw.oldReadyReplicaIndices)
+	if len(replicaIndicesToUpdate) == 0 {
+		// All old-configuration replicas are in-flight replacements. Requeue and wait for them to become Ready.
 		return groveerr.New(
 			groveerr.ErrCodeContinueReconcileAndRequeue,
 			component.OperationSync,
@@ -102,8 +100,10 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		)
 	}
 
-	// Compute the disruption budget against the current desired replica count. allowedBudget is the
-	// MaxUnavailable headroom for this reconcile.
+	// Compute the disruption budget against the current desired replica count. Every disruption is
+	// bounded by this budget, so when a member PodClique's readiness status is stale (numReadyReplicas
+	// under-reported) the budget shrinks and the rollout waits, instead of replacing replicas that may
+	// actually be Ready.
 	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCSG(sc))
 	allowedBudget := componentutils.ComputeAllowedBudget(desiredNumReplicas, uw.numReadyReplicas, effectiveMaxUnavailable)
 	if allowedBudget == 0 {
@@ -114,20 +114,19 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		)
 	}
 
-	// oldReadyReplicaIndices is non-empty and allowedBudget > 0, so this selects at least one replica.
-	replicaIndicesToUpdate := uw.oldReadyReplicaIndices[:min(allowedBudget, len(uw.oldReadyReplicaIndices))]
+	replicaIndicesToUpdate = replicaIndicesToUpdate[:min(allowedBudget, len(replicaIndicesToUpdate))]
 	replicaIndicesToUpdateStr := lo.Map(replicaIndicesToUpdate, func(index int, _ int) string {
 		return strconv.Itoa(index)
 	})
-	logger.Info("triggering deletion of Ready replicas with old configuration for rolling update", "replicaIndices", replicaIndicesToUpdate)
-	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToUpdateStr, "deleting Ready replicas for rolling update")
+	logger.Info("triggering deletion of old-configuration replicas for rolling update", "replicaIndices", replicaIndicesToUpdate)
+	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToUpdateStr, "deleting old-configuration replicas for rolling update")
 	if err = r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deleteTasks); err != nil {
 		return err
 	}
 	return groveerr.New(
 		groveerr.ErrCodeContinueReconcileAndRequeue,
 		component.OperationSync,
-		fmt.Sprintf("deleted %d Ready replica(s) for rolling update of PodCliqueScalingGroup %v, requeuing", len(replicaIndicesToUpdate), client.ObjectKeyFromObject(sc.pcsg)),
+		fmt.Sprintf("deleted %d replica(s) for rolling update of PodCliqueScalingGroup %v, requeuing", len(replicaIndicesToUpdate), client.ObjectKeyFromObject(sc.pcsg)),
 	)
 }
 
@@ -209,17 +208,6 @@ func (r _resource) computePendingUpdateWork(ss *syncSnapshot) (*updateWork, erro
 		}
 	}
 	return uw, nil
-}
-
-// deleteOldPendingAndUnavailableReplicas removes old-configuration PCSG replicas that are pending or
-// unavailable. They are not serving traffic and will be recreated with the expected configuration.
-func (r _resource) deleteOldPendingAndUnavailableReplicas(ctx context.Context, logger logr.Logger, sc *syncSnapshot, uw *updateWork) error {
-	replicaIndicesToDelete := lo.Map(append(uw.oldPendingReplicaIndices, uw.oldUnavailableReplicaIndices...), func(index int, _ int) string {
-		return strconv.Itoa(index)
-	})
-	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToDelete,
-		"delete pending and unavailable PodCliqueScalingGroup replicas for rolling update")
-	return r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deleteTasks)
 }
 
 // isReplicaUpdatedAndReady reports whether every expected member PodClique of the replica exists,

@@ -1064,6 +1064,29 @@ func TestProcessPendingUpdates(t *testing.T) {
 		testutils.AssertGroveError(t, requeueErr, err)
 		assert.Len(t, remainingReplicaIndices(t, cl), 2, "MinAvailable equal to replicas must not block the roll; MaxUnavailable=1 disrupts one replica")
 	})
+
+	t.Run("does not disrupt any replica when the budget is exhausted by unavailable replicas", func(t *testing.T) {
+		// Two of three replicas report not-Ready (which can be a stale status read). numReadyReplicas is 1,
+		// unavailable is 2, MaxUnavailable is 1, so the budget is 0 and nothing must be deleted. This is the
+		// case that previously over-disrupted by unconditionally deleting the not-Ready replicas.
+		sc := buildRollingUpdateSnapshot(3, 1, 1, []testReplica{oldReadyReplica(0), oldUnavailableReplica(1), oldUnavailableReplica(2)})
+		r, cl := newResource(sc)
+
+		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.ElementsMatch(t, []string{"0", "1", "2"}, remainingReplicaIndices(t, cl), "no replica may be deleted when the disruption budget is exhausted")
+	})
+
+	t.Run("disrupts worst-off replicas first within the budget", func(t *testing.T) {
+		// Budget is MaxUnavailable(2) - unavailable(1) = 1. The unavailable replica 2 is worst-off and must
+		// be selected before the Ready replicas 0 and 1.
+		sc := buildRollingUpdateSnapshot(3, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldUnavailableReplica(2)})
+		r, cl := newResource(sc)
+
+		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.ElementsMatch(t, []string{"0", "1"}, remainingReplicaIndices(t, cl), "the unavailable replica must be replaced first, leaving the Ready replicas")
+	})
 }
 
 const (
