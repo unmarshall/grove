@@ -52,9 +52,10 @@ type updateWork struct {
 	oldTemplateHashUncategorizedPods []*corev1.Pod
 	// newReadyPodCount is the number of new-hash Pods that are Ready and not already being deleted.
 	newReadyPodCount int
-	// oldHashPodCount is the number of old-hash Pods that still exist, including those already
-	// terminating. The rolling update is complete only when this reaches 0.
-	oldHashPodCount int
+	// oldHashPodsAwaitingReplacement is the number of old-hash Pods still awaiting replacement, i.e. whose
+	// deletion has not yet been triggered. Terminating Pods (and Pods with a recorded delete expectation)
+	// are not counted, so a Pod stuck terminating does not block completion once its replacement is Ready.
+	oldHashPodsAwaitingReplacement int
 }
 
 // processPendingUpdates advances the rolling update of a PodClique by one reconcile step.
@@ -74,10 +75,10 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 
 	desiredNumPods := int(ss.pclq.Spec.Replicas)
 
-	// Completion is readiness-aware. End the update only when no old-hash Pods remain and the desired
-	// number of new-hash Pods are Ready, so a rollout never completes while replacements are not yet
-	// available.
-	if uw.oldHashPodCount == 0 && uw.newReadyPodCount == desiredNumPods {
+	// Completion is readiness-aware. End the update once no old-hash Pods are awaiting replacement and the
+	// desired number of new-hash Pods are Ready. Old Pods already being deleted do not block completion, so
+	// a Pod stuck terminating cannot stall the rollout, mirroring the PodCliqueScalingGroup path.
+	if uw.oldHashPodsAwaitingReplacement == 0 && uw.newReadyPodCount == desiredNumPods {
 		return r.markRollingUpdateEnd(ctx, logger, ss.pclq)
 	}
 
@@ -164,13 +165,15 @@ func (r _resource) computeUpdateWork(logger logr.Logger, ss *syncSnapshot) *upda
 			continue
 		}
 
-		// Old-hash Pod. Count it even when it is already terminating, because completion waits for all
-		// old-hash Pods to be gone.
-		work.oldHashPodCount++
+		// An old-hash Pod whose deletion has already been triggered (terminating, or a delete expectation
+		// is recorded) is on its way out and does not block completion, so it is not counted. The work is
+		// recomputed each reconcile, so the count always reflects the current state.
 		if deletionTriggered {
 			logger.Info("skipping old Pod since its deletion has already been triggered", "pod", client.ObjectKeyFromObject(pod))
 			continue
 		}
+		// This old-hash Pod is still awaiting replacement.
+		work.oldHashPodsAwaitingReplacement++
 		// Pending, unhealthy, starting, and uncategorized Pods are deleted immediately; Ready Pods are
 		// queued for ordered budgeted replacement.
 		switch {

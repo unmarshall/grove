@@ -102,11 +102,11 @@ func TestComputeUpdateWork(t *testing.T) {
 			}
 			assert.Equal(t, wantNewReadyCount, work.newReadyPodCount, "unexpected newReadyPodCount")
 
-			wantOldHashCount := 0
-			if tt.pod.Labels[apicommon.LabelPodTemplateHash] == testOldHash {
-				wantOldHashCount = 1
+			wantAwaitingCount := 0
+			if tt.pod.Labels[apicommon.LabelPodTemplateHash] == testOldHash && tt.expected != bucketSkipped {
+				wantAwaitingCount = 1
 			}
-			assert.Equal(t, wantOldHashCount, work.oldHashPodCount, "unexpected oldHashPodCount")
+			assert.Equal(t, wantAwaitingCount, work.oldHashPodsAwaitingReplacement, "unexpected oldHashPodsAwaitingReplacement")
 		})
 	}
 }
@@ -183,6 +183,19 @@ func TestProcessPendingUpdates(t *testing.T) {
 
 		require.NoError(t, r.processPendingUpdates(context.Background(), logr.Discard(), ss))
 		assert.NotNil(t, pclq.Status.UpdateProgress.UpdateEndedAt, "expected UpdateEndedAt to be set")
+	})
+
+	t.Run("completes when replacements are ready even if an old pod is stuck terminating", func(t *testing.T) {
+		pclq := pclqUpdating(2, 1)
+		newPods := []*corev1.Pod{readyPod("new-0", testNewHash, 2), readyPod("new-1", testNewHash, 1)}
+		r, _ := newResource(pclq, newPods)
+		// A Ready old-hash Pod that is stuck terminating. It is kept out of the fake client (its deletion is
+		// already in flight) but present in the snapshot the update logic reads.
+		stuckOld := newTestPod("old-terminating", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withDeletionTimestamp())
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(1), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: append(newPods, stuckOld)}
+
+		require.NoError(t, r.processPendingUpdates(context.Background(), logr.Discard(), ss))
+		assert.NotNil(t, pclq.Status.UpdateProgress.UpdateEndedAt, "a stuck-terminating old Pod must not block completion once replacements are Ready")
 	})
 
 	t.Run("waits when there are no ready old pods but replacements are not yet ready", func(t *testing.T) {
