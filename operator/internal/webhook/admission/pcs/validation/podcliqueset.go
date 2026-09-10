@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -383,7 +384,7 @@ func (v *pcsValidator) validatePodCliqueScalingGroupConfigs(fldPath *field.Path)
 		}
 
 		// validate RollingUpdate against the active update strategy.
-		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(scalingGroupConfig.RollingUpdate, fldPath.Index(i).Child("rollingUpdate"))...)
+		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(scalingGroupConfig.RollingUpdate, ptr.Deref(scalingGroupConfig.Replicas, 1), fldPath.Index(i).Child("rollingUpdate"))...)
 
 		// validate PCSG-level ResourceSharing
 		allErrs = append(allErrs, v.validatePCSGResourceSharing(scalingGroupConfig, fldPath.Index(i).Child("resourceSharing"))...)
@@ -467,7 +468,7 @@ func (v *pcsValidator) validatePodCliqueTemplateSpec(cliqueTemplateSpec *groveco
 				"rollingUpdate must not be set on a PodClique that is a member of a PodCliqueScalingGroup. Set it on the PodCliqueScalingGroup instead"))
 		}
 	} else {
-		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(cliqueTemplateSpec.RollingUpdate, fldPath.Child("rollingUpdate"))...)
+		allErrs = append(allErrs, v.validateRollingUpdateConfiguration(cliqueTemplateSpec.RollingUpdate, cliqueTemplateSpec.Spec.Replicas, fldPath.Child("rollingUpdate"))...)
 	}
 
 	return warnings, allErrs
@@ -510,9 +511,9 @@ func (v *pcsValidator) updateStrategyType() grovecorev1alpha1.UpdateStrategyType
 
 // validateRollingUpdateConfiguration checks a component's RollingUpdate against the active update
 // strategy. OnDelete forbids it entirely. Otherwise MaxUnavailable and ProgressDeadline, when set,
-// must be greater than 0. A nil MaxUnavailable is allowed since the field is optional and the
-// consumer supplies an effective value.
-func (v *pcsValidator) validateRollingUpdateConfiguration(rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration, fldPath *field.Path) field.ErrorList {
+// must be greater than 0, and MaxUnavailable must not exceed the component's replicas. A nil
+// MaxUnavailable is allowed since the field is optional and the consumer supplies an effective value.
+func (v *pcsValidator) validateRollingUpdateConfiguration(rollingUpdate *grovecorev1alpha1.RollingUpdateConfiguration, replicas int32, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if v.updateStrategyType() == grovecorev1alpha1.OnDeleteStrategy {
 		if rollingUpdate != nil {
@@ -523,8 +524,12 @@ func (v *pcsValidator) validateRollingUpdateConfiguration(rollingUpdate *groveco
 	if rollingUpdate == nil {
 		return allErrs
 	}
-	if rollingUpdate.MaxUnavailable != nil && *rollingUpdate.MaxUnavailable <= 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxUnavailable"), *rollingUpdate.MaxUnavailable, "must be greater than 0"))
+	if rollingUpdate.MaxUnavailable != nil {
+		if *rollingUpdate.MaxUnavailable <= 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("maxUnavailable"), *rollingUpdate.MaxUnavailable, "must be greater than 0"))
+		} else if *rollingUpdate.MaxUnavailable > replicas {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("maxUnavailable"), *rollingUpdate.MaxUnavailable, fmt.Sprintf("must not be greater than replicas (%d)", replicas)))
+		}
 	}
 	if rollingUpdate.ProgressDeadline != nil && rollingUpdate.ProgressDeadline.Duration <= 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("progressDeadline"), rollingUpdate.ProgressDeadline.Duration.String(), "must be greater than 0"))

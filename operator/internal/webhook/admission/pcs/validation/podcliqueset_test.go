@@ -1939,6 +1939,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 		description    string
 		updateStrategy grovecorev1alpha1.UpdateStrategyType
 		rollingUpdate  *grovecorev1alpha1.RollingUpdateConfiguration
+		replicas       int32
 		wantErrType    *field.ErrorType
 	}{
 		{
@@ -1985,6 +1986,14 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			description:    "valid MaxUnavailable and ProgressDeadline accepted",
 			updateStrategy: grovecorev1alpha1.RollingRecreateStrategy,
 			rollingUpdate:  &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](2), ProgressDeadline: &metav1.Duration{Duration: 5 * time.Minute}},
+			replicas:       3,
+		},
+		{
+			description:    "MaxUnavailable greater than replicas rejected",
+			updateStrategy: grovecorev1alpha1.RollingRecreateStrategy,
+			rollingUpdate:  &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](5)},
+			replicas:       3,
+			wantErrType:    ptr.To(field.ErrorTypeInvalid),
 		},
 	}
 	for _, tc := range testCases {
@@ -1995,7 +2004,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				},
 			}
 			v := &pcsValidator{pcs: pcs}
-			errs := v.validateRollingUpdateConfiguration(tc.rollingUpdate, field.NewPath("spec", "template", "cliques").Index(0).Child("rollingUpdate"))
+			errs := v.validateRollingUpdateConfiguration(tc.rollingUpdate, tc.replicas, field.NewPath("spec", "template", "cliques").Index(0).Child("rollingUpdate"))
 			if tc.wantErrType == nil {
 				assert.Empty(t, errs)
 				return

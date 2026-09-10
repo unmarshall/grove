@@ -38,27 +38,27 @@ func defaultPodCliqueSet(pcs *grovecorev1alpha1.PodCliqueSet) {
 	if utils.IsEmptyStringType(pcs.Namespace) {
 		pcs.Namespace = metav1.NamespaceDefault
 	}
-	defaultUpdateStrategy(pcs)
 	_, pcsgOwnedCliqueNames := componentutils.GetExpectedPCLQNamesGroupByOwner(pcs)
 	defaultPodCliqueSetSpec(&pcs.Spec, pcsgOwnedCliqueNames)
+}
+
+// defaultPodCliqueSetSpec adds defaults to the specification of a PodCliqueSet.
+func defaultPodCliqueSetSpec(spec *grovecorev1alpha1.PodCliqueSetSpec, pcsgOwnedCliqueNames sets.Set[string]) {
+	defaultUpdateStrategy(spec)
+	defaultPodCliqueSetTemplateSpec(&spec.Template, spec.UpdateStrategy.Type, pcsgOwnedCliqueNames)
 }
 
 // defaultUpdateStrategy populates Spec.UpdateStrategy when it is unset and fills in its Type. The
 // strategy is behind a pointer, so the kubebuilder default on Type only fires when the pointer is
 // already non-nil. This guarantees a non-nil UpdateStrategy with a concrete Type so that downstream
 // defaulting and validation always observe the active strategy. The default Type is RollingRecreate.
-func defaultUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) {
-	if pcs.Spec.UpdateStrategy == nil {
-		pcs.Spec.UpdateStrategy = &grovecorev1alpha1.PodCliqueSetUpdateStrategy{}
+func defaultUpdateStrategy(pcsSpec *grovecorev1alpha1.PodCliqueSetSpec) {
+	if pcsSpec.UpdateStrategy == nil {
+		pcsSpec.UpdateStrategy = &grovecorev1alpha1.PodCliqueSetUpdateStrategy{}
 	}
-	if pcs.Spec.UpdateStrategy.Type == "" {
-		pcs.Spec.UpdateStrategy.Type = grovecorev1alpha1.RollingRecreateStrategy
+	if pcsSpec.UpdateStrategy.Type == "" {
+		pcsSpec.UpdateStrategy.Type = grovecorev1alpha1.RollingRecreateStrategy
 	}
-}
-
-// defaultPodCliqueSetSpec adds defaults to the specification of a PodCliqueSet.
-func defaultPodCliqueSetSpec(spec *grovecorev1alpha1.PodCliqueSetSpec, pcsgOwnedCliqueNames sets.Set[string]) {
-	defaultPodCliqueSetTemplateSpec(&spec.Template, spec.UpdateStrategy.Type, pcsgOwnedCliqueNames)
 }
 
 // defaultPodCliqueSetTemplateSpec applies defaults to the template specification including cliques, scaling groups, and service configuration.
