@@ -113,7 +113,7 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Log
 // Sync synchronizes all resources that the PodClique Operator manages.
 // Sync ensures that the desired PodCliques exist for the PodCliqueScalingGroup with proper scaling and dependencies
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) error {
-	syncCtx, err := r.prepareSyncContext(ctx, logger, pcsg)
+	syncCtx, err := r.prepareSyncContext(ctx, pcsg)
 	if err != nil {
 		return err
 	}

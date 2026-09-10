@@ -48,14 +48,12 @@ type syncSnapshot struct {
 	existingPCLQs                  []grovecorev1alpha1.PodClique
 	existingPCLQNameSet            sets.Set[string]
 	expectationsStoreKey           string
-	pcsgIndicesToTerminate         []string
-	pcsgIndicesToRequeue           []string
 	expectedPCLQFQNsPerPCSGReplica map[int][]string
 	expectedPCLQPodTemplateHashMap map[string]string
 }
 
 // prepareSyncContext creates and initializes the synchronization context with all necessary data for PCSG reconciliation
-func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (*syncSnapshot, error) {
+func (r _resource) prepareSyncContext(ctx context.Context, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (*syncSnapshot, error) {
 	var (
 		syncSnap = &syncSnapshot{
 			pcsg: pcsg,
@@ -111,11 +109,6 @@ func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, p
 	}
 	syncSnap.existingPCLQNameSet = componentutils.PodCliqueNameSet(syncSnap.existingPCLQs)
 
-	// compute the PCSG indices that have their MinAvailableBreached condition set to true. Segregated these into two
-	// pcsgIndicesToTerminate will have the indices for which the TerminationDelay has expired.
-	// pcsgIndicesToRequeue will have the indices for which the TerminationDelay has not yet expired.
-	syncSnap.pcsgIndicesToTerminate, syncSnap.pcsgIndicesToRequeue = getMinAvailableBreachedPCSGIndices(logger, syncSnap.existingPCLQs, syncSnap.pcs.Spec.Template.TerminationDelay.Duration)
-
 	// pre-compute expected PodTemplateHash for each PCLQ
 	syncSnap.expectedPCLQPodTemplateHashMap = getExpectedPCLQPodTemplateHashMap(syncSnap.pcs, pcsg)
 
@@ -124,6 +117,11 @@ func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, p
 
 // runSyncFlow executes the main synchronization logic for PodCliqueScalingGroup including replica management and updates
 func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *syncSnapshot) error {
+	// Segment MinAvailable-breached replicas from the PodCliques observed at the start of this reconcile:
+	// those past TerminationDelay are gang-terminated, those still within it trigger a requeue. Computed
+	// here rather than stored on the snapshot since it is used only within this flow.
+	pcsgIndicesToTerminate, pcsgIndicesToRequeue := getMinAvailableBreachedPCSGIndices(logger, ss.existingPCLQs, ss.pcs.Spec.Template.TerminationDelay.Duration)
+
 	// Ensure PCSG-level ResourceClaims before creating any PodCliques
 	if err := r.ensurePCSGResourceClaims(ctx, ss); err != nil {
 		return err
@@ -153,7 +151,7 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 	// Only if the rolling update is not in progress, check for a possibility of gang termination and execute it only if
 	// the pcsg.spec.minAvailable is not breached.
 	if !componentutils.IsPCSGUpdateInProgress(ss.pcsg) {
-		if err := r.processMinAvailableBreachedPCSGReplicas(ctx, logger, ss); err != nil {
+		if err := r.processMinAvailableBreachedPCSGReplicas(ctx, logger, ss, pcsgIndicesToTerminate, pcsgIndicesToRequeue); err != nil {
 			if errors.Is(err, errPCCGMinAvailableBreached) {
 				logger.Info("Skipping further reconciliation as MinAvailable for the PCSG has been breached. This can potentially trigger PCS replica deletion.")
 				return nil
@@ -170,7 +168,7 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 
 	// If there are any PCSG replicas which have minAvailableBreached but the terminationDelay has not yet expired, then
 	// requeue the event after a fixed delay.
-	if len(ss.pcsgIndicesToRequeue) > 0 {
+	if len(pcsgIndicesToRequeue) > 0 {
 		return groveerr.New(groveerr.ErrCodeRequeueAfter,
 			component.OperationSync,
 			"Requeuing to re-process PCLQs that have breached MinAvailable but not crossed TerminationDelay",
@@ -361,19 +359,19 @@ func (r _resource) createOrUpdatePCLQs(ctx context.Context, logger logr.Logger, 
 }
 
 // processMinAvailableBreachedPCSGReplicas handles gang termination of PCSG replicas that have breached minimum availability requirements
-func (r _resource) processMinAvailableBreachedPCSGReplicas(ctx context.Context, logger logr.Logger, ss *syncSnapshot) error {
+func (r _resource) processMinAvailableBreachedPCSGReplicas(ctx context.Context, logger logr.Logger, ss *syncSnapshot, pcsgIndicesToTerminate, pcsgIndicesToRequeue []string) error {
 	// If pcsg.spec.minAvailable is breached, then delegate the responsibility to the PodCliqueSet reconciler which after
 	// termination delay terminate the PodCliqueSet replica. No further processing is required to be done here.
-	minAvailableBreachedPCSGReplicas := len(ss.pcsgIndicesToTerminate) + len(ss.pcsgIndicesToRequeue)
+	minAvailableBreachedPCSGReplicas := len(pcsgIndicesToTerminate) + len(pcsgIndicesToRequeue)
 	if int(ss.pcsg.Spec.Replicas)-minAvailableBreachedPCSGReplicas < int(*ss.pcsg.Spec.MinAvailable) {
 		return errPCCGMinAvailableBreached
 	}
 	// If pcsg.spec.minAvailable is not breached but if there is one more PCSG replica for which there is at least one PCLQ that has
 	// its minAvailable breached for a duration > terminationDelay then gang terminate such PCSG replicas.
-	if len(ss.pcsgIndicesToTerminate) > 0 {
-		logger.Info("Identified PodCliqueScalingGroup indices for gang termination", "indices", ss.pcsgIndicesToTerminate)
-		reason := fmt.Sprintf("Delete PodCliques %v for PodCliqueScalingGroup %v which have breached MinAvailable longer than TerminationDelay: %s", ss.pcsgIndicesToTerminate, client.ObjectKeyFromObject(ss.pcsg), ss.pcs.Spec.Template.TerminationDelay.Duration)
-		pclqGangTerminationTasks := r.createDeleteTasks(logger, ss, ss.pcsgIndicesToTerminate, reason)
+	if len(pcsgIndicesToTerminate) > 0 {
+		logger.Info("Identified PodCliqueScalingGroup indices for gang termination", "indices", pcsgIndicesToTerminate)
+		reason := fmt.Sprintf("Delete PodCliques %v for PodCliqueScalingGroup %v which have breached MinAvailable longer than TerminationDelay: %s", pcsgIndicesToTerminate, client.ObjectKeyFromObject(ss.pcsg), ss.pcs.Spec.Template.TerminationDelay.Duration)
+		pclqGangTerminationTasks := r.createDeleteTasks(logger, ss, pcsgIndicesToTerminate, reason)
 		if err := r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(ss.pcsg), pclqGangTerminationTasks); err != nil {
 			return err
 		}
