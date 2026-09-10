@@ -870,7 +870,9 @@ standalone PodCliqueTemplateSpec and to each PodCliqueScalingGroupConfig, keepin
 configuration next to the component it governs. These knobs are per-component because components
 differ in how much disruption they tolerate and how long they take to make progress, so a single
 PodCliqueSet-wide value cannot express them. The configuration is strategy-agnostic. It governs
-the RollingRecreate strategy today and is reused by the Coherent strategy.
+the RollingRecreate strategy today and is reused by the Coherent strategy. It does not apply to
+the OnDelete strategy, where defaulting clears it and the PodCliqueSet validating webhook rejects
+it if set.
 
 
 
