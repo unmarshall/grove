@@ -77,7 +77,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	// Completion is readiness-aware. End the update only when no old-hash Pods remain and the desired
 	// number of new-hash Pods are Ready, so a rollout never completes while replacements are not yet
 	// available.
-	if uw.oldHashPodCount == 0 && uw.newReadyPodCount >= desiredNumPods {
+	if uw.oldHashPodCount == 0 && uw.newReadyPodCount == desiredNumPods {
 		return r.markRollingUpdateEnd(ctx, logger, ss.pclq)
 	}
 

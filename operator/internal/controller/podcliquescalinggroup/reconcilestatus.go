@@ -483,8 +483,8 @@ func progressDeadlineForPCSG(pcs *grovecorev1alpha1.PodCliqueSet, pcsg *grovecor
 	return pcsgConfig.RollingUpdate.ProgressDeadline, nil
 }
 
-// isPCSGAutoUpdateInProgress reports whether the PodCliqueScalingGroup is under an auto-orchestrated update.
-func isPCSGAutoUpdateInProgress(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) bool {
+// isPCSGRollingUpdateInProgress reports whether the PodCliqueScalingGroup is under a rolling update.
+func isPCSGRollingUpdateInProgress(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) bool {
 	return pcsg.Status.UpdateProgress != nil && pcsg.Status.UpdateProgress.UpdateEndedAt == nil
 }
 
@@ -495,7 +495,7 @@ func isPCSGAutoUpdateInProgress(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) b
 // LastProgressedAt is cleared and the condition is False (NoActiveUpdate).
 func mutateUpdateInProgressCondition(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, originalStatus *grovecorev1alpha1.PodCliqueScalingGroupStatus, progressDeadline *metav1.Duration) {
 	now := metav1.Now()
-	if isPCSGAutoUpdateInProgress(pcsg) {
+	if isPCSGRollingUpdateInProgress(pcsg) {
 		if pcsg.Status.UpdateProgress.LastProgressedAt == nil || pcsg.Status.UpdatedReplicas > originalStatus.UpdatedReplicas {
 			pcsg.Status.UpdateProgress.LastProgressedAt = &now
 		}
@@ -512,7 +512,7 @@ func mutateUpdateInProgressCondition(pcsg *grovecorev1alpha1.PodCliqueScalingGro
 // computeUpdateInProgressCondition returns the UpdateInProgress condition for the PodCliqueScalingGroup
 // based on whether a rolling update is in progress and whether it has progressed within ProgressDeadline.
 func computeUpdateInProgressCondition(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, progressDeadline *metav1.Duration, now metav1.Time) metav1.Condition {
-	if !isPCSGAutoUpdateInProgress(pcsg) {
+	if !isPCSGRollingUpdateInProgress(pcsg) {
 		return metav1.Condition{
 			Type:               constants.ConditionTypeUpdateInProgress,
 			Status:             metav1.ConditionFalse,

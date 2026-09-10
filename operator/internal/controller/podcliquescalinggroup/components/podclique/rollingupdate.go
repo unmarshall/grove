@@ -83,7 +83,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 
 	// Completion is readiness-aware. End the update only when the desired number of replicas are fully
 	// updated and Ready, so a rollout never completes while replacements are not yet available.
-	if uw.numUpdatedReadyReplicas >= desiredNumReplicas {
+	if uw.numUpdatedReadyReplicas == desiredNumReplicas {
 		return r.markRollingUpdateEnd(ctx, logger, sc.pcsg)
 	}
 
