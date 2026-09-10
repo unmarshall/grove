@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	common "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/grove/operator/api/common"
 	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/e2e/grove/workload"
@@ -265,6 +265,18 @@ func updatePCSUpdateStrategy(tc *testctx.TestContext, strategyType grovev1alpha1
 			pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{}
 		}
 		pcs.Spec.UpdateStrategy.Type = strategyType
+
+		// Switching to OnDelete requires removing any RollingUpdate configuration: the validating webhook
+		// rejects a RollingUpdate that is set under OnDelete, and defaulting no longer clears it. This
+		// mirrors what a consumer must do when changing the strategy.
+		if strategyType == grovev1alpha1.OnDeleteStrategy {
+			for i := range pcs.Spec.Template.Cliques {
+				pcs.Spec.Template.Cliques[i].RollingUpdate = nil
+			}
+			for i := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs[i].RollingUpdate = nil
+			}
+		}
 
 		return tc.Client.Patch(tc.Ctx, &pcs, client.Apply, client.FieldOwner("e2e-rolling-update-test"), client.ForceOwnership)
 	})
@@ -1364,10 +1376,10 @@ func verifyPodHasNodeAffinityExclusion(tc *testctx.TestContext, podName string, 
 	return fmt.Errorf("pod %s does not have kubernetes.io/hostname NotIn [%s] in its nodeAffinity", podName, excludedNode)
 }
 
-// maxOldPodsInTerminating runs runUpdate (which triggers the rolling update and waits for it to
-// complete) while sampling the workload's pods, and returns the maximum number of Terminating pods
-// matching matchFn. Pods must be held in Terminating (SIGTERM-ignoring command) so the concurrency
-// window is observable across samples.
+// maxUnavailablePods runs runUpdate (which triggers the rolling update and waits for it to complete)
+// while sampling the workload's pods, and returns the maximum number of pods matching matchFn
+// observed in any single sample. matchFn defines what counts as unavailable. The sample interval is
+// well below the readiness-delay window so that window is observable across samples.
 func maxUnavailablePods(tc *testctx.TestContext, matchFn func(*corev1.Pod) bool, runUpdate func() error) (int, error) {
 	// Sample well below the readiness delay so the not-ready window is caught.
 	const sampleInterval = 500 * time.Millisecond

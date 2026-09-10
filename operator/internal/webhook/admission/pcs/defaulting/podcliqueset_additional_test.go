@@ -412,10 +412,10 @@ func TestDefaultRollingUpdateConfiguration(t *testing.T) {
 			wantNil:        true,
 		},
 		{
-			description:    "onDelete clears an existing configuration",
-			existing:       &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](7)},
-			updateStrategy: grovecorev1alpha1.OnDeleteStrategy,
-			wantNil:        true,
+			description:        "onDelete leaves an existing configuration untouched for the validating webhook to reject",
+			existing:           &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](7)},
+			updateStrategy:     grovecorev1alpha1.OnDeleteStrategy,
+			wantMaxUnavailable: 7,
 		},
 		{
 			description:        "existing MaxUnavailable is preserved",
@@ -466,10 +466,10 @@ func TestDefaultRollingUpdateForTemplateSpecsPerStrategy(t *testing.T) {
 			wantRollingUpdateNil: true,
 		},
 		{
-			description:          "onDelete clears an existing standalone RollingUpdate",
-			updateStrategy:       grovecorev1alpha1.OnDeleteStrategy,
-			input:                &grovecorev1alpha1.PodCliqueTemplateSpec{Name: "standalone", Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: 5, MinAvailable: ptr.To[int32](3)}, RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](2)}},
-			wantRollingUpdateNil: true,
+			description:        "onDelete leaves an existing standalone RollingUpdate untouched for the validating webhook to reject",
+			updateStrategy:     grovecorev1alpha1.OnDeleteStrategy,
+			input:              &grovecorev1alpha1.PodCliqueTemplateSpec{Name: "standalone", Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: 5, MinAvailable: ptr.To[int32](3)}, RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](2)}},
+			wantMaxUnavailable: 2,
 		},
 		{
 			description:          "PCSG-owned clique is skipped",

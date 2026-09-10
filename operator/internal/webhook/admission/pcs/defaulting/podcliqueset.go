@@ -133,8 +133,11 @@ func defaultPodCliqueScalingGroupConfigs(scalingGroupConfigs []grovecorev1alpha1
 // preserved and a missing one is defaulted to 1. ProgressDeadline is never defaulted, a nil value opts
 // out of the deadline.
 func defaultRollingUpdateConfiguration(existing *grovecorev1alpha1.RollingUpdateConfiguration, updateStrategy grovecorev1alpha1.UpdateStrategyType) *grovecorev1alpha1.RollingUpdateConfiguration {
+	// Defaulting only fills a hole for the rolling update strategies. It never clears a
+	// consumer-populated RollingUpdate. For OnDelete the validating webhook rejects a RollingUpdate
+	// that is set, so removing it is left to the consumer rather than silently dropped here.
 	if updateStrategy != grovecorev1alpha1.RollingRecreateStrategy {
-		return nil
+		return existing
 	}
 	if existing != nil && existing.MaxUnavailable != nil {
 		return existing

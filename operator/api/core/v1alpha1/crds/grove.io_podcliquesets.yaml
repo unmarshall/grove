@@ -179,8 +179,8 @@ spec:
 
                                 Defaulting:
                                   - RollingRecreate: defaults to 1.
-                                  - OnDelete: the whole RollingUpdate is cleared by defaulting, because it does not apply to
-                                    OnDelete. This also lets a transition away from RollingRecreate drop the stale configuration.
+                                  - OnDelete: not defaulted. Defaulting never clears a RollingUpdateConfiguration that is set. The validating
+                                    webhook rejects it instead, so the consumer must remove it when switching to OnDelete.
 
                                 Validation:
                                   - When set, must be greater than 0.
@@ -9615,8 +9615,8 @@ spec:
 
                                 Defaulting:
                                   - RollingRecreate: defaults to 1.
-                                  - OnDelete: the whole RollingUpdate is cleared by defaulting, because it does not apply to
-                                    OnDelete. This also lets a transition away from RollingRecreate drop the stale configuration.
+                                  - OnDelete: not defaulted. Defaulting never clears a RollingUpdateConfiguration that is set. The validating
+                                    webhook rejects it instead, so the consumer must remove it when switching to OnDelete.
 
                                 Validation:
                                   - When set, must be greater than 0.
@@ -11271,7 +11271,7 @@ spec:
                   currentlyUpdating:
                     description: |-
                       CurrentlyUpdating captures the progress of the PodCliqueSet replicas that are currently being updated.
-                      This field is only set for auto update strategies where Grove handles the orchestration. It is not set for the
+                      This field is only set for rolling update strategies where Grove handles the orchestration. It is not set for the
                       OnDelete update strategy.
                     items:
                       description: PodCliqueSetReplicaUpdateProgress captures the
@@ -11313,14 +11313,15 @@ spec:
                     format: int32
                     type: integer
                   updateEndedAt:
-                    description: |-
-                      UpdateEndedAt is the time at which Grove does not have any work pending to manifest the update according to the
-                      configured update strategy.
-                      For auto update strategies where Grove handles the orchestration, while the update is still in progress it will be
-                      nil, and will be set once the update finishes where all child resources are updated by Grove with the latest
-                      specification.
-                      For the OnDelete strategy, it is set to the same time as UpdateStartedAt, which implies that there is no work
-                      pending on Grove.
+                    description: "UpdateEndedAt is the time at which Grove does not
+                      have any work pending to manifest the update according to the\nconfigured
+                      update strategy.\n - For rolling update strategies where Grove
+                      handles the orchestration, while the update is still in progress\n
+                      \  it will be nil, and will be set once the update finishes
+                      where all child resources are updated by Grove with\n   the
+                      latest specification.\n - For the OnDelete strategy, it is set
+                      to the same time as UpdateStartedAt, which implies that there
+                      is no work\n\t  pending on Grove."
                     format: date-time
                     type: string
                   updateStartedAt:

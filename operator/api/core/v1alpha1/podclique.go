@@ -157,7 +157,7 @@ type PodCliqueUpdateProgress struct {
 	// UpdateStartedAt is the time at which the update started.
 	UpdateStartedAt metav1.Time `json:"updateStartedAt,omitempty"`
 	// UpdateEndedAt is the time at which Grove does not have any work pending to manifest the update according to the
-	// configured update strategy. For auto update strategies where Grove handles the orchestration, while the update is
+	// configured update strategy. For rolling update strategies where Grove handles the orchestration, while the update is
 	// still in progress it will be nil, and will be set once the update finishes where all Pods are replaced by Grove with
 	// the latest specification. For the OnDelete strategy, it is set to the same time as UpdateStartedAt, which implies
 	// that there is no work pending on Grove. As can be observed with the OnDelete strategy, UpdateEndedAt being set does
@@ -173,11 +173,11 @@ type PodCliqueUpdateProgress struct {
 	PodCliqueSetGenerationHash string `json:"podCliqueSetGenerationHash"`
 	// PodTemplateHash is the template hash of the PodClique that the Pods of this PodClique should converge to.
 	// This hash is used to segregate Pods which are up to date with the specification, and ones which are outdated for
-	// preferential deletions in auto update strategies, and in all strategies for scale-ins.
+	// preferential deletions in rolling update strategies, and in all strategies for scale-ins.
 	// PodCliqueStatus.PodTemplateHash is set to this hash once UpdateEndedAt is set, which marks the end of the update.
 	PodTemplateHash string `json:"podTemplateHash"`
 	// ReadyPodsSelectedToUpdate captures the pod names of ready Pods that are either currently being updated or have
-	// been previously updated. This field is only set for auto update strategies where Grove orchestrates Pod deletions.
+	// been previously updated. This field is only set for rolling update strategies where Grove orchestrates Pod deletions.
 	// For the OnDelete strategy this field is not set, because Pod replacement is initiated by user-driven Pod deletions.
 	//
 	// Deprecated: the rolling update is now driven by an availability budget computed from live Pod state on each

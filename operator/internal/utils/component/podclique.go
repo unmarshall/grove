@@ -212,7 +212,7 @@ func IsPCLQAutoUpdateInProgress(pclq *grovecorev1alpha1.PodClique) bool {
 }
 
 // IsLastPCLQUpdateCompleted checks if the last update of PodClique is completed.
-// For auto update strategies, it returns if all Pods of the PodClique have been updated with the new specification.
+// For rolling update strategies, it returns if all Pods of the PodClique have been updated with the new specification.
 // For the OnDelete strategy, it returns whether the PodClique controller has processed the update by refreshing all hash fields in the PodCliqueStatus, based on which PodCliqueStatus.UpdatedReplicas are calculated.
 func IsLastPCLQUpdateCompleted(pclq *grovecorev1alpha1.PodClique) bool {
 	return pclq.Status.UpdateProgress != nil && pclq.Status.UpdateProgress.UpdateEndedAt != nil

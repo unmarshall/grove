@@ -126,11 +126,11 @@ type PodCliqueSetUpdateProgress struct {
 	UpdateStartedAt metav1.Time `json:"updateStartedAt,omitempty"`
 	// UpdateEndedAt is the time at which Grove does not have any work pending to manifest the update according to the
 	// configured update strategy.
-	// For auto update strategies where Grove handles the orchestration, while the update is still in progress it will be
-	// nil, and will be set once the update finishes where all child resources are updated by Grove with the latest
-	// specification.
-	// For the OnDelete strategy, it is set to the same time as UpdateStartedAt, which implies that there is no work
-	// pending on Grove.
+	//  - For rolling update strategies where Grove handles the orchestration, while the update is still in progress
+	//    it will be nil, and will be set once the update finishes where all child resources are updated by Grove with
+	//    the latest specification.
+	//  - For the OnDelete strategy, it is set to the same time as UpdateStartedAt, which implies that there is no work
+	// 	  pending on Grove.
 	// +optional
 	UpdateEndedAt *metav1.Time `json:"updateEndedAt,omitempty"`
 	// UpdatedPodCliquesCount is the number of PodCliques that have been updated to the desired PodCliqueSet
@@ -154,7 +154,7 @@ type PodCliqueSetUpdateProgress struct {
 	// +kubebuilder:default=0
 	TotalPodCliqueScalingGroupsCount int32 `json:"totalPodCliqueScalingGroupsCount,omitempty"`
 	// CurrentlyUpdating captures the progress of the PodCliqueSet replicas that are currently being updated.
-	// This field is only set for auto update strategies where Grove handles the orchestration. It is not set for the
+	// This field is only set for rolling update strategies where Grove handles the orchestration. It is not set for the
 	// OnDelete update strategy.
 	// +optional
 	CurrentlyUpdating []PodCliqueSetReplicaUpdateProgress `json:"currentlyUpdating,omitempty"`
@@ -179,8 +179,8 @@ type PodCliqueSetReplicaUpdateProgress struct {
 // differ in how much disruption they tolerate and how long they take to make progress, so a single
 // PodCliqueSet-wide value cannot express them. The configuration is strategy-agnostic. It governs
 // the RollingRecreate strategy today and is reused by the Coherent strategy. It does not apply to
-// the OnDelete strategy, where defaulting clears it and the PodCliqueSet validating webhook rejects
-// it if set.
+// the OnDelete strategy, where the PodCliqueSet validating webhook rejects it if set. Defaulting
+// never clears it, so removing it when switching to OnDelete is left to the consumer.
 type RollingUpdateConfiguration struct {
 	// MaxUnavailable is the maximum number of pods (for a standalone PodClique) or
 	// PodCliqueScalingGroup replicas (for a PCSG) that may be unavailable at any moment during an
@@ -188,8 +188,8 @@ type RollingUpdateConfiguration struct {
 	//
 	// Defaulting:
 	//   - RollingRecreate: defaults to 1.
-	//   - OnDelete: the whole RollingUpdate is cleared by defaulting, because it does not apply to
-	//     OnDelete. This also lets a transition away from RollingRecreate drop the stale configuration.
+	//   - OnDelete: not defaulted. Defaulting never clears a RollingUpdateConfiguration that is set. The validating
+	//     webhook rejects it instead, so the consumer must remove it when switching to OnDelete.
 	//
 	// Validation:
 	//   - When set, must be greater than 0.
@@ -548,7 +548,7 @@ const (
 	// RollingRecreateStrategy indicates that replicas will be progressively
 	// deleted and recreated one at a time, when templates change. This applies to
 	// both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.
-	// RollingRecreateStrategy qualifies as an auto update strategy in Grove since
+	// RollingRecreateStrategy qualifies as a rolling update strategy in Grove since
 	// it handles the orchestration entirely by itself.
 	// This is the default update strategy.
 	RollingRecreateStrategy UpdateStrategyType = "RollingRecreate"

@@ -336,9 +336,9 @@ func progressDeadlineForPCLQ(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecor
 }
 
 // mutateUpdateInProgressCondition maintains LastProgressedAt and sets the UpdateInProgress
-// condition. While an auto update is in progress LastProgressedAt starts on the first reconcile and advances
+// condition. While a rolling update is in progress LastProgressedAt starts on the first reconcile and advances
 // whenever UpdatedReplicas increases, and the condition is True (Progressing) or Unknown
-// (ProgressDeadlineExceeded) when no progress has been made within ProgressDeadline. Otherwise the
+// (ProgressDeadlineExceeded) when no progress has been made within ProgressDeadline. Otherwise, the
 // LastProgressedAt is cleared and the condition is False (NoActiveUpdate).
 func mutateUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, originalStatus *grovecorev1alpha1.PodCliqueStatus, progressDeadline *metav1.Duration) {
 	now := metav1.Now()
@@ -357,7 +357,7 @@ func mutateUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, original
 }
 
 // computeUpdateInProgressCondition returns the UpdateInProgress condition for the PodClique based on
-// whether an auto update is in progress and whether it has progressed within ProgressDeadline.
+// whether a rolling update is in progress and whether it has progressed within ProgressDeadline.
 func computeUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, progressDeadline *metav1.Duration, now metav1.Time) metav1.Condition {
 	if !componentutils.IsPCLQAutoUpdateInProgress(pclq) {
 		return metav1.Condition{

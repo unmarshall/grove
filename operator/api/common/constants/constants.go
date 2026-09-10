@@ -144,7 +144,7 @@ const (
 	ConditionTypePodGangMigrationInProgress = "PodGangMigrationInProgress"
 	// ConditionTypeUpdateInProgress indicates whether a rolling update of the component is currently in progress.
 	// True means an update is progressing, False means no update is active, and Unknown means the update has not
-	// made progress within its ProgressDeadline and warrants operator inspection.
+	// made progress within its configured ProgressDeadline and warrants operator inspection.
 	ConditionTypeUpdateInProgress = "UpdateInProgress"
 )
 
