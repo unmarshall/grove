@@ -505,6 +505,20 @@ func Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate(t *testing.T) {
 		assertReplicaPodGangMap(t, getPodGangMapEntries(t, tc, pcsReplicaIndex), wantPGM)
 	}
 
+	// Widen replica 0's update window so waitForOrdinalUpdating reliably observes it. On KWOK the whole
+	// update completes in seconds, so the transient CurrentlyUpdating=[0] window can close within a single
+	// poll interval. The readiness-delay stage keeps freshly created pods not-ready long enough that the
+	// window spans more than the poll interval, and the scale-out lands while replica 0 is still updating
+	// and replica 1 still carries old-generation entries.
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+			t.Errorf("failed to delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+
 	tests.Logger.Info("4. Roll an update, wait until replica 0 is updating, then scale out sg-x during the update")
 	tcLongerTimeout := *tc
 	tcLongerTimeout.Timeout = 2 * time.Minute
