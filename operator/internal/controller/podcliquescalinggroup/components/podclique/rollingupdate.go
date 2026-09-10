@@ -22,6 +22,7 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	pcsgexpectations "github.com/ai-dynamo/grove/operator/internal/controller/podcliquescalinggroup/expectations"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
@@ -68,7 +69,7 @@ const (
 // old-configuration replicas so they are recreated with the expected configuration. The update
 // completes only when the desired number of replicas are fully updated and Ready.
 func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger, sc *syncSnapshot) error {
-	uw, err := computePendingUpdateWork(sc)
+	uw, err := r.computePendingUpdateWork(sc)
 	if err != nil {
 		return groveerr.WrapError(err,
 			errCodeComputePendingPodCliqueScalingGroupUpdateWork,
@@ -119,7 +120,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		return strconv.Itoa(index)
 	})
 	logger.Info("triggering deletion of Ready replicas with old configuration for rolling update", "replicaIndices", replicaIndicesToUpdate)
-	deleteTasks := r.createDeleteTasks(logger, sc.pcs, sc.pcsg.Name, replicaIndicesToUpdateStr, "deleting Ready replicas for rolling update")
+	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToUpdateStr, "deleting Ready replicas for rolling update")
 	if err = r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deleteTasks); err != nil {
 		return err
 	}
@@ -163,15 +164,17 @@ func (r _resource) markRollingUpdateEnd(ctx context.Context, logger logr.Logger,
 
 // computePendingUpdateWork categorizes replicas by configuration and Ready state and records the
 // counts that drive the disruption budget and the completion check.
-func computePendingUpdateWork(sc *syncSnapshot) (*updateWork, error) {
+func (r _resource) computePendingUpdateWork(ss *syncSnapshot) (*updateWork, error) {
 	uw := &updateWork{}
-	existingPCLQsByReplicaIndex := componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)
-	for pcsgReplicaIndex := range int(sc.pcsg.Spec.Replicas) {
+	existingPCLQsByReplicaIndex := componentutils.GroupPCLQsByPCSGReplicaIndex(ss.existingPCLQs)
+	pcsgexpectations.SyncPCSGReplicaDeleteExpectations(r.expectationsStore, ss.expectationsStoreKey, ss.existingPCLQs)
+	for pcsgReplicaIndex := range int(ss.pcsg.Spec.Replicas) {
 		members := existingPCLQsByReplicaIndex[strconv.Itoa(pcsgReplicaIndex)]
 
-		// A replica with no PodCliques or whose PodCliques are all terminating is mid-replacement. It is
-		// neither Ready nor fully updated, so it blocks completion and is not a disruption candidate.
-		if len(members) == 0 || allPodCliquesTerminating(members) {
+		// A replica with no PodCliques, all terminating, or whose disruption we already triggered
+		// (delete expectation recorded, cache not yet caught up) is mid-replacement: neither Ready nor
+		// a disruption candidate.
+		if len(members) == 0 || allPodCliquesTerminating(members) || pcsgexpectations.HasPCSGReplicaDisruptionBeenTriggered(r.expectationsStore, ss.expectationsStoreKey, members) {
 			continue
 		}
 
@@ -180,12 +183,12 @@ func computePendingUpdateWork(sc *syncSnapshot) (*updateWork, error) {
 			uw.numReadyReplicas++
 		}
 
-		if isReplicaUpdatedAndReady(sc, pcsgReplicaIndex, members) {
+		if isReplicaUpdatedAndReady(ss, pcsgReplicaIndex, members) {
 			uw.numUpdatedReadyReplicas++
 			continue
 		}
 
-		isUpdated, err := isReplicaUpdated(sc.expectedPCLQPodTemplateHashMap, members)
+		isUpdated, err := isReplicaUpdated(ss.expectedPCLQPodTemplateHashMap, members)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +217,7 @@ func (r _resource) deleteOldPendingAndUnavailableReplicas(ctx context.Context, l
 	replicaIndicesToDelete := lo.Map(append(uw.oldPendingReplicaIndices, uw.oldUnavailableReplicaIndices...), func(index int, _ int) string {
 		return strconv.Itoa(index)
 	})
-	deleteTasks := r.createDeleteTasks(logger, sc.pcs, sc.pcsg.Name, replicaIndicesToDelete,
+	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToDelete,
 		"delete pending and unavailable PodCliqueScalingGroup replicas for rolling update")
 	return r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deleteTasks)
 }

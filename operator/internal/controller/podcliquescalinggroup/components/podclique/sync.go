@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	pcsgexpectations "github.com/ai-dynamo/grove/operator/internal/controller/podcliquescalinggroup/expectations"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/resourceclaim"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
@@ -46,6 +47,7 @@ type syncSnapshot struct {
 	pgm                            *grovecorev1alpha1.PodGangMap
 	existingPCLQs                  []grovecorev1alpha1.PodClique
 	existingPCLQNameSet            sets.Set[string]
+	expectationsStoreKey           string
 	pcsgIndicesToTerminate         []string
 	pcsgIndicesToRequeue           []string
 	expectedPCLQFQNsPerPCSGReplica map[int][]string
@@ -60,6 +62,17 @@ func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, p
 		}
 		err error
 	)
+
+	// The expectations store key is the same for the whole PodCliqueScalingGroup, so build it once here.
+	// Failing to build it means disrupted replicas cannot be recorded as unavailable, which would make
+	// MaxUnavailable accounting non-deterministic, so abort the reconcile.
+	syncSnap.expectationsStoreKey, err = pcsgexpectations.PCSGScopedExpectationsStoreKey(pcsg.ObjectMeta)
+	if err != nil {
+		return nil, groveerr.WrapError(err,
+			errCodeCreatePCSGExpectationsStoreKey,
+			component.OperationSync,
+			fmt.Sprintf("failed to build expectations store key for PodCliqueScalingGroup %v", client.ObjectKeyFromObject(pcsg)))
+	}
 
 	// get the PodCliqueSet
 	syncSnap.pcs, err = componentutils.GetPodCliqueSet(ctx, r.client, pcsg.ObjectMeta)
@@ -251,7 +264,7 @@ func (r _resource) triggerDeletionOfExcessPCSGReplicas(ctx context.Context, logg
 		logger.Info("Found more PodCliques than expected, triggering deletion of excess PodCliques", "expected", int(ss.pcsg.Spec.Replicas), "existing", existingPCSGReplicas, "diff", diff)
 		reason := "Delete excess PodCliqueScalingGroup replicas"
 		replicaIndicesToDelete := computePCSGReplicasToDelete(existingPCSGReplicas, int(ss.pcsg.Spec.Replicas))
-		deletionTasks := r.createDeleteTasks(logger, ss.pcs, pcsgObjectKey.Name, replicaIndicesToDelete, reason)
+		deletionTasks := r.createDeleteTasks(logger, ss, replicaIndicesToDelete, reason)
 		if err := r.triggerDeletionOfPodCliques(ctx, logger, pcsgObjectKey, deletionTasks); err != nil {
 			return err
 		}
@@ -360,7 +373,7 @@ func (r _resource) processMinAvailableBreachedPCSGReplicas(ctx context.Context, 
 	if len(ss.pcsgIndicesToTerminate) > 0 {
 		logger.Info("Identified PodCliqueScalingGroup indices for gang termination", "indices", ss.pcsgIndicesToTerminate)
 		reason := fmt.Sprintf("Delete PodCliques %v for PodCliqueScalingGroup %v which have breached MinAvailable longer than TerminationDelay: %s", ss.pcsgIndicesToTerminate, client.ObjectKeyFromObject(ss.pcsg), ss.pcs.Spec.Template.TerminationDelay.Duration)
-		pclqGangTerminationTasks := r.createDeleteTasks(logger, ss.pcs, ss.pcsg.Name, ss.pcsgIndicesToTerminate, reason)
+		pclqGangTerminationTasks := r.createDeleteTasks(logger, ss, ss.pcsgIndicesToTerminate, reason)
 		if err := r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(ss.pcsg), pclqGangTerminationTasks); err != nil {
 			return err
 		}

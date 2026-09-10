@@ -26,16 +26,20 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
+	"github.com/ai-dynamo/grove/operator/internal/expect"
 	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/go-logr/logr"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,7 +52,7 @@ func TestNew(t *testing.T) {
 	cl := testutils.NewTestClientBuilder().Build()
 	eventRecorder := &record.FakeRecorder{}
 
-	operator := New(cl, scheme, eventRecorder)
+	operator := New(cl, scheme, eventRecorder, expect.NewExpectationsStore())
 
 	assert.NotNil(t, operator)
 	r, ok := operator.(*_resource)
@@ -981,7 +985,8 @@ func TestComputePendingUpdateWork(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			sc := buildRollingUpdateSnapshot(tt.replicas, 1, 1, tt.reps)
-			uw, err := computePendingUpdateWork(sc)
+			r := _resource{expectationsStore: expect.NewExpectationsStore()}
+			uw, err := r.computePendingUpdateWork(sc)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantOldReady, uw.oldReadyReplicaIndices, "oldReadyReplicaIndices")
 			assert.Equal(t, tt.wantOldPending, uw.oldPendingReplicaIndices, "oldPendingReplicaIndices")
@@ -990,6 +995,23 @@ func TestComputePendingUpdateWork(t *testing.T) {
 			assert.Equal(t, tt.wantNumUpdatedReady, uw.numUpdatedReadyReplicas, "numUpdatedReadyReplicas")
 		})
 	}
+}
+
+func TestComputePendingUpdateWorkSkipsReplicaWithDeleteExpectation(t *testing.T) {
+	sc := buildRollingUpdateSnapshot(3, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldReadyReplica(2)})
+	// Simulate a disruption we already triggered for replica 0 whose deletion the informer cache has not
+	// yet observed, by recording a delete expectation for its member PodCliques.
+	store := expect.NewExpectationsStore()
+	replica0UIDs := lo.Map(componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)["0"], func(pclq grovecorev1alpha1.PodClique, _ int) types.UID {
+		return pclq.GetUID()
+	})
+	require.NoError(t, store.ExpectDeletions(logr.Discard(), sc.expectationsStoreKey, replica0UIDs...))
+	r := _resource{expectationsStore: store}
+
+	uw, err := r.computePendingUpdateWork(sc)
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, uw.oldReadyReplicaIndices, "replica 0 with a pending delete expectation must not be a disruption candidate")
+	assert.Equal(t, 2, uw.numReadyReplicas, "replica 0 with a pending delete expectation must not be counted as Ready")
 }
 
 func TestProcessPendingUpdates(t *testing.T) {
@@ -1002,7 +1024,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 			WithObjects(objs...).
 			WithStatusSubresource(&grovecorev1alpha1.PodCliqueScalingGroup{}).
 			Build()
-		return _resource{client: cl, eventRecorder: record.NewFakeRecorder(64)}, cl
+		return _resource{client: cl, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}, cl
 	}
 	remainingReplicaIndices := func(t *testing.T, cl client.Client) []string {
 		var list grovecorev1alpha1.PodCliqueList
@@ -1105,6 +1127,7 @@ func buildRollingUpdateSnapshot(replicas, minAvailable, maxUnavailable int32, re
 	return &syncSnapshot{
 		pcs:                            pcs,
 		pcsg:                           pcsg,
+		expectationsStoreKey:           pcsg.Namespace + "/" + pcsg.Name,
 		pcsgConfig:                     &grovecorev1alpha1.PodCliqueScalingGroupConfig{RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(maxUnavailable)}},
 		existingPCLQs:                  members,
 		expectedPCLQPodTemplateHashMap: expectedHashByName,
@@ -1116,6 +1139,7 @@ func newRollingUpdateMemberPCLQ(name string, rep testReplica) grovecorev1alpha1.
 	return *testutils.NewPCSGPodCliqueBuilder(name, testRollingUpdateNamespace, testRollingUpdatePCSName, testRollingUpdatePCSGName, 0, rep.index).
 		WithLabels(map[string]string{apicommon.LabelPodTemplateHash: rep.hash}).
 		WithOptions(func(p *grovecorev1alpha1.PodClique) {
+			p.UID = types.UID(name)
 			p.Status.ScheduledReplicas = rep.scheduled
 			p.Status.ReadyReplicas = rep.ready
 			p.Status.UpdatedReplicas = rep.updated
