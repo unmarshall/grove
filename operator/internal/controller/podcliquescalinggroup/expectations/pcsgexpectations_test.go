@@ -107,6 +107,30 @@ func TestSyncPCSGReplicaDeleteExpectations(t *testing.T) {
 	})
 }
 
+// TestClearPCSGExpectations verifies the PodCliqueScalingGroup's expectations entry is removed, so the
+// store does not leak an entry per PodCliqueScalingGroup lifecycle, and that clearing a key with no
+// entry is a no-op.
+func TestClearPCSGExpectations(t *testing.T) {
+	store := expect.NewExpectationsStore()
+	pcsgObjMeta := metav1.ObjectMeta{Namespace: "ns", Name: "pcsg-0"}
+	key, err := PCSGScopedExpectationsStoreKey(pcsgObjMeta)
+	require.NoError(t, err)
+	require.NoError(t, store.ExpectDeletions(logr.Discard(), key, types.UID("a")))
+
+	_, exists, err := store.GetExpectations(key)
+	require.NoError(t, err)
+	require.True(t, exists, "precondition: expectation should exist before clearing")
+
+	require.NoError(t, ClearPCSGExpectations(logr.Discard(), store, pcsgObjMeta))
+
+	_, exists, err = store.GetExpectations(key)
+	require.NoError(t, err)
+	assert.False(t, exists, "expectations entry should have been cleared, no leak")
+
+	// Clearing again, with no entry present, must be a no-op and must not error.
+	assert.NoError(t, ClearPCSGExpectations(logr.Discard(), store, pcsgObjMeta))
+}
+
 func memberWithUID(uid string) grovecorev1alpha1.PodClique {
 	return grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: uid, UID: types.UID(uid)}}
 }

@@ -39,6 +39,17 @@ func PCSGScopedExpectationsStoreKey(pcsgObjectMeta metav1.ObjectMeta) (string, e
 	return key, nil
 }
 
+// ClearPCSGExpectations removes the PodCliqueScalingGroup's delete-expectations entry from the store.
+// It is called on PodCliqueScalingGroup deletion so the store does not retain an entry after the
+// object and its member PodCliques are gone.
+func ClearPCSGExpectations(logger logr.Logger, store *expect.ExpectationsStore, pcsgObjectMeta metav1.ObjectMeta) error {
+	key, err := PCSGScopedExpectationsStoreKey(pcsgObjectMeta)
+	if err != nil {
+		return err
+	}
+	return store.DeleteExpectations(logger, key)
+}
+
 // PCSGScopedExpectationsStoreKeyForMemberPodClique returns the owning PodCliqueScalingGroup's
 // expectations key for a member PodClique, derived from its namespace and its
 // grove.io/podcliquescalinggroup label. The second return is false when the label is absent.
