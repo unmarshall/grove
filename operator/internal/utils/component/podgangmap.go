@@ -152,3 +152,31 @@ func IndexPodGangEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) map[st
 	}
 	return byEpoch
 }
+
+// LatestEpochForGenerationHash returns the largest epoch among entries carrying pcsGenerationHash, or
+// nil when no entry carries it. Filtering by hash makes it safe across generations, the coherent flow
+// queries it with the current generation hash while older or mid-flight generations coexist as drain
+// targets. Epochs are monotonic unix-nano decimals, so the largest is the newest.
+func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) (*string, error) {
+	var (
+		latestEpoch   string
+		maxEpochValue int64
+		found         bool
+	)
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			continue
+		}
+		epochValue, err := strconv.ParseInt(entries[i].Epoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", entries[i].Epoch, err)
+		}
+		if !found || epochValue > maxEpochValue {
+			latestEpoch, maxEpochValue, found = entries[i].Epoch, epochValue, true
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	return &latestEpoch, nil
+}
