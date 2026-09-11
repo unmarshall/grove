@@ -663,6 +663,16 @@ func (in *PodCliqueSetReplicaUpdateProgress) DeepCopyInto(out *PodCliqueSetRepli
 		in, out := &in.UpdateEndedAt, &out.UpdateEndedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.InFlightEpochs != nil {
+		in, out := &in.InFlightEpochs, &out.InFlightEpochs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Message != nil {
+		in, out := &in.Message, &out.Message
+		*out = new(string)
+		**out = **in
+	}
 	return
 }
 
@@ -837,6 +847,16 @@ func (in *PodCliqueSetUpdateProgress) DeepCopyInto(out *PodCliqueSetUpdateProgre
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.InScopeStandalonePodCliques != nil {
+		in, out := &in.InScopeStandalonePodCliques, &out.InScopeStandalonePodCliques
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.InScopePodCliqueScalingGroups != nil {
+		in, out := &in.InScopePodCliqueScalingGroups, &out.InScopePodCliqueScalingGroups
+		*out = make([]string, len(*in))
+		copy(*out, *in)
 	}
 	return
 }
