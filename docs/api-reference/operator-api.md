@@ -434,6 +434,8 @@ _Appears in:_
 | `replicaIndex` _integer_ | ReplicaIndex is the replica index of the PodCliqueSet that is being updated. |  |  |
 | `updateStartedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#time-v1-meta)_ | UpdateStartedAt is the time at which the update started for this PodCliqueSet replica index. |  |  |
 | `updateEndedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#time-v1-meta)_ | UpdateEndedAt is the time at which the update ended for this PodCliqueSet replica index.<br />The update ends when all child resources have been updated with the latest specification, when all Pods are<br />running the latest specification. |  |  |
+| `inFlightEpochs` _string array_ | InFlightEpochs are the grove.io/epochs of the PodGangs currently being rolled<br />(in flight) for this replica's coherent update. The orchestrator waits for the<br />PodGangs at these epochs to become ready before advancing to the next iteration.<br />Today a single epoch is in flight at a time; the field is a list so that a future<br />iteration supporting concurrent in-flight batches needs no API change. It is cleared<br />once the coherent update for this replica completes. |  |  |
+| `message` _string_ | Message describes the current reason the orchestrator has not advanced<br />the coherent update this reconcile. Populated whenever any advance<br />precondition is not met: PodGangs at the current InFlightEpochs not yet<br />reporting LastReady, subsumed pods still coming up, or an availability<br />budget preventing further takedown. Cleared once all preconditions hold. |  |  |
 
 
 #### PodCliqueSetSpec
@@ -528,6 +530,8 @@ _Appears in:_
 | `updatedPodCliqueScalingGroupsCount` _integer_ | UpdatedPodCliqueScalingGroupsCount is the number of PodCliqueScalingGroups that have been updated to the<br />desired PodCliqueSet generation hash. | 0 |  |
 | `totalPodCliqueScalingGroupsCount` _integer_ | TotalPodCliqueScalingGroupsCount is the total number of PodCliqueScalingGroups expected to exist for the<br />PodCliqueSet at the current spec. | 0 |  |
 | `currentlyUpdating` _[PodCliqueSetReplicaUpdateProgress](#podcliquesetreplicaupdateprogress) array_ | CurrentlyUpdating captures the progress of the PodCliqueSet replicas that are currently being updated.<br />This field is only set for rolling update strategies where Grove handles the orchestration. It is not set for the<br />OnDelete update strategy. |  |  |
+| `inScopeStandalonePodCliques` _string array_ | InScopeStandalonePodCliques captures the names of standalone PodCliques whose pod template<br />changed and are therefore in scope for the current coherent update. It names what changed,<br />not what has finished updating. The set is preserved for the lifetime of the update and is<br />cleared when UpdateEndedAt is set. If another update lands while this coherent update is still<br />in progress, and it changes a different set of components, those component names are merged into<br />this set rather than replacing it, so no in-flight component's update is dropped. Only populated<br />for the Coherent strategy. |  |  |
+| `inScopePodCliqueScalingGroups` _string array_ | InScopePodCliqueScalingGroups captures the config names of PodCliqueScalingGroups that had at<br />least one constituent PodClique whose pod template changed and are therefore in scope for the<br />current coherent update. It names what changed, not what has finished updating. The set is<br />preserved for the lifetime of the update and is cleared when UpdateEndedAt is set. If another<br />update lands while this coherent update is still in progress, and it changes a different set of<br />components, those config names are merged into this set rather than replacing it, so no<br />in-flight component's update is dropped. Only populated for the Coherent strategy. |  |  |
 
 
 #### PodCliqueSetUpdateStrategy
@@ -543,7 +547,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[UpdateStrategyType](#updatestrategytype)_ | Type indicates the type of update strategy.<br />This strategy applies uniformly to both standalone PodCliques and<br />PodCliqueScalingGroups within the PodCliqueSet.<br />Default is RollingRecreate. | RollingRecreate | Enum: [RollingRecreate OnDelete] <br /> |
+| `type` _[UpdateStrategyType](#updatestrategytype)_ | Type indicates the type of update strategy.<br />This strategy applies uniformly to both standalone PodCliques and<br />PodCliqueScalingGroups within the PodCliqueSet.<br />Default is RollingRecreate. | RollingRecreate | Enum: [Coherent RollingRecreate OnDelete] <br /> |
 
 
 #### PodCliqueSpec
@@ -973,7 +977,7 @@ _Underlying type:_ _string_
 UpdateStrategyType defines the type of update strategy for PodCliqueSet.
 
 _Validation:_
-- Enum: [RollingRecreate OnDelete]
+- Enum: [Coherent RollingRecreate OnDelete]
 
 _Appears in:_
 - [PodCliqueSetUpdateStrategy](#podcliquesetupdatestrategy)
