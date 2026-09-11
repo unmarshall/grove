@@ -92,7 +92,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 
 	// Bound disruption against the live replica count and the minimum that must stay available, not a
 	// readiness delta, so the budget does not collapse to 0 when replicas are already unavailable.
-	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCSG(sc))
+	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCSG(sc), sc.pcs.Spec.UpdateStrategy.Type, *sc.pcsg.Spec.MinAvailable)
 	disruptionBudget := computeDisruptionBudget(uw.existingReplicas, desiredNumReplicas, effectiveMaxUnavailable, uw.newNotReadyReplicas)
 	if disruptionBudget <= 0 {
 		return groveerr.New(

@@ -287,3 +287,38 @@ func TestIndexPodGangEntriesByEpoch(t *testing.T) {
 		assert.Empty(t, actual)
 	})
 }
+
+func TestLatestEpochForGenerationHash(t *testing.T) {
+	const (
+		hashA = "hash-a"
+		hashB = "hash-b"
+	)
+	entries := []grovecorev1alpha1.PodGangEntry{
+		testutils.NewPodGangEntryBuilder(hashA, "1000").Build(),
+		testutils.NewPodGangEntryBuilder(hashA, "3000").Build(),
+		testutils.NewPodGangEntryBuilder(hashB, "2000").Build(),
+	}
+
+	t.Run("returns the largest epoch for the queried generation hash", func(t *testing.T) {
+		latestEpoch, err := LatestEpochForGenerationHash(entries, hashA)
+		require.NoError(t, err)
+		require.NotNil(t, latestEpoch)
+		assert.Equal(t, "3000", *latestEpoch)
+	})
+	t.Run("ignores entries of other generation hashes", func(t *testing.T) {
+		latestEpoch, err := LatestEpochForGenerationHash(entries, hashB)
+		require.NoError(t, err)
+		require.NotNil(t, latestEpoch)
+		assert.Equal(t, "2000", *latestEpoch)
+	})
+	t.Run("returns nil when no entry carries the generation hash", func(t *testing.T) {
+		latestEpoch, err := LatestEpochForGenerationHash(entries, "hash-absent")
+		require.NoError(t, err)
+		assert.Nil(t, latestEpoch)
+	})
+	t.Run("errors on a non-numeric epoch for the queried hash", func(t *testing.T) {
+		badEntries := []grovecorev1alpha1.PodGangEntry{testutils.NewPodGangEntryBuilder(hashA, "not-a-number").Build()}
+		_, err := LatestEpochForGenerationHash(badEntries, hashA)
+		require.Error(t, err)
+	})
+}
