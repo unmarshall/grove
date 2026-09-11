@@ -104,7 +104,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	// bounded by this budget, so when a member PodClique's readiness status is stale (numReadyReplicas
 	// under-reported) the budget shrinks and the rollout waits, instead of replacing replicas that may
 	// actually be Ready.
-	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCSG(sc))
+	effectiveMaxUnavailable := componentutils.EffectiveMaxUnavailable(rollingUpdateConfigForPCSG(sc), sc.pcs.Spec.UpdateStrategy.Type, *sc.pcsg.Spec.MinAvailable)
 	allowedBudget := componentutils.ComputeAllowedBudget(desiredNumReplicas, uw.numReadyReplicas, effectiveMaxUnavailable)
 	if allowedBudget == 0 {
 		return groveerr.New(
