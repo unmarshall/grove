@@ -64,7 +64,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 
 	// mutate PodClique Status Replicas, ReadyReplicas, ScheduleGatedReplicas and UpdatedReplicas.
 	mutateReplicas(pclq, podCategories, len(existingPods))
-	mutateUpdatedReplica(pclq, existingPods)
+	mutateUpdatedReplica(pclq, existingPods, podCategories[corev1.PodReady])
 	// mutate PodClique.Status.CurrentPodTemplateHash and PodClique.Status.CurrentPodCliqueSetGenerationHash
 	if err = mutateCurrentHashes(logger, pcs, pclq); err != nil {
 		logger.Error(err, "failed to compute PodClique current hashes")
@@ -148,8 +148,9 @@ func mutateReplicas(pclq *grovecorev1alpha1.PodClique, podCategories map[corev1.
 	pclq.Status.ScheduledReplicas = int32(len(podCategories[corev1.PodScheduled]))
 }
 
-// mutateUpdatedReplica calculates and sets the number of pods with the expected template hash
-func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods []*corev1.Pod) {
+// mutateUpdatedReplica calculates and sets the number of pods with the expected template hash, and while
+// an update is in progress the number of those pods that are also Ready.
+func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods, readyPods []*corev1.Pod) {
 	var expectedPodTemplateHash string
 	// If UpdateProgress exists (update in progress or recently completed), use the target hash from it.
 	// This covers both the active update phase and the window after completion before CurrentPodTemplateHash is synced.
@@ -169,14 +170,20 @@ func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods []*cor
 	// This prevents incorrectly marking all existing pods as updated when the PCLQ is first created.
 	// Once the PCLQ is successfully reconciled, the expectedPodTemplateHash will be set and the updated replicas can be calculated correctly.
 	if expectedPodTemplateHash != "" {
-		updatedReplicas := lo.Reduce(existingPods, func(agg int, pod *corev1.Pod, _ int) int {
-			if pod.Labels[apicommon.LabelPodTemplateHash] == expectedPodTemplateHash {
-				return agg + 1
-			}
-			return agg
-		}, 0)
-		pclq.Status.UpdatedReplicas = int32(updatedReplicas)
+		pclq.Status.UpdatedReplicas = countPodsAtTemplateHash(existingPods, expectedPodTemplateHash)
+		// UpdatedReadyReplicas lives on UpdateProgress and is meaningful only while an update runs. When no
+		// update is in flight the count carries no distinct information over ReadyReplicas.
+		if pclq.Status.UpdateProgress != nil {
+			pclq.Status.UpdateProgress.UpdatedReadyReplicas = countPodsAtTemplateHash(readyPods, expectedPodTemplateHash)
+		}
 	}
+}
+
+// countPodsAtTemplateHash returns how many of the given Pods carry the pod template hash.
+func countPodsAtTemplateHash(pods []*corev1.Pod, podTemplateHash string) int32 {
+	return int32(lo.CountBy(pods, func(pod *corev1.Pod) bool {
+		return pod.Labels[apicommon.LabelPodTemplateHash] == podTemplateHash
+	}))
 }
 
 // mutateSelector publishes the label selector on the PodClique /scale subresource so HPAs can

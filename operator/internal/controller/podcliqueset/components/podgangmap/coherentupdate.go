@@ -1,0 +1,173 @@
+// Copyright 2026 The Grove Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package podgangmap
+
+import (
+	"context"
+	"fmt"
+
+	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// buildCoherentUpdateEntries advances the PodGangMap of one PCS replica by at most one coherent update
+// sub-step. It reconstructs the plan position from the committed current-hash entries and, when a sub-step
+// remains and the sub-step gate holds, emits the next one. It returns the entry set that should exist after
+// this reconcile, which is the current set unchanged when nothing remains to emit or the gate holds. It
+// does not report update completion, which the orchestrator determines from live child status.
+func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syncSnapshot, pcsReplicaIndex int, pgm *grovecorev1alpha1.PodGangMap) ([]grovecorev1alpha1.PodGangEntry, error) {
+	standalonePCLQByComponent := syncSnap.inScopeStandalonePCLQsByComponent(pcsReplicaIndex)
+	pcsgByComponent, err := syncSnap.inScopePCSGsByComponent(pcsReplicaIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	liveReplicas := make(map[string]int32, len(standalonePCLQByComponent)+len(pcsgByComponent))
+	for componentName, pclq := range standalonePCLQByComponent {
+		liveReplicas[componentName] = pclq.Spec.Replicas
+	}
+	for componentName, pcsg := range pcsgByComponent {
+		liveReplicas[componentName] = pcsg.Spec.Replicas
+	}
+
+	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, liveReplicas)
+	pos := planner.ascertainPlanPosition()
+
+	ss, err := planner.next(pos)
+	if err != nil {
+		return nil, err
+	}
+	// A nil sub-step means every in-scope component is committed to the current hash, so nothing remains to
+	// emit and the entries are returned unchanged.
+	if ss == nil {
+		return pgm.Spec.Entries, nil
+	}
+
+	// Hold the advance when the gate is not met, so the current sub-step keeps converging before the next
+	// one takes more Pods down.
+	canEmit, err := r.canEmitNextSubStep(ctx, planner, pos, standalonePCLQByComponent, pcsgByComponent)
+	if err != nil {
+		return nil, err
+	}
+	if !canEmit {
+		return pgm.Spec.Entries, nil
+	}
+	return planner.applySubStep(*ss)
+}
+
+// inScopeStandalonePCLQsByComponent indexes the standalone PodCliques under a coherent update for one PCS
+// replica by component name, keeping only components in the update scope.
+func (s *syncSnapshot) inScopeStandalonePCLQsByComponent(pcsReplicaIndex int) map[string]grovecorev1alpha1.PodClique {
+	pcsNameReplica := apicommon.ResourceNameReplica{Name: s.pcs.Name, Replica: pcsReplicaIndex}
+	pclqByComponent := make(map[string]grovecorev1alpha1.PodClique)
+	for _, pclq := range s.existingStandalonePCLQsByReplica[pcsReplicaIndex] {
+		componentName := apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(pclq.Name, pcsNameReplica)
+		if _, inScope := s.mvuTemplate.standalonePCLQs[componentName]; inScope {
+			pclqByComponent[componentName] = pclq
+		}
+	}
+	return pclqByComponent
+}
+
+// inScopePCSGsByComponent indexes the PodCliqueScalingGroups under a coherent update for one PCS replica by
+// component name, keeping only components in the update scope.
+func (s *syncSnapshot) inScopePCSGsByComponent(pcsReplicaIndex int) (map[string]grovecorev1alpha1.PodCliqueScalingGroup, error) {
+	pcsNameReplica := apicommon.ResourceNameReplica{Name: s.pcs.Name, Replica: pcsReplicaIndex}
+	pcsgByComponent := make(map[string]grovecorev1alpha1.PodCliqueScalingGroup)
+	for _, pcsg := range s.existingPCSGsByReplica[pcsReplicaIndex] {
+		componentName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(pcsg.Name, pcsNameReplica)
+		if err != nil {
+			return nil, groveerr.WrapError(err, errCodeComputeLiveReplicas, component.OperationSync,
+				fmt.Sprintf("failed to extract PodCliqueScalingGroup name from %q", pcsg.Name))
+		}
+		if _, inScope := s.mvuTemplate.pcsgs[componentName]; inScope {
+			pcsgByComponent[componentName] = pcsg
+		}
+	}
+	return pcsgByComponent, nil
+}
+
+// canEmitNextSubStep reports whether the sub-step gate holds for one PCS replica, so the next sub-step may
+// be emitted. It checks that the most recent current-hash batch is ready, then that the standalone Pods
+// subsumed so far are ready, then that no in-scope component is below its MaxUnavailable budget. The first
+// check that fails holds the advance.
+func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, pos planPosition, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (bool, error) {
+	currentBatchReady, err := r.currentBatchReady(ctx, planner.pcs, planner.pcsReplicaIndex, planner.entries)
+	if err != nil {
+		return false, err
+	}
+	if !currentBatchReady {
+		return false, nil
+	}
+	if !subsumedPodsReady(standalonePCLQByComponent, pos) {
+		return false, nil
+	}
+	return maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.liveReplicas, planner.maxUnavailableByComponent), nil
+}
+
+// currentBatchReady reports whether every PodGang carrying the most recent current-hash epoch has become
+// ready at least once. When no current-hash entry exists yet the first sub-step has nothing to wait on, so
+// it reports true.
+func (r _resource) currentBatchReady(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry) (bool, error) {
+	latestEpoch, err := componentutils.LatestEpochForGenerationHash(entries, *pcs.Status.CurrentGenerationHash)
+	if err != nil {
+		return false, groveerr.WrapError(err, errCodeInvalidEpoch, component.OperationSync,
+			fmt.Sprintf("failed to determine the latest current-hash epoch for PodCliqueSet %v replica %d", client.ObjectKeyFromObject(pcs), pcsReplicaIndex))
+	}
+	if latestEpoch == nil {
+		return true, nil
+	}
+	return componentutils.AllPodGangsAtEpochEverReady(ctx, r.client, client.ObjectKeyFromObject(pcs), int32(pcsReplicaIndex), *latestEpoch)
+}
+
+// subsumedPodsReady reports whether every in-scope standalone PodClique has at least as many new-hash Ready
+// Pods as the plan has committed to the current hash for it. Standalone tail Pods subsume into an anchor
+// whose PodGang stays Ready at MinAvailable, so their readiness is tracked separately through the
+// PodClique's UpdatedReadyReplicas rather than the anchor PodGang. PodCliqueScalingGroups are not checked
+// here because they roll through their own tail PodGangs, whose readiness currentBatchReady covers.
+func subsumedPodsReady(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pos planPosition) bool {
+	for componentName, pclq := range standalonePCLQByComponent {
+		readyAtCurrentHash := int32(0)
+		if pclq.Status.UpdateProgress != nil {
+			readyAtCurrentHash = pclq.Status.UpdateProgress.UpdatedReadyReplicas
+		}
+		if readyAtCurrentHash < pos.currentHashCountByComponent[componentName] {
+			return false
+		}
+	}
+	return true
+}
+
+// maxUnavailableBudgetSatisfied reports whether every in-scope component stays at or above its available
+// count for the current update, its live replicas minus MaxUnavailable. A standalone PodClique is measured
+// by its Ready Pods and a PodCliqueScalingGroup by its available replicas.
+func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, liveReplicas, maxUnavailableByComponent map[string]int32) bool {
+	for componentName, pclq := range standalonePCLQByComponent {
+		if pclq.Status.ReadyReplicas < liveReplicas[componentName]-maxUnavailableByComponent[componentName] {
+			return false
+		}
+	}
+	for componentName, pcsg := range pcsgByComponent {
+		if pcsg.Status.AvailableReplicas < liveReplicas[componentName]-maxUnavailableByComponent[componentName] {
+			return false
+		}
+	}
+	return true
+}

@@ -66,6 +66,28 @@ func EffectiveMaxUnavailable(rollingUpdate *grovecorev1alpha1.RollingUpdateConfi
 	return int(DefaultRollingRecreateMaxUnavailable)
 }
 
+// CoherentMinAvailableByComponent returns the MinAvailable of each in-scope component under the
+// Coherent update strategy (the UpdateStrategyType value "Coherent"), split by kind:
+// standalonePCLQMinAvailable keys a standalone PodClique name to its MinAvailable pod count, and
+// pcsgMinAvailable keys a PodCliqueScalingGroup name to its MinAvailable replica count. A component
+// not named in inScopeComponentNames is excluded. It backs the coherent MVU template.
+func CoherentMinAvailableByComponent(pcs *grovecorev1alpha1.PodCliqueSet, inScopeComponentNames []string) (standalonePCLQMinAvailable, pcsgMinAvailable map[string]int32) {
+	inScopeComponents := sets.New(inScopeComponentNames...)
+	standalonePCLQMinAvailable = make(map[string]int32)
+	pcsgMinAvailable = make(map[string]int32)
+	for _, cliqueTemplate := range pcs.Spec.Template.Cliques {
+		if inScopeComponents.Has(cliqueTemplate.Name) && IsStandalonePCLQ(pcs, cliqueTemplate.Name) {
+			standalonePCLQMinAvailable[cliqueTemplate.Name] = *cliqueTemplate.Spec.MinAvailable
+		}
+	}
+	for _, pcsgConfig := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		if inScopeComponents.Has(pcsgConfig.Name) {
+			pcsgMinAvailable[pcsgConfig.Name] = *pcsgConfig.MinAvailable
+		}
+	}
+	return
+}
+
 // ComputeAllowedBudget returns the number of units (Pods for a standalone PodClique, complete logical
 // replicas for a PodCliqueScalingGroup) that may be disrupted this reconcile. It is the MaxUnavailable
 // headroom (effectiveMaxUnavailable minus the currently unavailable units), floored at 0. MinAvailable
