@@ -49,6 +49,25 @@ func TestCoherentMaxUnavailableByComponent(t *testing.T) {
 	assert.Equal(t, map[string]int32{"fe": 3, "pf": 2, "pfnil": 4}, got)
 }
 
+func TestCoherentMinAvailableByComponent(t *testing.T) {
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder("fe").WithReplicas(5).WithMinAvailable(2).Build()).
+		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder("other").WithReplicas(4).WithMinAvailable(1).Build()).
+		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder("pf-leader").WithReplicas(1).WithMinAvailable(1).Build()).
+		WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+			Name:         "pf",
+			CliqueNames:  []string{"pf-leader"},
+			MinAvailable: ptr.To[int32](3),
+		}).
+		Build()
+
+	// "fe" is an in-scope standalone PodClique, "pf" an in-scope PCSG, "other" is out of scope, and
+	// "pf-leader" is a PCSG member (not standalone) so it lands in neither map even though in scope.
+	standalonePCLQMinAvailable, pcsgMinAvailable := CoherentMinAvailableByComponent(pcs, []string{"fe", "pf", "pf-leader"})
+	assert.Equal(t, map[string]int32{"fe": 2}, standalonePCLQMinAvailable)
+	assert.Equal(t, map[string]int32{"pf": 3}, pcsgMinAvailable)
+}
+
 func TestEffectiveMaxUnavailable(t *testing.T) {
 	testCases := []struct {
 		description    string
