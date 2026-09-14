@@ -124,6 +124,20 @@ func IsAutoUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	return pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovecorev1alpha1.OnDeleteStrategy
 }
 
+// IsCoherentUpdateInProgress returns true when the PodCliqueSet uses the Coherent update strategy
+// and an update has started but has not yet ended.
+func IsCoherentUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+	return IsCoherentStrategy(pcs) &&
+		pcs.Status.UpdateProgress != nil &&
+		pcs.Status.UpdateProgress.UpdateEndedAt == nil
+}
+
+// IsCoherentStrategy returns true when the PodCliqueSet uses the Coherent update strategy (the
+// UpdateStrategyType value "Coherent").
+func IsCoherentStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+	return pcs != nil && pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy
+}
+
 // GetExpectedPCLQNamesGroupByOwner returns the expected unqualified PodClique names which are either owned by PodCliqueSet or PodCliqueScalingGroup.
 func GetExpectedPCLQNamesGroupByOwner(pcs *grovecorev1alpha1.PodCliqueSet) (expectedPCLQNamesForPCS sets.Set[string], expectedPCLQNamesForPCSG sets.Set[string]) {
 	expectedPCLQNamesForPCS = sets.New[string]()
