@@ -264,7 +264,7 @@ func TestGetPodCliqueSetName(t *testing.T) {
 	}
 }
 
-// TestIsAutoUpdateStrategy tests the IsAutoUpdateStrategy function.
+// TestIsAutoUpdateStrategy tests the IsRollingUpdateStrategy function.
 func TestIsAutoUpdateStrategy(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -305,7 +305,7 @@ func TestIsAutoUpdateStrategy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, IsAutoUpdateStrategy(tc.pcs))
+			assert.Equal(t, tc.expected, IsRollingUpdateStrategy(tc.pcs))
 		})
 	}
 }
@@ -355,6 +355,30 @@ func TestIsCoherentUpdateInProgress(t *testing.T) {
 			pcs.Spec.UpdateStrategy = tc.strategy
 			pcs.Status.UpdateProgress = tc.progress
 			assert.Equal(t, tc.want, IsCoherentUpdateInProgress(pcs))
+		})
+	}
+}
+
+func TestIsRollingUpdateInProgress(t *testing.T) {
+	endedAt := metav1.Now()
+	testCases := []struct {
+		description string
+		strategy    *grovecorev1alpha1.PodCliqueSetUpdateStrategy
+		progress    *grovecorev1alpha1.PodCliqueSetUpdateProgress
+		want        bool
+	}{
+		{"OnDelete is not a rolling update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.OnDeleteStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
+		{"rolling update strategy with no UpdateProgress", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, nil, false},
+		{"rolling update strategy with an in-flight update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
+		{"a nil UpdateStrategy defaults to a rolling update strategy", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
+		{"rolling update strategy with an ended update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &endedAt}, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pcs := &grovecorev1alpha1.PodCliqueSet{}
+			pcs.Spec.UpdateStrategy = tc.strategy
+			pcs.Status.UpdateProgress = tc.progress
+			assert.Equal(t, tc.want, IsRollingUpdateInProgress(pcs))
 		})
 	}
 }

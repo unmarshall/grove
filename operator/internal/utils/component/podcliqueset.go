@@ -115,21 +115,30 @@ func GetPodCliqueSetName(objectMeta metav1.ObjectMeta) string {
 	return pcsName
 }
 
-// IsAutoUpdateStrategy returns true when PodCliqueSet update strategy is automatically orchestrated by Grove.
+// IsRollingUpdateStrategy returns true when PodCliqueSet update strategy is orchestrated by Grove.
 // Only the OnDelete update strategy is not a rolling update strategy.
-func IsAutoUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+func IsRollingUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	if pcs == nil {
 		return false
 	}
 	return pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovecorev1alpha1.OnDeleteStrategy
 }
 
+// IsRollingUpdateInProgress returns true when the PodCliqueSet uses a rolling update strategy and an
+// update has started but has not yet ended.
+func IsRollingUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+	return IsRollingUpdateStrategy(pcs) && updateInProgress(pcs)
+}
+
+// updateInProgress reports whether the PodCliqueSet has an update that has started but not yet ended.
+func updateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+	return pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
+}
+
 // IsCoherentUpdateInProgress returns true when the PodCliqueSet uses the Coherent update strategy
 // and an update has started but has not yet ended.
 func IsCoherentUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
-	return IsCoherentStrategy(pcs) &&
-		pcs.Status.UpdateProgress != nil &&
-		pcs.Status.UpdateProgress.UpdateEndedAt == nil
+	return IsCoherentStrategy(pcs) && updateInProgress(pcs)
 }
 
 // IsCoherentStrategy returns true when the PodCliqueSet uses the Coherent update strategy (the
