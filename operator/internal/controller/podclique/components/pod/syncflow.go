@@ -225,7 +225,7 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 		}
 	}
 
-	if componentutils.IsAutoUpdateStrategy(ss.pcs) && componentutils.IsPCLQAutoUpdateInProgress(ss.pclq) {
+	if componentutils.IsRollingUpdateStrategy(ss.pcs) && componentutils.IsPCLQAutoUpdateInProgress(ss.pclq) {
 		if err := r.processPendingUpdates(ctx, logger, ss); err != nil {
 			result.recordError(err)
 		}

@@ -218,6 +218,30 @@ func IsLastPCLQUpdateCompleted(pclq *grovecorev1alpha1.PodClique) bool {
 	return pclq.Status.UpdateProgress != nil && pclq.Status.UpdateProgress.UpdateEndedAt != nil
 }
 
+// IsPCLQUpdateComplete reports whether the PodClique has converged to the current generation hash of the
+// PodCliqueSet. It assumes the PodCliqueSet has a current generation hash, which holds during a rolling
+// update and in the status path that guards it.
+func IsPCLQUpdateComplete(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique) bool {
+	// A PodCliqueSet without a current generation hash has no target for its children to converge to, so
+	// no PodClique can be complete. computePCLQsStatus reaches here for a freshly created PodCliqueSet
+	// before its first generation hash is recorded.
+	if pcs.Status.CurrentGenerationHash == nil {
+		return false
+	}
+	expectedPodTemplateHash, err := GetExpectedPCLQPodTemplateHash(pcs, pclq.ObjectMeta)
+	if err != nil || expectedPodTemplateHash == "" {
+		return false
+	}
+	podTemplateHashConverged := pclq.Labels[apicommon.LabelPodTemplateHash] == expectedPodTemplateHash &&
+		pclq.Status.CurrentPodTemplateHash != nil && *pclq.Status.CurrentPodTemplateHash == expectedPodTemplateHash
+	pcsGenerationHashConverged := pclq.Status.CurrentPodCliqueSetGenerationHash != nil &&
+		*pclq.Status.CurrentPodCliqueSetGenerationHash == *pcs.Status.CurrentGenerationHash
+	minAvailablePodsUpdatedAndReady := pclq.Status.UpdatedReplicas >= *pclq.Spec.MinAvailable &&
+		pclq.Status.ReadyReplicas >= *pclq.Spec.MinAvailable
+
+	return podTemplateHashConverged && pcsGenerationHashConverged && minAvailablePodsUpdatedAndReady
+}
+
 // GetExpectedPCLQPodTemplateHash finds the matching PodCliqueTemplateSpec from the PodCliqueSet and computes the pod template hash for the PCLQ pod spec.
 func GetExpectedPCLQPodTemplateHash(pcs *grovecorev1alpha1.PodCliqueSet, pclqObjectMeta metav1.ObjectMeta) (string, error) {
 	cliqueName, err := GetPodCliqueNameFromPodCliqueFQN(pclqObjectMeta)
