@@ -203,7 +203,6 @@ func computeMVUTemplate(pcs *grovecorev1alpha1.PodCliqueSet) *mvuTemplate {
 //  3. A PodGangMap with entries. reconcileEntries re-authors them, advancing an under-update replica
 //     to the current generation hash first.
 func (r _resource) runSyncFlow(ctx context.Context, syncSnap *syncSnapshot) error {
-	coherentUpdateInProgress := componentutils.IsCoherentUpdateInProgress(syncSnap.pcs)
 	for pcsReplicaIndex := range int(syncSnap.pcs.Spec.Replicas) {
 		pgm := syncSnap.existingPGMByReplica[pcsReplicaIndex]
 
@@ -211,10 +210,10 @@ func (r _resource) runSyncFlow(ctx context.Context, syncSnap *syncSnapshot) erro
 			entries []grovecorev1alpha1.PodGangEntry
 			err     error
 		)
-		// A coherent update advances an existing PodGangMap one sub-step per reconcile. A replica whose
-		// PodGangMap is missing or empty still bootstraps through reconcileEntries so it recovers before the
-		// coherent path takes over.
-		if coherentUpdateInProgress && pgm != nil && len(pgm.Spec.Entries) > 0 {
+		// A coherent update advances an existing PodGangMap one sub-step per reconcile, and only for the
+		// replica the orchestrator has selected. Every other replica, and any replica whose PodGangMap is
+		// missing or empty, is authored through reconcileEntries so it stays frozen or bootstraps.
+		if componentutils.IsPCSReplicaUnderCoherentUpdate(syncSnap.pcs, pcsReplicaIndex) && pgm != nil && len(pgm.Spec.Entries) > 0 {
 			entries, err = r.buildCoherentUpdateEntries(ctx, syncSnap, pcsReplicaIndex, pgm)
 		} else {
 			entries, err = reconcileEntries(r.clk,

@@ -147,6 +147,20 @@ func IsCoherentStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	return pcs != nil && pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy
 }
 
+// IsPCSReplicaUnderCoherentUpdate reports whether the given PodCliqueSet replica is the one the
+// orchestrator has selected for a coherent update and has not yet closed out.
+func IsPCSReplicaUnderCoherentUpdate(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int) bool {
+	if !IsCoherentUpdateInProgress(pcs) {
+		return false
+	}
+	for _, replicaProgress := range pcs.Status.UpdateProgress.CurrentlyUpdating {
+		if int(replicaProgress.ReplicaIndex) == pcsReplicaIndex && replicaProgress.UpdateEndedAt == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // GetExpectedPCLQNamesGroupByOwner returns the expected unqualified PodClique names which are either owned by PodCliqueSet or PodCliqueScalingGroup.
 func GetExpectedPCLQNamesGroupByOwner(pcs *grovecorev1alpha1.PodCliqueSet) (expectedPCLQNamesForPCS sets.Set[string], expectedPCLQNamesForPCSG sets.Set[string]) {
 	expectedPCLQNamesForPCS = sets.New[string]()

@@ -43,6 +43,13 @@ func (r _resource) orchestrateRollingUpdate(ctx context.Context, logger logr.Log
 
 	if currentlyUpdating := findCurrentlyUpdatingReplicaInfo(pcs, replicaInfos); currentlyUpdating != nil {
 		if !currentlyUpdating.isUpdateComplete(pcs) {
+			// A Coherent update records its in-flight epochs and the components it is still waiting on. The
+			// PodGangMap component owns the advance, so this only writes observability status.
+			if componentutils.IsCoherentStrategy(pcs) {
+				if err = r.updateCoherentReplicaProgress(ctx, logger, pcs, *currentlyUpdating); err != nil {
+					return err
+				}
+			}
 			return groveerr.New(
 				groveerr.ErrCodeContinueReconcileAndRequeue,
 				component.OperationSync,
