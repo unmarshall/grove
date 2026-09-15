@@ -383,6 +383,34 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 	}
 }
 
+func TestIsPCSReplicaUnderCoherentUpdate(t *testing.T) {
+	coherent := &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}
+	endedAt := metav1.Now()
+	currentlyUpdating := func(replicaIndex int32, ended *metav1.Time) []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress {
+		return []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: replicaIndex, UpdateEndedAt: ended}}
+	}
+	testCases := []struct {
+		description     string
+		strategy        *grovecorev1alpha1.PodCliqueSetUpdateStrategy
+		progress        *grovecorev1alpha1.PodCliqueSetUpdateProgress
+		pcsReplicaIndex int
+		want            bool
+	}{
+		{"not a coherent update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{CurrentlyUpdating: currentlyUpdating(0, nil)}, 0, false},
+		{"coherent update but replica not selected", coherent, &grovecorev1alpha1.PodCliqueSetUpdateProgress{CurrentlyUpdating: currentlyUpdating(1, nil)}, 0, false},
+		{"coherent update with the replica selected and open", coherent, &grovecorev1alpha1.PodCliqueSetUpdateProgress{CurrentlyUpdating: currentlyUpdating(0, nil)}, 0, true},
+		{"coherent update with the replica selected but closed out", coherent, &grovecorev1alpha1.PodCliqueSetUpdateProgress{CurrentlyUpdating: currentlyUpdating(0, &endedAt)}, 0, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pcs := &grovecorev1alpha1.PodCliqueSet{}
+			pcs.Spec.UpdateStrategy = tc.strategy
+			pcs.Status.UpdateProgress = tc.progress
+			assert.Equal(t, tc.want, IsPCSReplicaUnderCoherentUpdate(pcs, tc.pcsReplicaIndex))
+		})
+	}
+}
+
 func TestGetPodCliqueSet(t *testing.T) {
 	tests := []struct {
 		// Test case description

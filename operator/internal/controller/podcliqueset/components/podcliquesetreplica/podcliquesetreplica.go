@@ -38,6 +38,8 @@ const (
 	errCodeListPCLQs                       grovecorev1alpha1.ErrorCode = "ERR_LIST_PCLQs"
 	errCodeListPCSGs                       grovecorev1alpha1.ErrorCode = "ERR_LIST_PCGS"
 	errCodeUpdatePCSStatus                 grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PCS_STATUS"
+	errCodeGetPodGangMap                   grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANGMAP"
+	errCodeInvalidEpoch                    grovecorev1alpha1.ErrorCode = "ERR_INVALID_EPOCH"
 )
 
 type _resource struct {
