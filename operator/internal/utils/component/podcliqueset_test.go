@@ -264,8 +264,8 @@ func TestGetPodCliqueSetName(t *testing.T) {
 	}
 }
 
-// TestIsAutoUpdateStrategy tests the IsRollingUpdateStrategy function.
-func TestIsAutoUpdateStrategy(t *testing.T) {
+// TestIsRollingUpdateStrategy tests the IsRollingUpdateStrategy function.
+func TestIsRollingUpdateStrategy(t *testing.T) {
 	tests := []struct {
 		name     string
 		pcs      *grovecorev1alpha1.PodCliqueSet
@@ -379,6 +379,29 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			pcs.Spec.UpdateStrategy = tc.strategy
 			pcs.Status.UpdateProgress = tc.progress
 			assert.Equal(t, tc.want, IsRollingUpdateInProgress(pcs))
+		})
+	}
+}
+
+func TestIsRollingRecreateUpdateInProgress(t *testing.T) {
+	testCases := []struct {
+		description string
+		strategy    *grovecorev1alpha1.PodCliqueSetUpdateStrategy
+		progress    *grovecorev1alpha1.PodCliqueSetUpdateProgress
+		want        bool
+	}{
+		{"RollingRecreate with an in-flight update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
+		{"a nil UpdateStrategy defaults to RollingRecreate", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
+		{"Coherent with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
+		{"OnDelete with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.OnDeleteStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
+		{"RollingRecreate with no update in progress", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, nil, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pcs := &grovecorev1alpha1.PodCliqueSet{}
+			pcs.Spec.UpdateStrategy = tc.strategy
+			pcs.Status.UpdateProgress = tc.progress
+			assert.Equal(t, tc.want, IsRollingRecreateUpdateInProgress(pcs))
 		})
 	}
 }
