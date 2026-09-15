@@ -112,7 +112,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 
 // mutateCurrentHashes updates the PodClique's current template and generation hashes when updates are complete
 func mutateCurrentHashes(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique) error {
-	if componentutils.IsPCLQAutoUpdateInProgress(pclq) || pclq.Status.UpdatedReplicas != pclq.Status.Replicas {
+	if componentutils.IsPCLQRollingUpdateInProgress(pclq) || pclq.Status.UpdatedReplicas != pclq.Status.Replicas {
 		logger.Info("PodClique is currently updating, cannot set PodCliqueSet CurrentGenerationHash yet")
 		return nil
 	}
@@ -229,7 +229,7 @@ func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numN
 
 // computeMinAvailableBreachedCondition calculates the MinAvailableBreached condition status based on pod availability
 func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numPodsHavingAtleastOneContainerWithNonZeroExitCode, numPodsStartedButNotReady int) metav1.Condition {
-	if componentutils.IsPCLQAutoUpdateInProgress(pclq) {
+	if componentutils.IsPCLQRollingUpdateInProgress(pclq) {
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
 			Status:  metav1.ConditionUnknown,
@@ -349,7 +349,7 @@ func progressDeadlineForPCLQ(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecor
 // LastProgressedAt is cleared and the condition is False (NoActiveUpdate).
 func mutateUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, originalStatus *grovecorev1alpha1.PodCliqueStatus, progressDeadline *metav1.Duration) {
 	now := metav1.Now()
-	if componentutils.IsPCLQAutoUpdateInProgress(pclq) {
+	if componentutils.IsPCLQRollingUpdateInProgress(pclq) {
 		if pclq.Status.UpdateProgress.LastProgressedAt == nil || pclq.Status.UpdatedReplicas > originalStatus.UpdatedReplicas {
 			pclq.Status.UpdateProgress.LastProgressedAt = &now
 		}
@@ -366,7 +366,7 @@ func mutateUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, original
 // computeUpdateInProgressCondition returns the UpdateInProgress condition for the PodClique based on
 // whether a rolling update is in progress and whether it has progressed within ProgressDeadline.
 func computeUpdateInProgressCondition(pclq *grovecorev1alpha1.PodClique, progressDeadline *metav1.Duration, now metav1.Time) metav1.Condition {
-	if !componentutils.IsPCLQAutoUpdateInProgress(pclq) {
+	if !componentutils.IsPCLQRollingUpdateInProgress(pclq) {
 		return metav1.Condition{
 			Type:               constants.ConditionTypeUpdateInProgress,
 			Status:             metav1.ConditionFalse,
