@@ -141,6 +141,12 @@ func IsCoherentUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	return IsCoherentStrategy(pcs) && updateInProgress(pcs)
 }
 
+// IsRollingRecreateUpdateInProgress returns true when a rolling update is in progress under the
+// RollingRecreate strategy, the default strategy that is neither Coherent nor OnDelete.
+func IsRollingRecreateUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool {
+	return IsRollingUpdateInProgress(pcs) && !IsCoherentStrategy(pcs)
+}
+
 // IsCoherentStrategy returns true when the PodCliqueSet uses the Coherent update strategy (the
 // UpdateStrategyType value "Coherent").
 func IsCoherentStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {

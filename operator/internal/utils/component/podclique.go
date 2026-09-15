@@ -206,8 +206,8 @@ func ComputePCLQPodTemplateHash(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTem
 	return k8sutils.ComputeHash(&podTemplateSpec)
 }
 
-// IsPCLQAutoUpdateInProgress checks if PodClique is under an auto-orchestrated update.
-func IsPCLQAutoUpdateInProgress(pclq *grovecorev1alpha1.PodClique) bool {
+// IsPCLQRollingUpdateInProgress checks if PodClique is under a rolling update.
+func IsPCLQRollingUpdateInProgress(pclq *grovecorev1alpha1.PodClique) bool {
 	return pclq.Status.UpdateProgress != nil && pclq.Status.UpdateProgress.UpdateEndedAt == nil
 }
 
