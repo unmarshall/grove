@@ -147,6 +147,30 @@ func TestApplySubStep(t *testing.T) {
 				{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 5}},
 			},
 		},
+		{
+			// A re-update mid-update left a frontend-only intermediate anchor v1 {frontend:1} whose
+			// PCSGReplicaIndices map is nil, alongside the original v0 anchor {frontend:1, inference:[0]}. The
+			// v2 sub-step opens the anchor and drains inference [0], so the drain must skip the v1 anchor that
+			// carries no inference rather than write into its nil map. v0 drains to empty and is removed, the
+			// v1 anchor is left untouched, and the new v2 anchor holds frontend 1 and inference [0].
+			description: "an anchor sub-step draining a PCSG skips an old anchor that carries no PCSG indices",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				{Epoch: "40", PodCliqueSetGenerationHash: "v0", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 1}, PCSGReplicaIndices: map[string][]int32{"inference": {0}}},
+				{Epoch: "50", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 1}},
+			},
+			mvu: &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 1}, pcsgs: map[string]int32{"inference": 1}},
+			ss: subStep{
+				epoch:                     "200",
+				opensAnchor:               true,
+				anchorPCSGReplicaIndices:  map[string][]int32{"inference": {0}},
+				drainStandalonePCLQCounts: map[string]int32{"frontend": 1},
+				drainPCSGReplicaIndices:   map[string][]int32{"inference": {0}},
+			},
+			want: []grovecorev1alpha1.PodGangEntry{
+				{Epoch: "50", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 1}},
+				{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 1}, PCSGReplicaIndices: map[string][]int32{"inference": {0}}},
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
