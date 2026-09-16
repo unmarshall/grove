@@ -82,7 +82,11 @@ func drainPCSGIndices(entries []grovecorev1alpha1.PodGangEntry, currentHash stri
 			if entries[i].PodCliqueSetGenerationHash == currentHash {
 				continue
 			}
-			entries[i].PCSGReplicaIndices[pcsgName] = slices.DeleteFunc(entries[i].PCSGReplicaIndices[pcsgName], drainSet.Has)
+			existing, ok := entries[i].PCSGReplicaIndices[pcsgName]
+			if !ok {
+				continue
+			}
+			entries[i].PCSGReplicaIndices[pcsgName] = slices.DeleteFunc(existing, drainSet.Has)
 		}
 	}
 }
