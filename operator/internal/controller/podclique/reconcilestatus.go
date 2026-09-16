@@ -113,7 +113,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 // mutateCurrentHashes updates the PodClique's current template and generation hashes when updates are complete
 func mutateCurrentHashes(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique) error {
 	if componentutils.IsPCLQRollingUpdateInProgress(pclq) || pclq.Status.UpdatedReplicas != pclq.Status.Replicas {
-		logger.Info("PodClique is currently updating, cannot set PodCliqueSet CurrentGenerationHash yet")
+		logger.V(1).Info("PodClique is currently updating, cannot set PodCliqueSet CurrentGenerationHash yet")
 		return nil
 	}
 	if pclq.Status.UpdateProgress == nil {

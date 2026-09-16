@@ -69,6 +69,12 @@ type subStep struct {
 	drainPCSGReplicaIndices map[string][]int32
 }
 
+// String renders the sub-step in a compact single line form for tracing.
+func (s subStep) String() string {
+	return fmt.Sprintf("subStep(epoch=%s opensAnchor=%t anchorPCSG=%v subsumePCLQ=%v subsumeAnchorEpoch=%s tailPCSG=%v drainPCLQ=%v drainPCSG=%v dependsOn=%v)",
+		s.epoch, s.opensAnchor, s.anchorPCSGReplicaIndices, s.subsumeStandalonePCLQCounts, s.subsumeAnchorEpoch, s.tailPCSGReplicaIndices, s.drainStandalonePCLQCounts, s.drainPCSGReplicaIndices, s.dependsOn)
+}
+
 // stepPlan is the step-level decomposition of a coherent update, computed once per reconcile from the
 // live replica counts and the frozen MinAvailable. A coherent update rolls each component over
 // numAnchorBearingSteps anchor-bearing steps plus a single leftover step. The planner reads this to
@@ -83,6 +89,12 @@ type stepPlan struct {
 	// leftover is how many of each component remain after all anchor-bearing steps, keyed by component
 	// name, drained by the single leftover step.
 	leftover map[string]int32
+}
+
+// String renders the step plan in a compact single line form for tracing.
+func (p stepPlan) String() string {
+	return fmt.Sprintf("stepPlan(numAnchorBearingSteps=%d anchorBearingStepTarget=%v leftover=%v)",
+		p.numAnchorBearingSteps, p.anchorBearingStepTarget, p.leftover)
 }
 
 // subStepPlanner plans the next sub-step of a coherent update for one PCS replica. It is built once per
@@ -189,6 +201,12 @@ type planPosition struct {
 	// mostRecentAnchorEpoch is the epoch of the most recent current-hash anchor entry, which tail and
 	// leftover sub-steps subsume their standalone pods into. It is empty when no anchor entry exists yet.
 	mostRecentAnchorEpoch string
+}
+
+// String renders the plan position in a compact single line form for tracing.
+func (p planPosition) String() string {
+	return fmt.Sprintf("planPosition(currentHashCount=%v anchorBearingStepsDone=%d currentAnchorStepCount=%v leftoverCount=%v mostRecentAnchorEpoch=%s)",
+		p.currentHashCountByComponent, p.anchorBearingStepsDone, p.currentAnchorStepCountByComponent, p.leftoverCountByComponent, p.mostRecentAnchorEpoch)
 }
 
 // ascertainPlanPosition decodes how far the step plan has been driven for one PCS replica from the

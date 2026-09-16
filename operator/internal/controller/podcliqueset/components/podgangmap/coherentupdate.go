@@ -17,6 +17,7 @@ package podgangmap
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -49,6 +50,7 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 
 	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, liveReplicas)
 	pos := planner.ascertainPlanPosition()
+	syncSnap.logger.V(1).Info("Computed coherent step plan and position", "pcsReplicaIndex", pcsReplicaIndex, "plan", planner.plan.String(), "position", pos.String())
 
 	ss, err := planner.next(pos)
 	if err != nil {
@@ -57,19 +59,42 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 	// A nil sub-step means every in-scope component is committed to the current hash, so nothing remains to
 	// emit and the entries are returned unchanged.
 	if ss == nil {
+		syncSnap.logger.V(1).Info("No coherent update sub-step to emit, in-scope components committed to the current generation", "pcsReplicaIndex", pcsReplicaIndex)
 		return pgm.Spec.Entries, nil
 	}
 
 	// Hold the advance when the gate is not met, so the current sub-step keeps converging before the next
 	// one takes more Pods down.
-	canEmit, err := r.canEmitNextSubStep(ctx, planner, pos, standalonePCLQByComponent, pcsgByComponent)
+	canEmit, holdReason, err := r.canEmitNextSubStep(ctx, planner, pos, standalonePCLQByComponent, pcsgByComponent)
 	if err != nil {
 		return nil, err
 	}
 	if !canEmit {
+		syncSnap.logger.Info("Holding coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "reason", holdReason)
 		return pgm.Spec.Entries, nil
 	}
-	return planner.applySubStep(*ss)
+	syncSnap.logger.V(1).Info("Emitting coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "subStep", ss.String())
+	applied, err := planner.applySubStep(*ss)
+	if err != nil {
+		return nil, err
+	}
+	syncSnap.logger.V(1).Info("Applied coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "entries", formatPodGangEntries(applied))
+	return applied, nil
+}
+
+// formatPodGangEntries renders PodGangMap entries in a compact one per entry form for tracing.
+func formatPodGangEntries(entries []grovecorev1alpha1.PodGangEntry) []string {
+	out := make([]string, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		anchorIndex := "nil"
+		if entry.AnchorIndex != nil {
+			anchorIndex = strconv.Itoa(int(*entry.AnchorIndex))
+		}
+		out = append(out, fmt.Sprintf("%s gen=%s epoch=%s ai=%s pclq=%v pcsg=%v",
+			entry.Role, entry.PodCliqueSetGenerationHash, entry.Epoch, anchorIndex, entry.PodCliques, entry.PCSGReplicaIndices))
+	}
+	return out
 }
 
 // inScopeStandalonePCLQsByComponent indexes the standalone PodCliques under a coherent update for one PCS
@@ -107,19 +132,22 @@ func (s *syncSnapshot) inScopePCSGsByComponent(pcsReplicaIndex int) (map[string]
 // canEmitNextSubStep reports whether the sub-step gate holds for one PCS replica, so the next sub-step may
 // be emitted. It checks that the most recent current-hash batch is ready, then that the standalone Pods
 // subsumed so far are ready, then that no in-scope component is below its MaxUnavailable budget. The first
-// check that fails holds the advance.
-func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, pos planPosition, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (bool, error) {
+// check that fails holds the advance, and its name is returned as the hold reason for tracing.
+func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, pos planPosition, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (canEmit bool, holdReason string, err error) {
 	currentBatchReady, err := r.currentBatchReady(ctx, planner.pcs, planner.pcsReplicaIndex, planner.entries)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if !currentBatchReady {
-		return false, nil
+		return false, "currentBatchReady=false", nil
 	}
 	if !subsumedPodsReady(standalonePCLQByComponent, pos) {
-		return false, nil
+		return false, "subsumedPodsReady=false", nil
 	}
-	return maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.liveReplicas, planner.maxUnavailableByComponent), nil
+	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.liveReplicas, planner.maxUnavailableByComponent) {
+		return false, "maxUnavailableBudgetSatisfied=false", nil
+	}
+	return true, "", nil
 }
 
 // currentBatchReady reports whether every PodGang carrying the most recent current-hash epoch has become

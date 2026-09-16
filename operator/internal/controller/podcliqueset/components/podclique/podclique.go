@@ -69,7 +69,7 @@ func New(client client.Client, scheme *runtime.Scheme, eventRecorder record.Even
 
 // GetExistingResourceNames returns the names of all the existing resources that the PodClique Operator manages.
 func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Logger, pcsObjMeta metav1.ObjectMeta) ([]string, error) {
-	logger.Info("Looking for existing PodCliques")
+	logger.V(1).Info("Looking for existing PodCliques")
 	pclqPartialObjMetaList, err := k8sutils.ListExistingPartialObjectMetadata(ctx,
 		r.client,
 		grovecorev1alpha1.SchemeGroupVersion.WithKind("PodClique"),
@@ -273,7 +273,7 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsObjectMeta
 
 // doCreateOrUpdate creates or updates a single PodClique resource.
 func (r _resource) doCreateOrUpdate(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplica int32, pgm *grovecorev1alpha1.PodGangMap, pclqObjectKey client.ObjectKey, pclqExists bool) error {
-	logger.Info("Running CreateOrUpdate PodClique", "pclqObjectKey", pclqObjectKey)
+	logger.V(1).Info("Running CreateOrUpdate PodClique", "pclqObjectKey", pclqObjectKey)
 	pclq := emptyPodClique(pclqObjectKey)
 	pcsObjKey := client.ObjectKeyFromObject(pcs)
 
@@ -290,7 +290,7 @@ func (r _resource) doCreateOrUpdate(ctx context.Context, logger logr.Logger, pcs
 	}
 
 	r.eventRecorder.Eventf(pcs, corev1.EventTypeNormal, constants.ReasonPodCliqueCreateOrUpdateSuccessful, "PodClique %v created or updated successfully", pclqObjectKey)
-	logger.Info("triggered create or update of PodClique for PodCliqueSet", "pcs", pcsObjKey, "pclqObjectKey", pclqObjectKey, "result", opResult)
+	logger.V(1).Info("triggered create or update of PodClique for PodCliqueSet", "pcs", pcsObjKey, "pclqObjectKey", pclqObjectKey, "result", opResult)
 	return nil
 }
 
