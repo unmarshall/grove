@@ -310,6 +310,14 @@ func TestReconcileStandalonePCLQDistributionEarlyReturn(t *testing.T) {
 				),
 			},
 		},
+		{
+			name: "requeues while the under-update replica's PodClique template has not propagated",
+			ss: &syncSnapshot{
+				pcs: pcsCoherentUpdating(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithHash("old-hash"), cliqueName: testCliqueName,
+				expectedPodTemplateHash: "new-hash",
+				pgm:                     pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -589,6 +597,25 @@ func pclqWithReplicas(replicas int32) *grovecorev1alpha1.PodClique {
 		ObjectMeta: metav1.ObjectMeta{Name: testCliqueName, Namespace: testNamespace},
 		Spec:       grovecorev1alpha1.PodCliqueSpec{Replicas: replicas},
 	}
+}
+
+// pclqWithHash returns a standalone PodClique carrying the given pod-template-hash label.
+func pclqWithHash(hash string) *grovecorev1alpha1.PodClique {
+	return testutils.NewPodCliqueBuilder(testPCSName, "uid", testCliqueName, testNamespace, int32(testPCSReplicaIndex)).
+		WithReplicas(1).
+		WithLabels(map[string]string{apicommon.LabelPodTemplateHash: hash}).
+		Build()
+}
+
+// pcsCoherentUpdating returns a Coherent-strategy PodCliqueSet with an in-progress update whose
+// CurrentlyUpdating names testPCSReplicaIndex, so IsPCSReplicaUnderCoherentUpdate is true for it.
+func pcsCoherentUpdating() *grovecorev1alpha1.PodCliqueSet {
+	return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, "uid").
+		WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}).
+		WithUpdateProgress(&grovecorev1alpha1.PodCliqueSetUpdateProgress{
+			UpdateStartedAt:   metav1.Now(),
+			CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: int32(testPCSReplicaIndex)}},
+		}).Build()
 }
 
 // listPodsForPodGang lists pods in the test namespace carrying the given PodGang label.
