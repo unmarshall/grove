@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // prepareSyncFlow computes the required state for synchronizing PodGang resources.
@@ -692,8 +693,8 @@ func (r _resource) createOrUpdatePodGang(ctx context.Context, ss *syncState, pgI
 		Name:      pgInfo.fqn,
 	}
 	pg := emptyPodGang(pgObjectKey)
-	ss.logger.Info("CreateOrPatch PodGang", "objectKey", pgObjectKey)
-	_, err := k8sutils.CreateOrPatchSpec(ctx, r.client, pg, func() error {
+	ss.logger.V(1).Info("Running CreateOrPatch for PodGang", "objectKey", pgObjectKey)
+	opResult, err := k8sutils.CreateOrPatchSpec(ctx, r.client, pg, func() error {
 		return r.buildResource(ss.pcs, pgInfo, pg)
 	})
 	if err != nil {
@@ -713,8 +714,10 @@ func (r _resource) createOrUpdatePodGang(ctx context.Context, ss *syncState, pgI
 		}
 	}
 
-	r.eventRecorder.Eventf(ss.pcs, corev1.EventTypeNormal, constants.ReasonPodGangCreateOrUpdateSuccessful, "Created/Updated PodGang %v", pgObjectKey)
-	ss.logger.Info("Triggered CreateOrPatch of PodGang", "objectKey", pgObjectKey)
+	if opResult != controllerutil.OperationResultNone {
+		r.eventRecorder.Eventf(ss.pcs, corev1.EventTypeNormal, constants.ReasonPodGangCreateOrUpdateSuccessful, "Created/Updated PodGang %v", pgObjectKey)
+		ss.logger.Info("Created or updated PodGang", "objectKey", pgObjectKey, "result", opResult)
+	}
 	return nil
 }
 
