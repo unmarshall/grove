@@ -84,7 +84,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	// Completion is readiness-aware. End the update only when the desired number of replicas are fully
 	// updated and Ready, so a rollout never completes while replacements are not yet available.
 	if uw.numUpdatedReadyReplicas == desiredNumReplicas {
-		return r.markRollingUpdateEnd(ctx, logger, sc.pcsg)
+		return r.markUpdateEnd(ctx, logger, sc.pcsg)
 	}
 
 	// Order old-configuration replicas worst-off first: pending, then unavailable, then Ready. Each
@@ -139,8 +139,8 @@ func rollingUpdateConfigForPCSG(sc *syncSnapshot) *grovecorev1alpha1.RollingUpda
 	return sc.pcsgConfig.RollingUpdate
 }
 
-// markRollingUpdateEnd finalizes the rolling update by setting the end timestamp.
-func (r _resource) markRollingUpdateEnd(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) error {
+// markUpdateEnd finalizes the update by setting the end timestamp.
+func (r _resource) markUpdateEnd(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) error {
 	patch := client.MergeFrom(pcsg.DeepCopy())
 
 	pcsg.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
