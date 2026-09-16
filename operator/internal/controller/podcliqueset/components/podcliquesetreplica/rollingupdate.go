@@ -148,7 +148,7 @@ func (r _resource) patchUpdateProgressStatus(ctx context.Context, logger logr.Lo
 			"could not patch update progress",
 		)
 	}
-	logger.Info("Updated the PodCliqueSet status with update progress")
+	logger.V(1).Info("Updated the PodCliqueSet status with update progress")
 	return nil
 }
 

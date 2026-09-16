@@ -51,7 +51,7 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pclq
 			return r.recordIncompleteReconcile(ctx, logger, pclq, &stepResult)
 		}
 	}
-	log.Info("Finished spec reconciliation flow", "PodClique", client.ObjectKeyFromObject(pclq))
+	log.V(1).Info("Finished spec reconciliation flow", "PodClique", client.ObjectKeyFromObject(pclq))
 	return ctrlcommon.ContinueReconcile()
 }
 
@@ -121,7 +121,7 @@ func shouldCheckPendingUpdatesForPCLQ(logger logr.Logger, pcs *grovecorev1alpha1
 		return true, nil
 	}
 	if len(pcs.Status.UpdateProgress.CurrentlyUpdating) == 0 {
-		logger.Info("PodCliqueSet update is active but no replica is currently selected for update. Skipping processing update for this PodClique")
+		logger.V(1).Info("PodCliqueSet update is active but no replica is currently selected for update. Skipping processing update for this PodClique")
 		return false, nil
 	}
 
@@ -132,7 +132,7 @@ func shouldCheckPendingUpdatesForPCLQ(logger logr.Logger, pcs *grovecorev1alpha1
 		return false, fmt.Errorf("could not determine PodCliqueSet index for this PodClique %v. Required label %s is missing", client.ObjectKeyFromObject(pclq), apicommon.LabelPodCliqueSetReplicaIndex)
 	}
 	if pcsReplicaIndexStr != strconv.Itoa(int(pcsReplicaInUpdating)) {
-		logger.Info("PodCliqueSet is currently under update. Skipping processing update for this PodClique as it does not belong to the PodCliqueSet Index currently being updated", "currentlyUpdatingPCSIndex", pcsReplicaInUpdating, "pcsIndexForPCLQ", pcsReplicaIndexStr)
+		logger.V(1).Info("PodCliqueSet is currently under update. Skipping processing update for this PodClique as it does not belong to the PodCliqueSet Index currently being updated", "currentlyUpdatingPCSIndex", pcsReplicaInUpdating, "pcsIndexForPCLQ", pcsReplicaIndexStr)
 		return false, nil
 	}
 
@@ -206,10 +206,10 @@ func (r *Reconciler) syncPCLQResources(ctx context.Context, logger logr.Logger, 
 		if err != nil {
 			return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("error getting operator for kind: %s", kind), err)
 		}
-		logger.Info("Syncing PodClique resources", "kind", kind)
+		logger.V(1).Info("Syncing PodClique resources", "kind", kind)
 		if err = operator.Sync(ctx, logger, pclq); err != nil {
 			if shouldRequeue := ctrlutils.ShouldRequeueAfter(err) || ctrlutils.ShouldContinueReconcileAndRequeue(err); shouldRequeue {
-				logger.Info("retrying sync due to components", "kind", kind, "syncRetryInterval", constants.ComponentSyncRetryInterval, "message", err.Error())
+				logger.V(1).Info("retrying sync due to components", "kind", kind, "syncRetryInterval", constants.ComponentSyncRetryInterval, "message", err.Error())
 				return ctrlcommon.ReconcileAfter(constants.ComponentSyncRetryInterval, err.Error())
 			}
 			logger.Error(err, "failed to sync PodClique resources", "kind", kind)
@@ -231,7 +231,7 @@ func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.L
 		logger.Error(err, "failed to patch status.ObservedGeneration")
 		return ctrlcommon.ReconcileWithErrors("error updating observed generation", err)
 	}
-	logger.Info("patched status.ObservedGeneration", "ObservedGeneration", pclq.Generation)
+	logger.V(1).Info("patched status.ObservedGeneration", "ObservedGeneration", pclq.Generation)
 	return ctrlcommon.ContinueReconcile()
 }
 

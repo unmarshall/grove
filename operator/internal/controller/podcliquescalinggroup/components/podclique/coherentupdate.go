@@ -48,6 +48,7 @@ func (r _resource) reconcileReplicasToCommittedPodGangs(ctx context.Context, log
 	if err := r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(ss.pcsg), deleteTasks); err != nil {
 		return err
 	}
+	logger.Info("Recreating PodCliqueScalingGroup replicas onto their committed PodGang", "pcsg", client.ObjectKeyFromObject(ss.pcsg), "replicaIndices", replicaIndicesToRecreate)
 	return groveerr.New(
 		groveerr.ErrCodeContinueReconcileAndRequeue,
 		component.OperationSync,
