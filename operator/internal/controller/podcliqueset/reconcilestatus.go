@@ -201,7 +201,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(logger logr.Logger, pcs 
 		}
 	}
 
-	logger.Info(fmt.Sprintf("Calculated PCS replica and update progress stats for %s: available=%d updated=%d PCLQs=%d/%d PCSGs=%d/%d",
+	logger.V(1).Info(fmt.Sprintf("Calculated PCS replica and update progress stats for %s: available=%d updated=%d PCLQs=%d/%d PCSGs=%d/%d",
 		client.ObjectKeyFromObject(pcs), stats.availableReplicas, stats.updatedReplicas,
 		stats.updatedPCLQs, stats.totalPCLQs,
 		stats.updatedPCSGs, stats.totalPCSGs))

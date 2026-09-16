@@ -54,7 +54,7 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pcs 
 			return r.recordIncompleteReconcile(ctx, logger, pcs, &stepResult)
 		}
 	}
-	logger.Info("Finished spec reconciliation flow", "PodCliqueSet", client.ObjectKeyFromObject(pcs))
+	logger.V(1).Info("Finished spec reconciliation flow", "PodCliqueSet", client.ObjectKeyFromObject(pcs))
 	return ctrlcommon.ContinueReconcile()
 }
 
@@ -210,7 +210,7 @@ func (r *Reconciler) syncKindGroup(ctx context.Context, logger logr.Logger, pcs 
 		tasks = append(tasks, utils.Task{
 			Name: fmt.Sprintf("SyncKind-%s", kind),
 			Fn: func(ctx context.Context) error {
-				logger.Info("Syncing PodCliqueSet resource", "kind", kind, "group", groupIdx)
+				logger.V(1).Info("Syncing PodCliqueSet resource", "kind", kind, "group", groupIdx)
 				err := operator.Sync(ctx, logger, pcs)
 
 				// One lock + defer covers all branches below; requeuedKinds /
@@ -228,7 +228,7 @@ func (r *Reconciler) syncKindGroup(ctx context.Context, logger logr.Logger, pcs 
 					// caller bubbles requeuedKinds up and schedules one follow-up
 					// reconcile after the whole sync sweep completes.
 					requeuedKinds = append(requeuedKinds, kind)
-					logger.Info("component requested post-sync requeue", "kind", kind, "message", err.Error())
+					logger.V(1).Info("component requested post-sync requeue", "kind", kind, "message", err.Error())
 					return nil
 				}
 				if ctrlutils.ShouldRequeueAfter(err) {
@@ -274,7 +274,7 @@ func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.L
 		logger.Error(err, "failed to patch status.ObservedGeneration")
 		return ctrlcommon.ReconcileWithErrors("error updating observed generation", err)
 	}
-	logger.Info("patched status.ObservedGeneration", "ObservedGeneration", pcs.Generation)
+	logger.V(1).Info("patched status.ObservedGeneration", "ObservedGeneration", pcs.Generation)
 	return ctrlcommon.ContinueReconcile()
 }
 
