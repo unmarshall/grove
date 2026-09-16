@@ -68,6 +68,7 @@ const (
 	errCodeGetPodGangMap                                 grovecorev1alpha1.ErrorCode = "ERR_GET_PODGANGMAP"
 	errCodeSyncPCSGPodIndexOffsets                       grovecorev1alpha1.ErrorCode = "ERR_SYNC_PCSG_POD_INDEX_OFFSETS"
 	errCodeCreatePCSGExpectationsStoreKey                grovecorev1alpha1.ErrorCode = "ERR_CREATE_PODCLIQUESCALINGGROUP_EXPECTATIONS_STORE_KEY"
+	errCodeReconcileReplicaPlacement                     grovecorev1alpha1.ErrorCode = "ERR_RECONCILE_PCSG_REPLICA_PLACEMENT"
 )
 
 var (

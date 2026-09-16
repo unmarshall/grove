@@ -62,7 +62,7 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, eventRecorder, r.eventRecorder)
 }
 
-func TestMarkRollingUpdateEndReturnsRequeueAfterPatch(t *testing.T) {
+func TestMarkUpdateEndReturnsRequeueAfterPatch(t *testing.T) {
 	pcsg := testutils.NewPodCliqueScalingGroupBuilder("test-pcsg", "test-ns", "test-pcs", 0).Build()
 	pcsg.Status.UpdateProgress = &grovecorev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateStartedAt: metav1.Now()}
 	cl := testutils.NewTestClientBuilder().
@@ -71,7 +71,7 @@ func TestMarkRollingUpdateEndReturnsRequeueAfterPatch(t *testing.T) {
 		Build()
 	r := _resource{client: cl}
 
-	err := r.markRollingUpdateEnd(t.Context(), logr.Discard(), pcsg)
+	err := r.markUpdateEnd(t.Context(), logr.Discard(), pcsg)
 
 	require.Error(t, err)
 	var groveError *groveerr.GroveError
