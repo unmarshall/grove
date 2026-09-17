@@ -84,6 +84,7 @@ func Test_CU2_CoherentUpdateStandaloneClique(t *testing.T) {
 	tests.Logger.Info("4. Verify completion, convergence, and readiness")
 	assertUpdateInProgressCleared(tc)
 	assertGenerationHashConverged(tc)
+	assertPodGangMapSingleGeneration(t, tc)
 	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
 		t.Fatalf("pods did not become Ready after the coherent update: %v", err)
 	}
@@ -118,6 +119,12 @@ func Test_CU3_CoherentUpdatePCSGMemberClique(t *testing.T) {
 	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
 		t.Fatalf("pods did not become Ready after the coherent update: %v", err)
 	}
+
+	tests.Logger.Info("5. Verify the frontend anchor, out of the update scope, reconverged to a single generation")
+	assertPodGangMapSingleGeneration(t, tc)
+
+	tests.Logger.Info("6. Scale the frontend standalone clique from 2 to 3 and verify the new pod is created")
+	tc.ScalePodCliqueAndWait(coherentWorkloadName+"-0-frontend", 3, coherentExpectedPods+1, 0)
 }
 
 // Test_CU4_CoherentUpdateStandaloneAndPCSGAnchorOnly verifies that a coherent update of both the standalone
@@ -202,20 +209,27 @@ func Test_CU5_CoherentUpdateStandaloneAndPCSGWithLeftover(t *testing.T) {
 }
 
 // Test_CU6_CoherentUpdateBlocksScaling verifies that the validating webhooks reject a replica change on a
-// PodClique and on a PodCliqueScalingGroup, whether made directly or through the scale subresource, while
-// its PCS replica is under a coherent update, and allow it once the update completes. The readiness-delay
-// stage keeps the update in progress long enough to attempt the scales.
+// PodClique and on a PodCliqueScalingGroup, whether made directly or through the scale subresource, while a
+// coherent update is in progress on the owning PodCliqueSet, and allow it once the update completes. Scaling
+// is blocked on every replica for the update's duration, so with two replicas the test asserts both the
+// updating replica 0 and the idle replica 1 are rejected. The readiness-delay stage keeps the update in
+// progress long enough to attempt the scales.
 func Test_CU6_CoherentUpdateBlocksScaling(t *testing.T) {
 	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
 	tc, cleanup, _ := setupTest(t, testConfig{
 		workloadName: coherentWorkloadName,
 		workloadYAML: coherentWorkloadYAML,
-		workerNodes:  10,
+		// Two PCS replicas need 12 pods, and each 80Mi pod takes a whole 150Mi KWOK node, so the test needs
+		// at least 12 schedulable nodes.
+		workerNodes:  14,
 		expectedPods: coherentExpectedPods,
 	})
 	defer cleanup()
 
-	tests.Logger.Info("2. Delay pod readiness so the coherent update stays in progress")
+	tests.Logger.Info("2. Scale the PodCliqueSet to two replicas and verify 12 pods")
+	tc.ScalePCSAndWait(coherentWorkloadName, 2, coherentExpectedPods*2, 0)
+
+	tests.Logger.Info("3. Delay pod readiness so the coherent update stays in progress")
 	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
 		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
 	}
@@ -225,7 +239,7 @@ func Test_CU6_CoherentUpdateBlocksScaling(t *testing.T) {
 		}
 	}()
 
-	tests.Logger.Info("3. Trigger a coherent update and wait until the replica is updating")
+	tests.Logger.Info("4. Trigger a coherent update and wait until replica 0 is updating")
 	if err := triggerPodCliqueUpdate(tc, "frontend"); err != nil {
 		t.Fatalf("failed to trigger update of frontend: %v", err)
 	}
@@ -233,29 +247,31 @@ func Test_CU6_CoherentUpdateBlocksScaling(t *testing.T) {
 		t.Fatalf("replica 0 did not start updating: %v", err)
 	}
 
-	tests.Logger.Info("4. Attempt to scale the PodClique and the PodCliqueScalingGroup while updating, expecting rejection")
-	pclqScaleErr := scalePodCliqueInPCS(tc, "frontend", 3)
-	if assert.Error(t, pclqScaleErr, "a direct PodClique replica change must be rejected while a coherent update is in progress") {
-		assert.Contains(t, pclqScaleErr.Error(), "coherent update is in progress")
-	}
-	pcsgScaleErr := tc.ScalePCSG(pcsgFQN(tc, "inference"), 3)
-	if assert.Error(t, pcsgScaleErr, "a PodCliqueScalingGroup scale subresource change must be rejected while a coherent update is in progress") {
-		assert.Contains(t, pcsgScaleErr.Error(), "coherent update is in progress")
+	tests.Logger.Info("5. A replica change is rejected on both the updating replica 0 and the idle replica 1")
+	for _, replicaIndex := range []int{0, 1} {
+		pclqScaleErr := tc.ScalePodClique(fmt.Sprintf("%s-%d-frontend", coherentWorkloadName, replicaIndex), 3)
+		if assert.Errorf(t, pclqScaleErr, "a direct PodClique replica change on replica %d must be rejected while a coherent update is in progress", replicaIndex) {
+			assert.Contains(t, pclqScaleErr.Error(), "coherent update is in progress")
+		}
+		pcsgScaleErr := tc.ScalePCSG(pcsgFQNForReplica(tc, "inference", replicaIndex), 3)
+		if assert.Errorf(t, pcsgScaleErr, "a PodCliqueScalingGroup scale change on replica %d must be rejected while a coherent update is in progress", replicaIndex) {
+			assert.Contains(t, pcsgScaleErr.Error(), "coherent update is in progress")
+		}
 	}
 
-	tests.Logger.Info("5. Remove the readiness delay and let the update complete")
+	tests.Logger.Info("6. Remove the readiness delay and let the update complete")
 	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
 		t.Fatalf("failed to delete readiness-delay KWOK stage: %v", err)
 	}
-	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+	if err := waitForRollingUpdateComplete(tc, 2); err != nil {
 		t.Fatalf("coherent update did not complete: %v", err)
 	}
 
-	tests.Logger.Info("6. Scaling the PodClique and the PodCliqueScalingGroup is allowed once the update has completed")
-	if err := scalePodCliqueInPCS(tc, "frontend", 3); err != nil {
+	tests.Logger.Info("7. Scaling the PodClique and the PodCliqueScalingGroup is allowed once the update has completed")
+	if err := tc.ScalePodClique(fmt.Sprintf("%s-0-frontend", coherentWorkloadName), 3); err != nil {
 		t.Fatalf("scaling the PodClique must be allowed after the coherent update completes: %v", err)
 	}
-	if err := tc.ScalePCSG(pcsgFQN(tc, "inference"), 3); err != nil {
+	if err := tc.ScalePCSG(pcsgFQNForReplica(tc, "inference", 0), 3); err != nil {
 		t.Fatalf("scaling the PodCliqueScalingGroup must be allowed after the coherent update completes: %v", err)
 	}
 }
@@ -314,10 +330,59 @@ func Test_CU7_CoherentBackToBackUpdates(t *testing.T) {
 	}
 
 	tests.Logger.Info("7. Verify the PodGangMap converged to a single generation with no stale intermediate entries")
-	newHash := getPCSGenerationHash(t, tc)
-	for _, entry := range getPodGangMapEntries(t, tc, 0) {
-		assert.Equalf(t, newHash, entry.PodCliqueSetGenerationHash,
-			"PodGang entry (role %s, epoch %s) is at a stale generation hash", entry.Role, entry.Epoch)
+	assertPodGangMapSingleGeneration(t, tc)
+}
+
+// Test_CU8_CoherentUpdateResumesAfterOperatorRestart verifies that when the Grove operator crashes mid
+// coherent update it resumes from the persisted PodGangMap and status and drives the update to completion.
+// The readiness-delay stage keeps the update in flight while the operator pod is deleted and rescheduled.
+func Test_CU8_CoherentUpdateResumesAfterOperatorRestart(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Delay pod readiness so the update stays in flight")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+			t.Errorf("failed to delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Trigger a coherent update of the frontend PodClique and wait until the replica is updating")
+	if err := triggerPodCliqueUpdate(tc, "frontend"); err != nil {
+		t.Fatalf("failed to trigger update of frontend: %v", err)
+	}
+	if err := waitForOrdinalUpdating(tc, 0); err != nil {
+		t.Fatalf("replica 0 did not start updating: %v", err)
+	}
+
+	tests.Logger.Info("4. Crash the operator mid-update by deleting its pod and wait for a fresh replica")
+	if err := restartOperator(tc); err != nil {
+		t.Fatalf("operator did not come back after restart: %v", err)
+	}
+
+	tests.Logger.Info("5. Remove the readiness delay so the resumed update can converge")
+	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+		t.Fatalf("failed to delete readiness-delay KWOK stage: %v", err)
+	}
+
+	tests.Logger.Info("6. Wait for the resumed update to complete and verify convergence and readiness")
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete after the operator restart: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertGenerationHashConverged(tc)
+	assertPodGangMapSingleGeneration(t, tc)
+	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
+		t.Fatalf("pods did not become Ready after the resumed coherent update: %v", err)
 	}
 }
 

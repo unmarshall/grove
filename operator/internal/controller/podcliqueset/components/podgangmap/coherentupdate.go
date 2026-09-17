@@ -17,7 +17,6 @@ package podgangmap
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -49,18 +48,22 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 	}
 
 	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, liveReplicas)
-	pos := planner.ascertainPlanPosition()
+	pos, err := planner.ascertainPlanPosition()
+	if err != nil {
+		return nil, err
+	}
 	syncSnap.logger.V(1).Info("Computed coherent step plan and position", "pcsReplicaIndex", pcsReplicaIndex, "plan", planner.plan.String(), "position", pos.String())
+	pcsCurrentGenerationHash := *syncSnap.pcs.Status.CurrentGenerationHash
 
 	ss, err := planner.next(pos)
 	if err != nil {
 		return nil, err
 	}
 	// A nil sub-step means every in-scope component is committed to the current hash, so nothing remains to
-	// emit and the entries are returned unchanged.
+	// emit. Reconverge any entry drained of its in-scope content to the current generation before returning.
 	if ss == nil {
 		syncSnap.logger.V(1).Info("No coherent update sub-step to emit, in-scope components committed to the current generation", "pcsReplicaIndex", pcsReplicaIndex)
-		return pgm.Spec.Entries, nil
+		return advanceFullyDrainedEntries(clonePodGangEntries(pgm.Spec.Entries), pcsCurrentGenerationHash, planner.mvu), nil
 	}
 
 	// Hold the advance when the gate is not met, so the current sub-step keeps converging before the next
@@ -71,15 +74,48 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 	}
 	if !canEmit {
 		syncSnap.logger.Info("Holding coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "reason", holdReason)
-		return pgm.Spec.Entries, nil
+		return advanceFullyDrainedEntries(clonePodGangEntries(pgm.Spec.Entries), pcsCurrentGenerationHash, planner.mvu), nil
 	}
 	syncSnap.logger.V(1).Info("Emitting coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "subStep", ss.String())
 	applied, err := planner.applySubStep(*ss)
 	if err != nil {
 		return nil, err
 	}
+	applied = advanceFullyDrainedEntries(applied, pcsCurrentGenerationHash, planner.mvu)
 	syncSnap.logger.V(1).Info("Applied coherent update sub-step", "pcsReplicaIndex", pcsReplicaIndex, "entries", formatPodGangEntries(applied))
 	return applied, nil
+}
+
+// advanceFullyDrainedEntries reconverges the PodGangMap during a coherent update. It bumps an entry's
+// generation hash to the current hash once the entry holds no in-scope drainable content and is
+// non-empty, so each entry moves to the current generation as its in-scope content finishes draining
+// and the map is single-generation by the time the update completes. Empty entries are left for
+// removeEmptyEntries to drop, and entries still holding in-scope content keep their generation so the
+// engine keeps draining them.
+func advanceFullyDrainedEntries(entries []grovecorev1alpha1.PodGangEntry, pcsCurrentGenerationHash string, mvu *mvuTemplate) []grovecorev1alpha1.PodGangEntry {
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash == pcsCurrentGenerationHash || isPodGangEntryEmpty(entries[i]) || entryHoldsInScopeContent(entries[i], mvu) {
+			continue
+		}
+		entries[i].PodCliqueSetGenerationHash = pcsCurrentGenerationHash
+	}
+	return entries
+}
+
+// entryHoldsInScopeContent reports whether the entry still carries content for any in-scope component,
+// meaning the coherent roll has more to drain from it.
+func entryHoldsInScopeContent(entry grovecorev1alpha1.PodGangEntry, mvu *mvuTemplate) bool {
+	for cliqueName := range mvu.standalonePCLQs {
+		if entry.PodCliques[cliqueName] > 0 {
+			return true
+		}
+	}
+	for pcsgName := range mvu.pcsgs {
+		if len(entry.PCSGReplicaIndices[pcsgName]) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // formatPodGangEntries renders PodGangMap entries in a compact one per entry form for tracing.
@@ -87,12 +123,8 @@ func formatPodGangEntries(entries []grovecorev1alpha1.PodGangEntry) []string {
 	out := make([]string, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
-		anchorIndex := "nil"
-		if entry.AnchorIndex != nil {
-			anchorIndex = strconv.Itoa(int(*entry.AnchorIndex))
-		}
-		out = append(out, fmt.Sprintf("%s gen=%s epoch=%s ai=%s pclq=%v pcsg=%v",
-			entry.Role, entry.PodCliqueSetGenerationHash, entry.Epoch, anchorIndex, entry.PodCliques, entry.PCSGReplicaIndices))
+		out = append(out, fmt.Sprintf("%s gen=%s epoch=%s pclq=%v pcsg=%v",
+			entry.Role, entry.PodCliqueSetGenerationHash, entry.Epoch, entry.PodCliques, entry.PCSGReplicaIndices))
 	}
 	return out
 }

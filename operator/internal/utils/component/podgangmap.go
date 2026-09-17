@@ -128,19 +128,45 @@ func podGangEntryForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName stri
 	return nil, fmt.Errorf("no PodGangMap entry owns replica index %d of PodCliqueScalingGroup %q and no ScaleOut entry exists in PodGangMap %s", pcsgReplicaIndex, pcsgName, pgm.Name)
 }
 
-// AnchorPodGangEpoch returns the epoch of the AnchorIndex 0 anchor entry of the PodGangMap. Standalone
-// PodCliques always belong to this entry. It returns an error when no such anchor entry exists, a
-// contract violation that must be re-queued.
-// NOTE: When coherent-updates update strategy (GREP-393) is introduced then post coherent update it is possible
-// that there are more than one anchor entry. This function will have to be adapted to support that.
+// AnchorPodGangEpoch returns the epoch of the base anchor entry of the PodGangMap, the lowest-epoch
+// anchor, which carries the MinAvailable replicas that standalone Pods key off.
 func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
-	for i := range pgm.Spec.Entries {
-		entry := &pgm.Spec.Entries[i]
-		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entry.AnchorIndex != nil && *entry.AnchorIndex == 0 {
-			return entry.Epoch, nil
+	epoch, found, err := LowestEpochAnchorEpoch(pgm.Spec.Entries, nil)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no anchor entry exists in PodGangMap %s", pgm.Name)
+	}
+	return epoch, nil
+}
+
+// LowestEpochAnchorEpoch returns the epoch of the lowest-epoch Anchor entry, considering only entries at
+// pcsGenerationHash when it is non-nil, or all entries when it is nil. It returns found false when no such
+// anchor exists, and an error when an anchor epoch is not numeric.
+func LowestEpochAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
+	var (
+		lowestEpoch      string
+		found            bool
+		lowestEpochNanos int64
+	)
+	for i := range entries {
+		entry := entries[i]
+		if entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+			continue
+		}
+		if pcsGenerationHash != nil && entry.PodCliqueSetGenerationHash != *pcsGenerationHash {
+			continue
+		}
+		epochNanos, err := strconv.ParseInt(entry.Epoch, 10, 64)
+		if err != nil {
+			return "", false, fmt.Errorf("anchor entry has a non-numeric epoch %q: %w", entry.Epoch, err)
+		}
+		if !found || epochNanos < lowestEpochNanos {
+			found, lowestEpochNanos, lowestEpoch = true, epochNanos, entry.Epoch
 		}
 	}
-	return "", fmt.Errorf("no AnchorIndex 0 anchor entry exists in PodGangMap %s", pgm.Name)
+	return lowestEpoch, found, nil
 }
 
 // IndexPodGangEntriesByEpoch returns a map of the PodGangMap entries keyed by their epoch. Epoch is
