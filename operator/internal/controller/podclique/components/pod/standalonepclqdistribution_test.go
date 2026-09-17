@@ -54,25 +54,25 @@ func TestBuildDesiredCountByPodGang(t *testing.T) {
 	}{
 		{
 			name:     "single anchor carrying the clique",
-			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3})},
+			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 3})},
 			expected: map[string]int32{anchor0: 3},
 		},
 		{
 			name: "multiple anchors carrying the clique",
 			entries: []grovecorev1alpha1.PodGangEntry{
-				anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3}),
-				anchorEntryWithCliques(testAnchor1Epoch, 1, map[string]int32{testCliqueName: 2}),
+				anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 3}),
+				anchorEntryWithCliques(testAnchor1Epoch, map[string]int32{testCliqueName: 2}),
 			},
 			expected: map[string]int32{anchor0: 3, anchor1: 2},
 		},
 		{
 			name:     "entry without the clique is skipped",
-			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{"other": 3})},
+			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{"other": 3})},
 			expected: map[string]int32{},
 		},
 		{
 			name:     "entry with a zero count is skipped",
-			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 0})},
+			entries:  []grovecorev1alpha1.PodGangEntry{anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 0})},
 			expected: map[string]int32{},
 		},
 	}
@@ -288,14 +288,14 @@ func TestReconcileStandalonePCLQDistributionEarlyReturn(t *testing.T) {
 			name: "requeues when the PodGangMap carries no count for the clique but the clique wants replicas",
 			ss: &syncSnapshot{
 				pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(1), cliqueName: testCliqueName,
-				pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{"other-clique": 1})),
+				pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{"other-clique": 1})),
 			},
 		},
 		{
 			name: "requeues after repairing a labelless pod",
 			ss: &syncSnapshot{
 				pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(1), cliqueName: testCliqueName,
-				pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+				pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1})),
 				existingPCLQPods: []*corev1.Pod{labellessPod},
 			},
 			objects: []client.Object{labellessPod},
@@ -305,8 +305,8 @@ func TestReconcileStandalonePCLQDistributionEarlyReturn(t *testing.T) {
 			ss: &syncSnapshot{
 				pcs: pcs(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithReplicas(10), cliqueName: testCliqueName,
 				pgm: pgmWithEntries(
-					anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3}),
-					anchorEntryWithCliques(testAnchor1Epoch, 1, map[string]int32{testCliqueName: 3}),
+					anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 3}),
+					anchorEntryWithCliques(testAnchor1Epoch, map[string]int32{testCliqueName: 3}),
 				),
 			},
 		},
@@ -315,7 +315,7 @@ func TestReconcileStandalonePCLQDistributionEarlyReturn(t *testing.T) {
 			ss: &syncSnapshot{
 				pcs: pcsCoherentUpdating(), pcsReplicaIndex: testPCSReplicaIndex, pclq: pclqWithHash("old-hash"), cliqueName: testCliqueName,
 				expectedPodTemplateHash: "new-hash",
-				pgm:                     pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+				pgm:                     pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1})),
 			},
 		},
 	}
@@ -359,7 +359,7 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 3})),
+			pgm: pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 3})),
 		}
 
 		err := r.reconcileStandalonePCLQDistribution(context.Background(), logr.Discard(), ss)
@@ -376,7 +376,7 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1})),
 			existingPCLQPods: excess,
 		}
 
@@ -414,7 +414,7 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		r := _resource{client: cl, scheme: cl.Scheme(), schedRegistry: registry, eventRecorder: record.NewFakeRecorder(64), expectationsStore: expect.NewExpectationsStore()}
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
-			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1})),
+			pgm:              pgmWithEntries(anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1})),
 			existingPCLQPods: excess,
 		}
 
@@ -437,8 +437,8 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
 			pgm: pgmWithEntries(
-				anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1}),
-				anchorEntryWithCliques(testAnchor1Epoch, 1, map[string]int32{testCliqueName: 2}),
+				anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1}),
+				anchorEntryWithCliques(testAnchor1Epoch, map[string]int32{testCliqueName: 2}),
 			),
 			existingPCLQPods: live,
 		}
@@ -461,8 +461,8 @@ func TestReconcileStandalonePCLQDistributionCreateAndDelete(t *testing.T) {
 		ss := &syncSnapshot{
 			pcs: testPCS, pclq: pclq, pcsReplicaIndex: testPCSReplicaIndex, cliqueName: testCliqueName,
 			pgm: pgmWithEntries(
-				anchorEntryWithCliques(testAnchor0Epoch, 0, map[string]int32{testCliqueName: 1}),
-				anchorEntryWithCliques(testAnchor1Epoch, 1, map[string]int32{testCliqueName: 2}),
+				anchorEntryWithCliques(testAnchor0Epoch, map[string]int32{testCliqueName: 1}),
+				anchorEntryWithCliques(testAnchor1Epoch, map[string]int32{testCliqueName: 2}),
 			),
 			existingPCLQPods: live,
 		}
@@ -583,10 +583,9 @@ func TestBuildPerPodGangCreationTasks(t *testing.T) {
 }
 
 // anchorEntryWithCliques builds an Anchor PodGangEntry carrying the given standalone PodClique counts.
-func anchorEntryWithCliques(epoch string, anchorIndex int32, cliques map[string]int32) grovecorev1alpha1.PodGangEntry {
+func anchorEntryWithCliques(epoch string, cliques map[string]int32) grovecorev1alpha1.PodGangEntry {
 	return testutils.NewPodGangEntryBuilder("hash", epoch).
 		WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
-		WithAnchorIndex(anchorIndex).
 		WithPodCliques(cliques).
 		Build()
 }

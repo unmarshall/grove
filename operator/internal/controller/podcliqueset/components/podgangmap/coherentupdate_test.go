@@ -212,10 +212,10 @@ func TestCurrentBatchReady(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
 	}
-	currentHashAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 2}}
+	currentHashAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}
 
 	t.Run("no current-hash entry yet so nothing to wait on", func(t *testing.T) {
-		entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 2}}}
+		entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}}
 		r := _resource{client: testutils.NewTestClientBuilder().Build()}
 
 		ready, err := r.currentBatchReady(t.Context(), pcs, 0, entries)
@@ -249,11 +249,11 @@ func TestCurrentBatchReady(t *testing.T) {
 // are held unchanged or advanced.
 func TestBuildCoherentUpdateEntries(t *testing.T) {
 	pcsNameReplica := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
-	anchorV1 := grovecorev1alpha1.PodGangEntry{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 2}}
-	anchorV2 := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 2}}
+	anchorV1 := grovecorev1alpha1.PodGangEntry{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}
+	anchorV2 := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}
 
 	t.Run("no sub-step remains so the entries are unchanged", func(t *testing.T) {
-		fullyRolledAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 4}}
+		fullyRolledAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 4}}
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{fullyRolledAnchor}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, nil)
 		r := _resource{client: testutils.NewTestClientBuilder().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
@@ -364,5 +364,58 @@ func newCoherentTestSnapshot(pcsNameReplica apicommon.ResourceNameReplica, liveR
 		pcs:                              pcs,
 		mvuTemplate:                      &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": minAvailable}},
 		existingStandalonePCLQsByReplica: map[int][]grovecorev1alpha1.PodClique{0: {frontendPCLQ}},
+	}
+}
+
+// TestEntryHoldsInScopeContent checks the predicate that gates reconvergence, reporting whether an entry
+// still carries pods or replica indices for any component within the coherent update scope.
+func TestEntryHoldsInScopeContent(t *testing.T) {
+	mvu := &mvuTemplate{
+		standalonePCLQs: map[string]int32{"frontend": 1},
+		pcsgs:           map[string]int32{"inference": 1},
+	}
+	testCases := []struct {
+		description string
+		entry       grovecorev1alpha1.PodGangEntry
+		want        bool
+	}{
+		{"holds an in-scope standalone clique", grovecorev1alpha1.PodGangEntry{PodCliques: map[string]int32{"frontend": 2}}, true},
+		{"holds in-scope PCSG replica indices", grovecorev1alpha1.PodGangEntry{PCSGReplicaIndices: map[string][]int32{"inference": {0}}}, true},
+		{"holds only out-of-scope standalone content", grovecorev1alpha1.PodGangEntry{PodCliques: map[string]int32{"router": 3}}, false},
+		{"in-scope standalone at zero count holds nothing", grovecorev1alpha1.PodGangEntry{PodCliques: map[string]int32{"frontend": 0}}, false},
+		{"in-scope PCSG with empty indices holds nothing", grovecorev1alpha1.PodGangEntry{PCSGReplicaIndices: map[string][]int32{"inference": {}}}, false},
+		{"empty entry holds nothing", grovecorev1alpha1.PodGangEntry{}, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, entryHoldsInScopeContent(tc.entry, mvu))
+		})
+	}
+}
+
+// TestAdvanceFullyDrainedEntries covers the three reconvergence outcomes for an old-generation entry. An
+// entry drained of its in-scope content but still holding out-of-scope content advances to the current
+// generation, an entry still holding in-scope content keeps its generation, and an empty entry is left for
+// removeEmptyEntries to drop. frontend and inference are in scope, router is out of scope.
+func TestAdvanceFullyDrainedEntries(t *testing.T) {
+	mvu := &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 1}, pcsgs: map[string]int32{"inference": 1}}
+	entryAt := func(gen string, pclqs map[string]int32, pcsg map[string][]int32) grovecorev1alpha1.PodGangEntry {
+		return grovecorev1alpha1.PodGangEntry{Epoch: "50", PodCliqueSetGenerationHash: gen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: pclqs, PCSGReplicaIndices: pcsg}
+	}
+	testCases := []struct {
+		description string
+		entry       grovecorev1alpha1.PodGangEntry
+		wantGen     string
+	}{
+		{"advances an old-gen entry drained of in-scope content but holding out-of-scope content", entryAt(coherentTestOldGen, map[string]int32{"router": 2}, nil), coherentTestCurrentGen},
+		{"keeps an old-gen entry still holding in-scope content", entryAt(coherentTestOldGen, nil, map[string][]int32{"inference": {0}}), coherentTestOldGen},
+		{"leaves an empty old-gen entry for removal", entryAt(coherentTestOldGen, nil, nil), coherentTestOldGen},
+		{"leaves a current-gen entry unchanged", entryAt(coherentTestCurrentGen, map[string]int32{"router": 2}, nil), coherentTestCurrentGen},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			got := advanceFullyDrainedEntries([]grovecorev1alpha1.PodGangEntry{tc.entry}, coherentTestCurrentGen, mvu)
+			assert.Equal(t, tc.wantGen, got[0].PodCliqueSetGenerationHash)
+		})
 	}
 }

@@ -461,7 +461,7 @@ func TestBuildResource_MNNVLInjection(t *testing.T) {
 			// name from the anchor entry's epoch.
 			pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), pcsReplica).WithEntries(
 				testutils.NewPodGangEntryBuilder("hash", "1000").
-					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).Build(),
+					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
 			).Build()
 			err := operator.buildResource(logr.Discard(), pcs, pcsReplica, false, pgm, pclq)
 			require.NoError(t, err)
@@ -521,7 +521,7 @@ func TestBuildResource_StripsTopologyAnnotation(t *testing.T) {
 	// from the anchor entry's epoch.
 	pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), 0).WithEntries(
 		testutils.NewPodGangEntryBuilder("hash", "1000").
-			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).Build(),
+			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
 	).Build()
 	err := operator.buildResource(logr.Discard(), pcs, 0, false, pgm, pclq)
 	require.NoError(t, err)
@@ -578,7 +578,7 @@ func TestBuildResource_PreservesRevisionForReplicaNotUnderCoherentUpdate(t *test
 			operator := &_resource{scheme: groveclientscheme.Scheme}
 			pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), tc.pcsReplica).WithEntries(
 				testutils.NewPodGangEntryBuilder("hash", "1000").
-					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).WithAnchorIndex(0).Build(),
+					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
 			).Build()
 
 			err := operator.buildResource(logr.Discard(), pcs, tc.pcsReplica, true, pgm, pclq)
