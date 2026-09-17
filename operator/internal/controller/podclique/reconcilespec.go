@@ -146,6 +146,14 @@ func shouldResetOrTriggerUpdate(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grove
 		return false
 	}
 
+	// A PodClique with neither an update history nor a recorded generation hash is being bootstrapped,
+	// not updated. Its pods are created directly at the current template, so no update is triggered. The
+	// status path records the current hashes once those pods exist. Requiring both to be nil avoids
+	// swallowing a real in-flight or stale update, which the checks below still evaluate.
+	if pclq.Status.UpdateProgress == nil && pclq.Status.CurrentPodCliqueSetGenerationHash == nil {
+		return false
+	}
+
 	// PCLQ has no update history and its generation hash is already current.
 	// This happens for PCLQs scaled out after a rolling update: they are created
 	// from the already-updated template, so no rolling update pass is needed.
