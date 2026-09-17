@@ -215,7 +215,7 @@ func (p planPosition) String() string {
 // single leftover step moves the rest. It splits each component's committed current-hash count across
 // those two phases, then reports how many anchor-bearing steps are fully committed, how much the open
 // anchor-bearing step has committed, and how much leftover has committed.
-func (p *subStepPlanner) ascertainPlanPosition() planPosition {
+func (p *subStepPlanner) ascertainPlanPosition() (planPosition, error) {
 	currentHashCountByComponent := p.countReplicasAtCurrentHash()
 
 	// Split each component's current-hash count into what the anchor-bearing steps moved (capped at their
@@ -242,13 +242,17 @@ func (p *subStepPlanner) ascertainPlanPosition() planPosition {
 		currentAnchorStepCountByComponent[componentName] = anchorPhaseCount[componentName] - anchorBearingStepsDone*p.plan.anchorBearingStepTarget[componentName]
 	}
 
+	mostRecent, err := p.mostRecentAnchorEpoch()
+	if err != nil {
+		return planPosition{}, err
+	}
 	return planPosition{
 		currentHashCountByComponent:       currentHashCountByComponent,
 		anchorBearingStepsDone:            anchorBearingStepsDone,
 		currentAnchorStepCountByComponent: currentAnchorStepCountByComponent,
 		leftoverCountByComponent:          leftoverCountByComponent,
-		mostRecentAnchorEpoch:             p.mostRecentAnchorEpoch(),
-	}
+		mostRecentAnchorEpoch:             mostRecent,
+	}, nil
 }
 
 // countReplicasAtCurrentHash sums, per in-scope component, how many replicas the current-hash entries
@@ -276,26 +280,30 @@ func (p *subStepPlanner) countReplicasAtCurrentHash() map[string]int32 {
 	return countByComponent
 }
 
-// mostRecentAnchorEpoch returns the epoch of the current-hash anchor entry with the highest AnchorIndex,
-// which is the most recently created anchor because AnchorIndex increases with every new anchor. It
-// returns the empty string when no current-hash anchor exists yet.
-func (p *subStepPlanner) mostRecentAnchorEpoch() string {
-	currentHash := *p.pcs.Status.CurrentGenerationHash
+// mostRecentAnchorEpoch returns the highest epoch among the current-hash anchor entries, which is the
+// most recently created anchor since epoch increases with every new entry. It returns the empty string
+// when no current-hash anchor exists yet, and an error when an anchor epoch is not numeric.
+func (p *subStepPlanner) mostRecentAnchorEpoch() (string, error) {
+	pcsCurrentGenerationHash := *p.pcs.Status.CurrentGenerationHash
 	var (
-		epoch              string
-		highestAnchorIndex int32 = -1
+		epoch             string
+		found             bool
+		highestEpochNanos int64
 	)
 	for i := range p.entries {
 		entry := p.entries[i]
-		if entry.PodCliqueSetGenerationHash != currentHash || entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+		if entry.PodCliqueSetGenerationHash != pcsCurrentGenerationHash || entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
 			continue
 		}
-		if entry.AnchorIndex != nil && *entry.AnchorIndex > highestAnchorIndex {
-			highestAnchorIndex = *entry.AnchorIndex
-			epoch = entry.Epoch
+		epochNanos, err := entryEpochNanos(entry)
+		if err != nil {
+			return "", err
+		}
+		if !found || epochNanos > highestEpochNanos {
+			found, highestEpochNanos, epoch = true, epochNanos, entry.Epoch
 		}
 	}
-	return epoch
+	return epoch, nil
 }
 
 // next returns the next sub-step to commit for one PCS replica, or nil when no sub-step remains because

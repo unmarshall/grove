@@ -21,7 +21,6 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 )
 
 // applySubStep applies the sub-step to a copy of the current entries and returns the resulting entry set,
@@ -124,7 +123,6 @@ func (p *subStepPlanner) newHashEntryForSubStep(ss subStep) (grovecorev1alpha1.P
 		anchorEntry.Role = grovecorev1alpha1.PodGangEntryRoleAnchor
 		anchorEntry.PodCliques = maps.Clone(p.mvu.standalonePCLQs)
 		anchorEntry.PCSGReplicaIndices = ss.anchorPCSGReplicaIndices
-		anchorEntry.AnchorIndex = ptr.To(nextAnchorIndex(p.entries, currentHash))
 		return anchorEntry, true
 	}
 
@@ -141,18 +139,4 @@ func (p *subStepPlanner) newHashEntryForSubStep(ss subStep) (grovecorev1alpha1.P
 	tailEntry.Role = grovecorev1alpha1.PodGangEntryRoleTail
 	tailEntry.PCSGReplicaIndices = tailPCSGReplicaIndices
 	return tailEntry, true
-}
-
-// nextAnchorIndex returns the AnchorIndex for a new anchor entry of the given PCS generation hash. AnchorIndex
-// is scoped per generation hash, so the new anchor takes one more than the highest AnchorIndex among existing
-// anchors of that hash, or 0 when none exist. Anchors of other generation hashes are ignored, which matters
-// during a coherent update when entries of more than one generation hash coexist.
-func nextAnchorIndex(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) int32 {
-	highestIndex := int32(-1)
-	for _, entry := range entries {
-		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entry.PodCliqueSetGenerationHash == pcsGenerationHash && entry.AnchorIndex != nil {
-			highestIndex = max(highestIndex, *entry.AnchorIndex)
-		}
-	}
-	return highestIndex + 1
 }

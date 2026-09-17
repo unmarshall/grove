@@ -117,9 +117,9 @@ func TestCountReplicasAtCurrentHash(t *testing.T) {
 		pcs: pcsWithCurrentHash("v2"),
 		mvu: &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
 		entries: []grovecorev1alpha1.PodGangEntry{
-			{Epoch: "50", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 5}},
-			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 3}, PCSGReplicaIndices: map[string][]int32{"decode": {0, 1, 2}}},
-			{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](1), PodCliques: map[string]int32{"frontend": 2}},
+			{Epoch: "50", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 5}},
+			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 3}, PCSGReplicaIndices: map[string][]int32{"decode": {0, 1, 2}}},
+			{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}},
 		},
 	}
 	// The old-hash anchor is ignored. Standalone PodClique "frontend" sums its pod counts (3+2), PCSG "decode" counts
@@ -128,28 +128,32 @@ func TestCountReplicasAtCurrentHash(t *testing.T) {
 }
 
 func TestMostRecentAnchorEpoch(t *testing.T) {
-	t.Run("returns the epoch of the highest-AnchorIndex current-hash anchor", func(t *testing.T) {
+	t.Run("returns the epoch of the highest-epoch current-hash anchor", func(t *testing.T) {
 		p := &subStepPlanner{
 			pcs: pcsWithCurrentHash("v2"),
 			entries: []grovecorev1alpha1.PodGangEntry{
-				{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0)},
-				{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](1)},
+				{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
+				{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 				{Epoch: "300", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleTail},
-				{Epoch: "400", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](5)},
+				{Epoch: "400", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 			},
 		}
-		// The v2 tail is not an anchor and the v1 anchor is a different hash despite its higher AnchorIndex,
+		// The v2 tail is not an anchor and the v1 anchor is a different hash despite its higher epoch,
 		// so both are ignored.
-		assert.Equal(t, "200", p.mostRecentAnchorEpoch())
+		epoch, err := p.mostRecentAnchorEpoch()
+		require.NoError(t, err)
+		assert.Equal(t, "200", epoch)
 	})
 	t.Run("returns empty when there is no current-hash anchor", func(t *testing.T) {
 		p := &subStepPlanner{
 			pcs: pcsWithCurrentHash("v2"),
 			entries: []grovecorev1alpha1.PodGangEntry{
-				{Epoch: "400", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0)},
+				{Epoch: "400", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 			},
 		}
-		assert.Equal(t, "", p.mostRecentAnchorEpoch())
+		epoch, err := p.mostRecentAnchorEpoch()
+		require.NoError(t, err)
+		assert.Equal(t, "", epoch)
 	})
 }
 
@@ -160,14 +164,15 @@ func TestAscertainPlanPosition(t *testing.T) {
 		liveReplicas: map[string]int32{"frontend": 10, "decode": 9},
 		plan:         computeStepPlan(map[string]int32{"frontend": 10, "decode": 9}, &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}}),
 		entries: []grovecorev1alpha1.PodGangEntry{
-			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](0), PodCliques: map[string]int32{"frontend": 3}, PCSGReplicaIndices: map[string][]int32{"decode": {0, 1, 2}}},
-			{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, AnchorIndex: ptr.To[int32](1), PodCliques: map[string]int32{"frontend": 2}},
+			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 3}, PCSGReplicaIndices: map[string][]int32{"decode": {0, 1, 2}}},
+			{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}},
 		},
 	}
 	// Step plan is numAnchorBearingSteps 3, target {frontend:3, decode:3}, leftover {frontend:1, decode:0}. The
 	// committed entries carry frontend:5 and decode:3, so step 0 is fully committed and the open step 1 holds
 	// frontend:2, decode:0, no leftover yet.
-	pos := p.ascertainPlanPosition()
+	pos, err := p.ascertainPlanPosition()
+	require.NoError(t, err)
 	assert.Equal(t, map[string]int32{"frontend": 5, "decode": 3}, pos.currentHashCountByComponent)
 	assert.Equal(t, int32(1), pos.anchorBearingStepsDone)
 	assert.Equal(t, map[string]int32{"frontend": 2, "decode": 0}, pos.currentAnchorStepCountByComponent)
