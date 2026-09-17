@@ -187,6 +187,8 @@ func standalonePCLQAtHash(pcs *grovecorev1alpha1.PodCliqueSet, cliqueName, podTe
 
 // pcsgAtGenerationHash builds a PodCliqueScalingGroup for replica 0 whose status generation hash is
 // currentGenerationHash. Setting it to coherentTestCurrentGen makes it read as converged.
+//
+//nolint:unparam // pcsgConfigName is a genuine PCSG dimension; current tests only exercise "decode".
 func pcsgAtGenerationHash(pcs *grovecorev1alpha1.PodCliqueSet, pcsgConfigName string, currentGenerationHash *string) grovecorev1alpha1.PodCliqueScalingGroup {
 	return grovecorev1alpha1.PodCliqueScalingGroup{
 		ObjectMeta: metav1.ObjectMeta{
