@@ -271,7 +271,7 @@ func TestBuildNonAnchorSubStep(t *testing.T) {
 		"frontend": {liveReplicas: 10, minAvailable: 2, maxUnavailable: 5, standalone: true},
 		"decode":   {liveReplicas: 20, minAvailable: 3, maxUnavailable: 3},
 	})
-	indexStartFn := func(pcsgName string, remaining int32) int32 { return 2 }
+	indexStartFn := func(_ string, _ int32) int32 { return 2 }
 
 	t.Run("clamps a PCSG to MaxUnavailable and subsumes standalone pods", func(t *testing.T) {
 		ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{"frontend": 2, "decode": 4}, indexStartFn)
@@ -589,6 +589,8 @@ type testComponent struct {
 
 // newTestPlanner builds a subStepPlanner from an explicit per-component scenario, deriving the step plan
 // with computeStepPlan so the plan is always consistent with the stated replicas and MinAvailable.
+//
+//nolint:unparam // currentHash is a genuine generation dimension; current tests only exercise "v2".
 func newTestPlanner(clk clock.Clock, currentHash string, entries []grovecorev1alpha1.PodGangEntry, components map[string]testComponent) *subStepPlanner {
 	var (
 		standalonePCLQs           = map[string]int32{}
