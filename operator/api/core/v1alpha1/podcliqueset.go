@@ -115,8 +115,8 @@ type PodCliqueSetUpdateStrategy struct {
 	// Type indicates the type of update strategy.
 	// This strategy applies uniformly to both standalone PodCliques and
 	// PodCliqueScalingGroups within the PodCliqueSet.
-	// Default is RollingRecreate.
-	// +kubebuilder:default=RollingRecreate
+	// Default is Coherent.
+	// +kubebuilder:default=Coherent
 	Type UpdateStrategyType `json:"type,omitempty"`
 }
 
@@ -575,15 +575,13 @@ const (
 	// MinAvailable replicas of each updated standalone PodClique plus MinAvailable replicas of each
 	// updated PodCliqueScalingGroup — scheduled atomically as a new PodGang. This guarantees
 	// that pods forming a minimum-viable serving unit are always version-compatible.
-	// NOTE: While we have introduced an update strategy type for coherent, this is still not available.
-	// In future releases once this is available this NOTE will be removed.
+	// This is the default update strategy.
 	CoherentStrategy UpdateStrategyType = "Coherent"
 	// RollingRecreateStrategy indicates that replicas will be progressively
 	// deleted and recreated one at a time, when templates change. This applies to
 	// both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.
 	// RollingRecreateStrategy qualifies as a rolling update strategy in Grove since
 	// it handles the orchestration entirely by itself.
-	// This is the default update strategy.
 	RollingRecreateStrategy UpdateStrategyType = "RollingRecreate"
 	// OnDeleteStrategy indicates that replicas will only be updated when
 	// they are manually deleted. Changes to templates do not automatically

@@ -547,7 +547,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[UpdateStrategyType](#updatestrategytype)_ | Type indicates the type of update strategy.<br />This strategy applies uniformly to both standalone PodCliques and<br />PodCliqueScalingGroups within the PodCliqueSet.<br />Default is RollingRecreate. | RollingRecreate | Enum: [Coherent RollingRecreate OnDelete] <br /> |
+| `type` _[UpdateStrategyType](#updatestrategytype)_ | Type indicates the type of update strategy.<br />This strategy applies uniformly to both standalone PodCliques and<br />PodCliqueScalingGroups within the PodCliqueSet.<br />Default is Coherent. | Coherent | Enum: [Coherent RollingRecreate OnDelete] <br /> |
 
 
 #### PodCliqueSpec
@@ -984,8 +984,8 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Coherent` | CoherentStrategy indicates that replicas will be updated in Minimal Viable Units —<br />MinAvailable replicas of each updated standalone PodClique plus MinAvailable replicas of each<br />updated PodCliqueScalingGroup — scheduled atomically as a new PodGang. This guarantees<br />that pods forming a minimum-viable serving unit are always version-compatible.<br />NOTE: While we have introduced an update strategy type for coherent, this is still not available.<br />In future releases once this is available this NOTE will be removed.<br /> |
-| `RollingRecreate` | RollingRecreateStrategy indicates that replicas will be progressively<br />deleted and recreated one at a time, when templates change. This applies to<br />both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.<br />RollingRecreateStrategy qualifies as a rolling update strategy in Grove since<br />it handles the orchestration entirely by itself.<br />This is the default update strategy.<br /> |
+| `Coherent` | CoherentStrategy indicates that replicas will be updated in Minimal Viable Units —<br />MinAvailable replicas of each updated standalone PodClique plus MinAvailable replicas of each<br />updated PodCliqueScalingGroup — scheduled atomically as a new PodGang. This guarantees<br />that pods forming a minimum-viable serving unit are always version-compatible.<br />This is the default update strategy.<br /> |
+| `RollingRecreate` | RollingRecreateStrategy indicates that replicas will be progressively<br />deleted and recreated one at a time, when templates change. This applies to<br />both pods (for standalone PodCliques) and replicas of PodCliqueScalingGroups.<br />RollingRecreateStrategy qualifies as a rolling update strategy in Grove since<br />it handles the orchestration entirely by itself.<br /> |
 | `OnDelete` | OnDeleteStrategy indicates that replicas will only be updated when<br />they are manually deleted. Changes to templates do not automatically<br />trigger replica deletions.<br /> |
 
 

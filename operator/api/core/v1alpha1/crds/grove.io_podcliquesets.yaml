@@ -11049,12 +11049,12 @@ spec:
                   PodCliqueScalingGroups.
                 properties:
                   type:
-                    default: RollingRecreate
+                    default: Coherent
                     description: |-
                       Type indicates the type of update strategy.
                       This strategy applies uniformly to both standalone PodCliques and
                       PodCliqueScalingGroups within the PodCliqueSet.
-                      Default is RollingRecreate.
+                      Default is Coherent.
                     enum:
                     - Coherent
                     - RollingRecreate

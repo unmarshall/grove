@@ -51,13 +51,13 @@ func defaultPodCliqueSetSpec(spec *grovecorev1alpha1.PodCliqueSetSpec, pcsgOwned
 // defaultUpdateStrategy populates Spec.UpdateStrategy when it is unset and fills in its Type. The
 // strategy is behind a pointer, so the kubebuilder default on Type only fires when the pointer is
 // already non-nil. This guarantees a non-nil UpdateStrategy with a concrete Type so that downstream
-// defaulting and validation always observe the active strategy. The default Type is RollingRecreate.
+// defaulting and validation always observe the active strategy. The default Type is Coherent.
 func defaultUpdateStrategy(pcsSpec *grovecorev1alpha1.PodCliqueSetSpec) {
 	if pcsSpec.UpdateStrategy == nil {
 		pcsSpec.UpdateStrategy = &grovecorev1alpha1.PodCliqueSetUpdateStrategy{}
 	}
 	if pcsSpec.UpdateStrategy.Type == "" {
-		pcsSpec.UpdateStrategy.Type = grovecorev1alpha1.RollingRecreateStrategy
+		pcsSpec.UpdateStrategy.Type = grovecorev1alpha1.CoherentStrategy
 	}
 }
 
