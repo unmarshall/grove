@@ -42,7 +42,7 @@
       - [Steady-state scaling group scale-out and scale-in](#steady-state-scaling-group-scale-out-and-scale-in)
       - [Steady-state standalone PodClique scale-out and scale-in](#steady-state-standalone-podclique-scale-out-and-scale-in)
     - [PodGang.MinReplicas lifecycle and conditions](#podgangminreplicas-lifecycle-and-conditions)
-      - [Why standalone-PCLQ PodGroups release MinReplicas but PCSG-member PodGroups do not](#why-standalone-pclq-podgroups-release-minreplicas-but-pcsg-member-podgroups-do-not)
+      - [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors)
     - [Gang termination suppression during updates](#gang-termination-suppression-during-updates)
     - [DependsOn and scheduling order](#dependson-and-scheduling-order)
     - [PodGang naming convention](#podgang-naming-convention)
@@ -52,7 +52,7 @@
   - [Monitoring](#monitoring)
   - [Dependencies](#dependencies)
   - [Graduation Criteria](#graduation-criteria)
-  <!-- /toc -->
+<!-- /toc -->
 
 ## Summary
 
@@ -739,9 +739,9 @@ sequenceDiagram
   PG->>PG: create PodGangs from the entries with MinReplicas set and the epoch and role labels stamped
   PCLQ->>PCLQ: create standalone PodClique pods on the anchor PodGang
   PCSG->>PCSG: create scaling-group PodClique pods, on the anchor PodGang and on the non-anchor PodGangs
-  PG->>PG: scheduler places MinReplicas pods of the anchor, then release MinReplicas to 0 and set the anchor Scheduled true
+  PG->>PG: scheduler places MinReplicas pods of the anchor, then set the anchor Scheduled true
   PCSG->>PCSG: non-anchor PodGang pods become eligible once their DependsOn anchor reports Scheduled true
-  PG->>PG: scheduler places non-anchor PodGang pods, then release MinReplicas to 0 and set each non-anchor PodGang Scheduled true
+  PG->>PG: scheduler places non-anchor PodGang pods, then set each non-anchor PodGang Scheduled true
   PG->>PG: pods become Ready, then set PodGang Ready true on the anchor and each non-anchor PodGang
 ```
 
@@ -763,7 +763,7 @@ sequenceDiagram
     PCLQ->>PCLQ: recreate standalone pods onto the mapped anchor PodGang, schedule-gated
     PCSG->>PCSG: recreate scaling-group replicas onto their mapped PodGang, schedule-gated
     PCS->>PCS: set InFlightEpochs to the epoch of the PodGangs created in this sub-step
-    PG->>PG: scheduler places MinReplicas pods, release MinReplicas to 0, set PodGang Scheduled true
+    PG->>PG: scheduler places MinReplicas pods, set PodGang Scheduled true
     PG->>PG: pods become Ready, set PodGang Ready true
     PCS->>PCS: check the three-predicate gate, and on pass requeue
   end
@@ -793,7 +793,7 @@ sequenceDiagram
   PCSG->>PCSG: derive the scale-out PodGang name from the scale-out entry epoch, label the new replica's PodCliques
   PG->>PG: create the scale-out PodGang from the entry with MinReplicas set
   PCSG->>PCSG: create the new replica's pods on that PodGang, schedule-gated
-  PG->>PG: scheduler places MinReplicas pods, release MinReplicas to 0, set PodGang Scheduled true
+  PG->>PG: scheduler places MinReplicas pods, set PodGang Scheduled true
   PG->>PG: pods become Ready, then set PodGang Ready true
 ```
 
@@ -819,10 +819,10 @@ sequenceDiagram
 
 Every `PodGang` resource carries a `MinReplicas` value on each of its `PodGroups`. This value is the gang-scheduling floor: the scheduler must place at least `MinReplicas` pods of each group together for the gang to be considered placed.
 
-A PodGang has two kinds of PodGroup, and the lifecycle below treats them differently:
+A PodGang has two kinds of PodGroup, and the standalone kind sets `MinReplicas` differently across anchors:
 
-- **Standalone-PCLQ PodGroup** — one PodGroup carrying the pods of a single standalone PCLQ. `MinReplicas` is initially set to the PCLQ's `MinAvailable`.
-- **PCSG-member PodGroup** — within a PodGang carrying one or more PCSG replicas, each PCSG replica contributes one PodGroup per member PCLQ. For a PCSG replica with member PCLQs `pleader` and `pworker`, that's two PodGroups. `MinReplicas` is initially set to the member PCLQ's own `MinAvailable` (e.g. `pleader.MinAvailable`, `pworker.MinAvailable`), not the PCSG-level `MinAvailable`. The PCSG-level `MinAvailable` governs how many *replicas worth* of PodGroup sets are co-required in the gang, not the floor on any single PodGroup.
+- **Standalone-PCLQ PodGroup** — one PodGroup carrying the pods of a single standalone PCLQ. On the MinAvailable anchor its `MinReplicas` is the PCLQ's `MinAvailable`. On every other anchor its `MinReplicas` is clamped to the per-anchor pod count, see [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors).
+- **PCSG-member PodGroup** — within a PodGang carrying one or more PCSG replicas, each PCSG replica contributes one PodGroup per member PCLQ. For a PCSG replica with member PCLQs `pleader` and `pworker`, that's two PodGroups. `MinReplicas` is the member PCLQ's own `MinAvailable` (e.g. `pleader.MinAvailable`, `pworker.MinAvailable`), not the PCSG-level `MinAvailable`, and it is never clamped. The PCSG-level `MinAvailable` governs how many *replicas worth* of PodGroup sets are co-required in the gang, not the floor on any single PodGroup.
 
 > Depending on the backend scheduler, `MinReplicas` may also act as a termination floor — for example, the KAI scheduler will terminate a gang whose running pod count drops below `MinReplicas` for longer than a configured termination delay. This termination behavior is not enforced by Grove itself and may vary across scheduler implementations.
 
@@ -830,8 +830,8 @@ The PodGang component reports two conditions on every `PodGang.Status` to expres
 
 | Condition | Meaning |
 | --- | --- |
-| `PodGangConditionTypeScheduled` | Set to `True` while `MinReplicas` pods of every `PodGroup` are scheduled onto nodes. This condition reflects current state, so if scheduled pods are later evicted, deleted, or preempted and the count for any PodGroup falls below its `MinReplicas`, it flips back to `False`. The first time it transitions to `True`, the PodGang component patches `MinReplicas=0` on every standalone-PCLQ PodGroup (PCSG-member PodGroups keep their original `MinReplicas`, see [Why standalone-PCLQ PodGroups release MinReplicas but PCSG-member PodGroups do not](#why-standalone-pclq-podgroups-release-minreplicas-but-pcsg-member-podgroups-do-not)). |
-| `PodGangConditionTypeReady` | Set to `True` while, for every `PodGroup`, the count of `Ready` pods (passing readiness probes) is at least the `MinAvailable` of the constituent PCLQ. The floor is read from the PCS spec, not from the live `MinReplicas` value on the PodGroup, so a standalone-PCLQ PodGroup with `MinReplicas` released to 0 still needs its constituent PCLQ's `MinAvailable` Ready pods to count as `Ready`. This condition reflects current state, so it flips back to `False` if readiness regresses. |
+| `PodGangConditionTypeScheduled` | Set to `True` while each `PodGroup`'s `MinReplicas` pods are scheduled onto nodes. This condition reflects current state, so if scheduled pods are later evicted, deleted, or preempted and the count for any PodGroup falls below its `MinReplicas`, it flips back to `False`. |
+| `PodGangConditionTypeReady` | Set to `True` while, for every `PodGroup`, the count of `Ready` pods (passing readiness probes) is at least the PodGroup's `MinReplicas`. This condition reflects current state, so it flips back to `False` if readiness regresses. |
 
 Both conditions reflect current state. To support orchestrator gating and pod-component scheduling-gate-removal that need a stable "ever reached this state" signal, the PodGang component also maintains two timestamps in `PodGang.Status`:
 
@@ -853,26 +853,27 @@ These timestamps are updated on every `False→True` transition of their respect
 
 The lifecycle of a PodGang the PodGang component creates, anchor, tail, and legacy base and scaled PodGang alike, proceeds in three stages:
 
-1. **Set on creation.** Each `PodGroup`'s `MinReplicas` is set to the `MinAvailable` value defined in the PCS spec for the constituent PCLQ (standalone-PCLQ PodGroups) or for the member PCLQ (PCSG-member PodGroups). This forces the scheduler to place the whole gang at once before any constituent pod can run, establishing the `MinAvailable` floor for that component.
-2. **First placement: release `MinReplicas` on standalone-PCLQ PodGroups, mark `Scheduled=True`, capture `LastScheduled`.** Once the scheduler has placed `MinReplicas` pods of every `PodGroup` on nodes, the PodGang component patches `MinReplicas=0` on every **standalone-PCLQ PodGroup** of the PodGang, leaves **PCSG-member PodGroups** at their original `MinReplicas`, sets `Status.Conditions[Type=Scheduled]=True` with `Reason=PodGangScheduled`, and sets `Status.LastScheduled = metav1.Now()`. Pod-component scheduling-gate-removal logic uses `LastScheduled` (see [DependsOn and scheduling order](#dependson-and-scheduling-order)).
-3. **First readiness: mark `Ready=True`, capture `LastReady`.** Once every `PodGroup` has at least `MinAvailable` (of the constituent PCLQ) pods passing readiness probes, the PodGang component sets `Status.Conditions[Type=Ready]=True` with `Reason=PodGangReady` and sets `Status.LastReady = metav1.Now()`. The orchestrator uses `LastReady` (together with the rest of the per-sub-step gate) to advance coherent-update sub-steps (see [Per-sub-step gate](#per-sub-step-gate)).
+1. **Set on creation.** Each `PodGroup`'s `MinReplicas` is set to the `MinAvailable` defined in the PCS spec for the constituent PCLQ (standalone-PCLQ PodGroups) or for the member PCLQ (PCSG-member PodGroups), except a standalone-PCLQ PodGroup on a non-MinAvailable anchor, whose `MinReplicas` is clamped to the per-anchor pod count (see [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors)). This forces the scheduler to place the gang's floor at once before any constituent pod can run.
+2. **First placement: mark `Scheduled=True`, capture `LastScheduled`.** Once the scheduler has placed each `PodGroup`'s `MinReplicas` pods on nodes, the PodGang component sets `Status.Conditions[Type=Scheduled]=True` with `Reason=PodGangScheduled` and sets `Status.LastScheduled = metav1.Now()`. `MinReplicas` is not changed after creation. Pod-component scheduling-gate-removal logic uses `LastScheduled` (see [DependsOn and scheduling order](#dependson-and-scheduling-order)).
+3. **First readiness: mark `Ready=True`, capture `LastReady`.** Once every `PodGroup` has at least its `MinReplicas` pods passing readiness probes, the PodGang component sets `Status.Conditions[Type=Ready]=True` with `Reason=PodGangReady` and sets `Status.LastReady = metav1.Now()`. The orchestrator uses `LastReady` (together with the rest of the per-sub-step gate) to advance coherent-update sub-steps (see [Per-sub-step gate](#per-sub-step-gate)).
 
 After the first `False→True` transition, both conditions become live signals. They can flip back to `False` if placement or readiness regresses, and forward to `True` again on recovery. `LastScheduled` and `LastReady` advance on every fresh `False→True` transition.
 
-##### Why standalone-PCLQ PodGroups release MinReplicas but PCSG-member PodGroups do not
+##### MinReplicas clamping on non-MinAvailable anchors
 
-`MinReplicas` was intended purely as a *gang-scheduling* signal: "do not place this gang unless the scheduler can find capacity for at least `MinReplicas` pods of every PodGroup together." Once placed, it has no further role at the scheduling layer — pods above `MinReplicas` could be safely preempted on capacity pressure without disrupting gang semantics, and pods at or below `MinReplicas` are already protected by the placement guarantee.
+After a coherent update a PCS replica can have more than one anchor PodGang, each carrying part of a standalone PodClique's pods.
 
-However, some backend schedulers (notably KAI) have conflated `MinReplicas` with **gang termination**: they will terminate a gang whose running pod count drops below `MinReplicas` for longer than a configured termination delay. Grove already handles gang termination at the `PodCliqueSet` level — driven by `MinAvailable` on PCLQs and PCSGs and the `TerminationDelay` on the PCS spec — and does not want the backend scheduler to make independent termination decisions. There is currently no well-defined API on the backend scheduler interface to disable gang termination explicitly. Releasing `MinReplicas` to `0` after placement is the only mechanism Grove has to opt out of the backend scheduler's termination behavior. The cost is that **preemption semantics are also relaxed** on the released PodGroups: with `MinReplicas=0`, the scheduler will not protect any pod of those PodGroups from preemption. This is acceptable because Grove's own gang-termination logic at the PCS level is the source of truth for what counts as a healthy gang, and rebuilding the gang on preemption-induced pod loss is the same recovery path as any other pod loss.
+The MinAvailable anchor is the anchor that holds the replica's guaranteed `MinAvailable` floor for its standalone PodCliques. It is the lowest-epoch anchor. Steady-state standalone scale-in drains from the highest-epoch anchor downward, so the MinAvailable anchor is drained last and always retains the final `MinAvailable` pods.
 
-The release-to-0 is needed on standalone-PCLQ PodGroups and not on PCSG-member PodGroups because **scale-in works differently for the two kinds**:
+`MinReplicas` is the gang-scheduling floor the backend scheduler enforces. Some backends (notably KAI) also treat it as a termination floor and terminate a gang whose running count for a PodGroup stays below `MinReplicas` for longer than a configured delay. That termination would take down the whole PodGang, including any co-located PodCliqueScalingGroup replicas.
 
-- **Standalone PCLQ scale-in** decrements `PodGroup.PodReferences` inside the single PodGroup that represents the PCLQ. The pod count in the PodGroup drops while the PodGroup remains. Without release-to-0, the backend scheduler observes the count dip below `MinReplicas` and terminates the gang. With release-to-0, the dip is below `0` (impossible), so termination is suppressed.
-- **PCSG scale-in** removes whole PCSG replicas. Each removed replica corresponds to a *set* of PodGroups (one per member PCLQ) being **removed from the PodGang's `Spec.PodGroups` slice entirely**. The PodGroups that remain still have their full member-PCLQ pod count and their original `MinReplicas`. No PodGroup's count dips, so there is no termination signal for the backend scheduler to act on — `MinReplicas` can safely stay at the originally placed floor, preserving preemption protection on PCSG-member pods.
+A standalone scale-in that drains a non-MinAvailable anchor can leave that anchor carrying fewer than the template `MinAvailable`, while the clique total across all anchors is still at or above `MinAvailable`. That is not a real availability breach. To keep the backend from terminating such a PodGang, the standalone PodGroup's `MinReplicas` on a non-MinAvailable anchor is clamped to the per-anchor pod count. The MinAvailable anchor is never clamped, so a genuine drop below the floor there still lets the backend gang-terminate, which is the intended behavior.
 
-Once the backend scheduler API gains a first-class way to disable gang termination, the standalone-PCLQ release-to-0 workaround can be removed and `MinReplicas` can stay at its initial value on every PodGroup for the lifetime of the gang — restoring the originally-intended preemption protection across the board.
+The clamp is standalone-only because PodCliqueScalingGroup scale-in works differently. It removes whole PodCliqueScalingGroup replicas, and each removed replica is a set of PodGroups removed from the PodGang entirely. The PodGroups that remain keep their full member-PCLQ pod count and their original `MinReplicas`, so no PodGroup's count dips below its floor and there is nothing to clamp.
 
-The same lifecycle applies in steady state to PodGangs created by scaling group scale-out. The new scale-out PodGang follows set → release-on-standalone-groups + `Scheduled=True` → `Ready=True` exactly as an anchor does during an update.
+Grove's own gang-termination evaluator at the PodCliqueSet level, driven by `MinAvailable` on PodCliques and PodCliqueScalingGroups and the `TerminationDelay` on the PCS spec, remains the source of truth for what counts as a healthy gang, and is paused during an update, see [Gang termination suppression during updates](#gang-termination-suppression-during-updates).
+
+The same lifecycle applies in steady state to PodGangs created by scaling group scale-out. The new scale-out PodGang follows set → `Scheduled=True` → `Ready=True` exactly as an anchor does during an update.
 
 #### Gang termination suppression during updates
 

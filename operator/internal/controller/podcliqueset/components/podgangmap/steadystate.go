@@ -422,7 +422,7 @@ func ensureScaleOutEntry(clk clock.Clock, entries []grovecorev1alpha1.PodGangEnt
 			return entries, nil
 		}
 	}
-	anchorEpoch, found, err := componentutils.LowestEpochAnchorEpoch(entries, &pcsCurrentGenerationHash)
+	anchorEpoch, found, err := componentutils.MinAvailableAnchorEpoch(entries, &pcsCurrentGenerationHash)
 	if err != nil {
 		return nil, err
 	}
