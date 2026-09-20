@@ -229,9 +229,10 @@ func TestAnchorPodGangEpoch(t *testing.T) {
 	})
 }
 
-// TestLowestEpochAnchorEpoch verifies that the lowest-epoch anchor is selected, optionally filtered by
-// generation hash, that non-anchor entries are ignored, and that a non-numeric epoch surfaces an error.
-func TestLowestEpochAnchorEpoch(t *testing.T) {
+// TestMinAvailableAnchorEpoch verifies that the MinAvailable anchor (the lowest-epoch anchor) is
+// selected, optionally filtered by generation hash, that non-anchor entries are ignored, and that a
+// non-numeric epoch surfaces an error.
+func TestMinAvailableAnchorEpoch(t *testing.T) {
 	entries := []grovecorev1alpha1.PodGangEntry{
 		{Epoch: "300", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 		{Epoch: "100", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
@@ -240,21 +241,21 @@ func TestLowestEpochAnchorEpoch(t *testing.T) {
 	}
 
 	t.Run("returns the lowest-epoch anchor across all generations when the hash filter is nil", func(t *testing.T) {
-		epoch, found, err := LowestEpochAnchorEpoch(entries, nil)
+		epoch, found, err := MinAvailableAnchorEpoch(entries, nil)
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, "100", epoch)
 	})
 
 	t.Run("filters to the given generation hash and ignores the lower-epoch tail", func(t *testing.T) {
-		epoch, found, err := LowestEpochAnchorEpoch(entries, ptr.To("v2"))
+		epoch, found, err := MinAvailableAnchorEpoch(entries, ptr.To("v2"))
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, "200", epoch)
 	})
 
 	t.Run("reports not found when no anchor matches the generation hash", func(t *testing.T) {
-		epoch, found, err := LowestEpochAnchorEpoch(entries, ptr.To("v3"))
+		epoch, found, err := MinAvailableAnchorEpoch(entries, ptr.To("v3"))
 		require.NoError(t, err)
 		assert.False(t, found)
 		assert.Equal(t, "", epoch)
@@ -262,7 +263,7 @@ func TestLowestEpochAnchorEpoch(t *testing.T) {
 
 	t.Run("errors on a non-numeric anchor epoch", func(t *testing.T) {
 		bad := []grovecorev1alpha1.PodGangEntry{{Epoch: "abc", Role: grovecorev1alpha1.PodGangEntryRoleAnchor}}
-		_, _, err := LowestEpochAnchorEpoch(bad, nil)
+		_, _, err := MinAvailableAnchorEpoch(bad, nil)
 		require.Error(t, err)
 	})
 }

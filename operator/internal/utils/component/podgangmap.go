@@ -128,10 +128,10 @@ func podGangEntryForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName stri
 	return nil, fmt.Errorf("no PodGangMap entry owns replica index %d of PodCliqueScalingGroup %q and no ScaleOut entry exists in PodGangMap %s", pcsgReplicaIndex, pcsgName, pgm.Name)
 }
 
-// AnchorPodGangEpoch returns the epoch of the base anchor entry of the PodGangMap, the lowest-epoch
-// anchor, which carries the MinAvailable replicas that standalone Pods key off.
+// AnchorPodGangEpoch returns the epoch of the MinAvailable anchor of the PodGangMap, which carries the
+// MinAvailable replicas that standalone Pods key off. See MinAvailableAnchorEpoch.
 func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
-	epoch, found, err := LowestEpochAnchorEpoch(pgm.Spec.Entries, nil)
+	epoch, found, err := MinAvailableAnchorEpoch(pgm.Spec.Entries, nil)
 	if err != nil {
 		return "", err
 	}
@@ -141,10 +141,17 @@ func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
 	return epoch, nil
 }
 
-// LowestEpochAnchorEpoch returns the epoch of the lowest-epoch Anchor entry, considering only entries at
-// pcsGenerationHash when it is non-nil, or all entries when it is nil. It returns found false when no such
-// anchor exists, and an error when an anchor epoch is not numeric.
-func LowestEpochAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
+// MinAvailableAnchorEpoch returns the epoch of the MinAvailable anchor, considering only entries at
+// pcsGenerationHash when it is non-nil, or all entries when it is nil. It returns found false when no
+// such anchor exists, and an error when an anchor epoch is not numeric.
+//
+// The MinAvailable anchor is the anchor entry that holds a PodCliqueSet replica's guaranteed
+// MinAvailable floor for its standalone PodCliques. It is the lowest-epoch anchor of the generation in
+// question. Steady-state standalone scale-in drains from the highest-epoch anchor downward, so the
+// MinAvailable anchor is drained last and always retains the final MinAvailable pods. Its standalone
+// PodGroups keep MinReplicas at the template MinAvailable. Every other anchor clamps MinReplicas to its
+// per-anchor count.
+func MinAvailableAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
 	var (
 		lowestEpoch      string
 		found            bool
