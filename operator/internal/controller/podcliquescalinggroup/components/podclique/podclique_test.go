@@ -1017,6 +1017,20 @@ func TestComputePendingUpdateWorkSkipsReplicaWithDeleteExpectation(t *testing.T)
 	assert.Equal(t, 2, uw.existingReplicas, "replica 0 with a pending delete expectation must not be counted as an existing replica")
 }
 
+func TestIsReplicaUpdatedRequiresNonEmptyExpectedHash(t *testing.T) {
+	// A member whose expected pod-template hash is unknown (empty) must never read as updated, even when
+	// its status hash is also empty, guarding against a "" == "" false positive. updatedReadyReplica is
+	// otherwise fully updated, so only the empty expected hash can flip the result.
+	sc := buildRollingUpdateSnapshot(1, 1, 1, []testReplica{updatedReadyReplica(0)})
+	m := &sc.existingPCLQs[0]
+	sc.expectedPCLQPodTemplateHashMap[m.Name] = ""
+	m.Labels[apicommon.LabelPodTemplateHash] = ""
+	m.Status.CurrentPodTemplateHash = ptr.To("")
+
+	assert.False(t, isReplicaUpdated(sc, 0, sc.existingPCLQs),
+		"a replica whose expected pod-template hash is empty must not be considered updated")
+}
+
 func TestProcessPendingUpdates(t *testing.T) {
 	newResource := func(sc *syncSnapshot) (_resource, client.Client) {
 		objs := []client.Object{sc.pcsg}
