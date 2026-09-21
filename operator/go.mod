@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/grove/operator
 
-go 1.26.3
+go 1.26.8
 
 require (
 	github.com/ai-dynamo/grove/operator/api v0.0.0
