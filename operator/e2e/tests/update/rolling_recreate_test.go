@@ -23,13 +23,17 @@ import (
 	"time"
 
 	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/kwok"
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
-	tests "github.com/ai-dynamo/grove/operator/e2e/tests"
+	"github.com/ai-dynamo/grove/operator/e2e/tests"
 	"github.com/ai-dynamo/grove/operator/e2e/waiter"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Test_RU7_RollingUpdatePCSPodClique tests rolling update when PCS-owned Podclique spec is updated
@@ -1234,4 +1238,121 @@ func Test_RU25_RollingUpdateStuckThenCorrective(t *testing.T) {
 
 	tests.Logger.Info("6. Verify all components converged to the latest generation hash")
 	assertGenerationHashConverged(tc)
+}
+
+// Test_RU26_CorrectiveUpdateReplacesUnschedulablePods verifies that a RollingRecreate still makes
+// progress when a component is already unavailable and its unavailability has exhausted MaxUnavailable:
+// the corrective update must replace the unschedulable pods and complete rather than deadlock. It covers
+// a single PodCliqueScalingGroup replica (the #840 count-anchored-budget case) and a standalone
+// PodClique whose MaxUnavailable is below MinAvailable, where a per-pod budget can never bring
+// MinAvailable pods up together to admit the PodClique's PodGang.
+//
+// Scenario RU-26 (per case):
+//  1. Deploy a workload whose pods are all Pending because the PCS template pins an impossible node
+//     selector, so the component is unavailable.
+//  2. Wait for the initial generation to reconcile (so the correction is a rolling update, not initial
+//     creation) and confirm the workload reports no available pods.
+//  3. Remove the impossible node selector from the PCS template, changing the generation hash.
+//  4. Verify Grove replaces every unschedulable pod, the rolling update completes without the selector,
+//     and the generation hash converges.
+func Test_RU26_CorrectiveUpdateReplacesUnschedulablePods(t *testing.T) {
+	cases := []struct {
+		name                       string
+		workloadName               string
+		workloadYAML               string
+		expectedPods               int
+		assertInitiallyUnavailable func(c *assert.CollectT, tc *testctx.TestContext)
+	}{
+		{
+			name:         "PCSG replica exhausts MaxUnavailable",
+			workloadName: "workload-unavailable-pcsg",
+			workloadYAML: "../../yaml/workload-unavailable-pcsg.yaml",
+			expectedPods: 1,
+			assertInitiallyUnavailable: func(c *assert.CollectT, tc *testctx.TestContext) {
+				var pcsg grovev1alpha1.PodCliqueScalingGroup
+				require.NoError(c, tc.Client.Get(tc.Ctx, types.NamespacedName{
+					Namespace: tc.Namespace, Name: pcsgFQN(tc, "sg-x"),
+				}, &pcsg))
+				assert.EqualValues(c, 1, pcsg.Status.Replicas)
+				assert.Zero(c, pcsg.Status.AvailableReplicas)
+			},
+		},
+		{
+			name:         "standalone PodClique, MaxUnavailable below MinAvailable",
+			workloadName: "workload-unavailable-standalone-gang",
+			workloadYAML: "../../yaml/workload-unavailable-standalone-gang.yaml",
+			expectedPods: 2,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tc, cleanup := testctx.PrepareTest(context.Background(), t, 1,
+				testctx.WithWorkload(&testctx.WorkloadConfig{
+					Name:         tt.workloadName,
+					YAMLPath:     tt.workloadYAML,
+					Namespace:    "default",
+					ExpectedPods: tt.expectedPods,
+				}),
+				testctx.WithTimeout(time.Minute),
+				testctx.WithInterval(time.Second),
+			)
+			defer cleanup()
+
+			tests.Logger.Info("1. Create a workload whose pods cannot be scheduled")
+			pods, err := tc.DeployAndVerifyWorkload()
+			require.NoError(t, err)
+			require.Len(t, pods.Items, tt.expectedPods)
+			oldUIDs := make(map[types.UID]bool, len(pods.Items))
+			for _, p := range pods.Items {
+				oldUIDs[p.UID] = true
+			}
+
+			// Let the first generation fully reconcile before editing the template. If we patch too
+			// early, removing the selector can be folded into the initial pod creation instead of
+			// triggering a rolling update, which is the path under test. Also confirm the workload is
+			// unavailable first.
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				pcs, err := getPCS(tc, tc.Workload.Name)
+				require.NoError(c, err)
+				require.NotNil(c, pcs.Status.ObservedGeneration)
+				assert.Equal(c, pcs.Generation, *pcs.Status.ObservedGeneration)
+				assert.Zero(c, pcs.Status.AvailableReplicas)
+				if tt.assertInitiallyUnavailable != nil {
+					tt.assertInitiallyUnavailable(c, tc)
+				}
+			}, tc.Timeout, tc.Interval, "initial generation must reconcile with the workload unavailable")
+
+			tests.Logger.Info("2. Remove the impossible node selector from the PCS template")
+			pcs, err := getPCS(tc, tc.Workload.Name)
+			require.NoError(t, err)
+			original := pcs.DeepCopy()
+			delete(pcs.Spec.Template.Cliques[0].Spec.PodSpec.NodeSelector, "e2e.grove.io/unschedulable")
+			require.NoError(t, tc.Client.Patch(tc.Ctx, pcs, client.MergeFrom(original)))
+			require.Greater(t, pcs.Generation, original.Generation)
+
+			tests.Logger.Info("3. Verify Grove replaces the unschedulable pods and completes the corrective update")
+			// The corrective update must proceed even though MaxUnavailable is already breached;
+			// otherwise the unschedulable pods are never replaced and this wait times out.
+			require.NoError(t, waitForRollingUpdateComplete(tc, 1),
+				"corrective update must replace the unschedulable pods and complete")
+			require.NoError(t, tc.WaitForPods(tt.expectedPods))
+
+			pods, err = tc.ListPods()
+			require.NoError(t, err)
+			require.Len(t, pods.Items, tt.expectedPods)
+			for _, p := range pods.Items {
+				assert.False(t, oldUIDs[p.UID], "every unschedulable pod must be replaced")
+				assert.NotContains(t, p.Spec.NodeSelector, "e2e.grove.io/unschedulable")
+			}
+			assertUpdateInProgressCleared(tc)
+			assertGenerationHashConverged(tc)
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				current, err := getPCS(tc, tc.Workload.Name)
+				require.NoError(c, err)
+				require.NotNil(c, current.Status.ObservedGeneration)
+				assert.Equal(c, pcs.Generation, *current.Status.ObservedGeneration)
+			}, tc.Timeout, tc.Interval, "observedGeneration must catch up after the corrective update")
+		})
+	}
 }

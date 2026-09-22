@@ -973,14 +973,16 @@ func TestComputePendingUpdateWork(t *testing.T) {
 		wantOldReady        []int
 		wantOldPending      []int
 		wantOldUnavailable  []int
-		wantNumReady        int
+		wantExisting        int
+		wantNewNotReady     int
 		wantNumUpdatedReady int
 	}{
-		{"all replicas old and ready", 3, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldReadyReplica(2)}, []int{0, 1, 2}, nil, nil, 3, 0},
-		{"mixed updated, old ready and old pending", 3, []testReplica{updatedReadyReplica(0), oldReadyReplica(1), oldPendingReplica(2)}, []int{1}, []int{2}, nil, 2, 1},
-		{"terminating replica is skipped", 2, []testReplica{updatedReadyReplica(0), terminatingReplica(1)}, nil, nil, nil, 1, 1},
-		{"old unavailable replica", 1, []testReplica{oldUnavailableReplica(0)}, nil, nil, []int{0}, 0, 0},
-		{"all replicas updated and ready", 2, []testReplica{updatedReadyReplica(0), updatedReadyReplica(1)}, nil, nil, nil, 2, 2},
+		{"all replicas old and ready", 3, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldReadyReplica(2)}, []int{0, 1, 2}, nil, nil, 3, 0, 0},
+		{"mixed updated, old ready and old pending", 3, []testReplica{updatedReadyReplica(0), oldReadyReplica(1), oldPendingReplica(2)}, []int{1}, []int{2}, nil, 3, 0, 1},
+		{"terminating replica is skipped", 2, []testReplica{updatedReadyReplica(0), terminatingReplica(1)}, nil, nil, nil, 1, 0, 1},
+		{"old unavailable replica", 1, []testReplica{oldUnavailableReplica(0)}, nil, nil, []int{0}, 1, 0, 0},
+		{"all replicas updated and ready", 2, []testReplica{updatedReadyReplica(0), updatedReadyReplica(1)}, nil, nil, nil, 2, 0, 2},
+		{"new configuration replica not yet ready", 1, []testReplica{updatedNotReadyReplica(0)}, nil, nil, nil, 1, 1, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
@@ -991,7 +993,8 @@ func TestComputePendingUpdateWork(t *testing.T) {
 			assert.Equal(t, tt.wantOldReady, uw.oldReadyReplicaIndices, "oldReadyReplicaIndices")
 			assert.Equal(t, tt.wantOldPending, uw.oldPendingReplicaIndices, "oldPendingReplicaIndices")
 			assert.Equal(t, tt.wantOldUnavailable, uw.oldUnavailableReplicaIndices, "oldUnavailableReplicaIndices")
-			assert.Equal(t, tt.wantNumReady, uw.numReadyReplicas, "numReadyReplicas")
+			assert.Equal(t, tt.wantExisting, uw.existingReplicas, "existingReplicas")
+			assert.Equal(t, tt.wantNewNotReady, uw.newNotReadyReplicas, "newNotReadyReplicas")
 			assert.Equal(t, tt.wantNumUpdatedReady, uw.numUpdatedReadyReplicas, "numUpdatedReadyReplicas")
 		})
 	}
@@ -1011,7 +1014,21 @@ func TestComputePendingUpdateWorkSkipsReplicaWithDeleteExpectation(t *testing.T)
 	uw, err := r.computePendingUpdateWork(sc)
 	require.NoError(t, err)
 	assert.Equal(t, []int{1, 2}, uw.oldReadyReplicaIndices, "replica 0 with a pending delete expectation must not be a disruption candidate")
-	assert.Equal(t, 2, uw.numReadyReplicas, "replica 0 with a pending delete expectation must not be counted as Ready")
+	assert.Equal(t, 2, uw.existingReplicas, "replica 0 with a pending delete expectation must not be counted as an existing replica")
+}
+
+func TestIsReplicaUpdatedRequiresNonEmptyExpectedHash(t *testing.T) {
+	// A member whose expected pod-template hash is unknown (empty) must never read as updated, even when
+	// its status hash is also empty, guarding against a "" == "" false positive. updatedReadyReplica is
+	// otherwise fully updated, so only the empty expected hash can flip the result.
+	sc := buildRollingUpdateSnapshot(1, 1, 1, []testReplica{updatedReadyReplica(0)})
+	m := &sc.existingPCLQs[0]
+	sc.expectedPCLQPodTemplateHashMap[m.Name] = ""
+	m.Labels[apicommon.LabelPodTemplateHash] = ""
+	m.Status.CurrentPodTemplateHash = ptr.To("")
+
+	assert.False(t, isReplicaUpdated(sc, 0, sc.existingPCLQs),
+		"a replica whose expected pod-template hash is empty must not be considered updated")
 }
 
 func TestProcessPendingUpdates(t *testing.T) {
@@ -1065,27 +1082,50 @@ func TestProcessPendingUpdates(t *testing.T) {
 		assert.Len(t, remainingReplicaIndices(t, cl), 2, "MinAvailable equal to replicas must not block the roll; MaxUnavailable=1 disrupts one replica")
 	})
 
-	t.Run("does not disrupt any replica when the budget is exhausted by unavailable replicas", func(t *testing.T) {
-		// Two of three replicas report not-Ready (which can be a stale status read). numReadyReplicas is 1,
-		// unavailable is 2, MaxUnavailable is 1, so the budget is 0 and nothing must be deleted. This is the
-		// case that previously over-disrupted by unconditionally deleting the not-Ready replicas.
+	t.Run("disrupts a worst-off unavailable replica instead of deadlocking when unavailable replicas exhaust MaxUnavailable", func(t *testing.T) {
+		// Two of three replicas are unavailable with MaxUnavailable=1. The old readiness-delta budget was 0
+		// here and blocked forever. The count-anchored budget is existing(3) - floor(3-1=2) -
+		// newNotReady(0) = 1, so one worst-off (unavailable) replica is disrupted instead of stalling.
 		sc := buildRollingUpdateSnapshot(3, 1, 1, []testReplica{oldReadyReplica(0), oldUnavailableReplica(1), oldUnavailableReplica(2)})
 		r, cl := newResource(sc)
 
 		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
 		testutils.AssertGroveError(t, requeueErr, err)
-		assert.ElementsMatch(t, []string{"0", "1", "2"}, remainingReplicaIndices(t, cl), "no replica may be deleted when the disruption budget is exhausted")
+		assert.ElementsMatch(t, []string{"0", "2"}, remainingReplicaIndices(t, cl), "the lowest-index unavailable replica must be disrupted, not blocked")
 	})
 
-	t.Run("disrupts worst-off replicas first within the budget", func(t *testing.T) {
-		// Budget is MaxUnavailable(2) - unavailable(1) = 1. The unavailable replica 2 is worst-off and must
-		// be selected before the Ready replicas 0 and 1.
+	t.Run("disrupts worst-off replicas first up to the budget", func(t *testing.T) {
+		// Budget is existing(3) - floor(3-2=1) - newNotReady(0) = 2. The unavailable replica 2 is worst-off
+		// and is selected before Ready replicas, and one Ready replica (0) fills the remaining budget.
 		sc := buildRollingUpdateSnapshot(3, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldUnavailableReplica(2)})
 		r, cl := newResource(sc)
 
 		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
 		testutils.AssertGroveError(t, requeueErr, err)
-		assert.ElementsMatch(t, []string{"0", "1"}, remainingReplicaIndices(t, cl), "the unavailable replica must be replaced first, leaving the Ready replicas")
+		assert.ElementsMatch(t, []string{"1"}, remainingReplicaIndices(t, cl), "worst-off unavailable replica and one Ready replica disrupted, leaving one Ready")
+	})
+
+	t.Run("updates a pending replica whose own unavailability would have exhausted the budget", func(t *testing.T) {
+		// The single replica is pending. floor is 1-1=0, so the budget is existing(1) - 0 - 0 = 1 and the
+		// pending replica is updated rather than deadlocking.
+		sc := buildRollingUpdateSnapshot(1, 1, 1, []testReplica{oldPendingReplica(0)})
+		r, cl := newResource(sc)
+
+		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.Empty(t, remainingReplicaIndices(t, cl), "the pending replica must be disrupted for replacement")
+	})
+
+	t.Run("does not disrupt when existing replicas are below the availability floor", func(t *testing.T) {
+		// desired=5 but only 2 replicas are present (the rest deleted externally, awaiting recreation).
+		// floor is 5-2=3, so the budget is existing(2) - 3 - 0 = -1 <= 0: no disruption this reconcile
+		// until the missing replicas are recreated and availability recovers.
+		sc := buildRollingUpdateSnapshot(5, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1)})
+		r, cl := newResource(sc)
+
+		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.ElementsMatch(t, []string{"0", "1"}, remainingReplicaIndices(t, cl), "no replica may be disrupted while below the availability floor")
 	})
 }
 
@@ -1122,6 +1162,10 @@ func oldUnavailableReplica(index int) testReplica {
 
 func updatedReadyReplica(index int) testReplica {
 	return testReplica{index: index, hash: testRollingUpdateNewHash, scheduled: 1, ready: 1, updated: 1}
+}
+
+func updatedNotReadyReplica(index int) testReplica {
+	return testReplica{index: index, hash: testRollingUpdateNewHash, scheduled: 1, ready: 0, updated: 0}
 }
 
 func terminatingReplica(index int) testReplica {
