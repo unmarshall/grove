@@ -596,6 +596,51 @@ func TestBuildResource_PreservesRevisionForReplicaNotUnderCoherentUpdate(t *test
 	}
 }
 
+// TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed reconciles a preserved replica twice under the
+// Explicit startup type and asserts StartsAfter stays the single-prefix FQN. It guards against re-prefixing
+// the live StartsAfter (which already holds FQNs) instead of reading the template's clique names.
+func TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed(t *testing.T) {
+	const (
+		leaderClique = "leader"
+		workerClique = "worker"
+		pcsReplica   = 1
+	)
+	pcs := testutils.NewPodCliqueSetBuilder(testPCSName, testPCSNamespace, uuid.NewUUID()).
+		WithReplicas(2).
+		WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeExplicit)).
+		WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}).
+		WithUpdateProgress(&grovecorev1alpha1.PodCliqueSetUpdateProgress{
+			UpdateStartedAt:   metav1.Now(),
+			CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 0}},
+		}).
+		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder(leaderClique).Build()).
+		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder(workerClique).WithStartsAfter([]string{leaderClique}).Build()).
+		Build()
+
+	// The worker PodClique on the preserved replica already holds the resolved FQN from a previous reconcile.
+	wantStartsAfter := []string{fmt.Sprintf("%s-%d-%s", testPCSName, pcsReplica, leaderClique)}
+	pclq := &grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-%d-%s", testPCSName, pcsReplica, workerClique),
+			Namespace: testPCSNamespace,
+			Labels:    map[string]string{apicommon.LabelPodTemplateHash: "old-hash"},
+		},
+		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: wantStartsAfter},
+	}
+
+	operator := &_resource{scheme: groveclientscheme.Scheme}
+	pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), pcsReplica).WithEntries(
+		testutils.NewPodGangEntryBuilder("hash", "1000").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
+	).Build()
+
+	// Reconcile twice. StartsAfter must remain the single-prefix FQN both times.
+	for i := range 2 {
+		err := operator.buildResource(logr.Discard(), pcs, pcsReplica, true, pgm, pclq)
+		require.NoError(t, err, "reconcile %d", i)
+		assert.Equal(t, wantStartsAfter, pclq.Spec.StartsAfter, "reconcile %d", i)
+	}
+}
+
 // triageContainersByMNNVLClaim separates containers into those with MNNVL claim and those without.
 func triageContainersByMNNVLClaim(containers []corev1.Container) (withClaim, withoutClaim []string) {
 	for _, c := range containers {

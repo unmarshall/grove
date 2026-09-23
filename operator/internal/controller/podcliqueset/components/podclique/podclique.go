@@ -373,13 +373,15 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 		pclq.Spec = *pclqTemplate.Spec.DeepCopy()
 	}
 
-	dependentPCLQNames, err := identifyFullyQualifiedStartupDependencyNames(pcs, pcsReplica, cliqueName, pclq)
-
+	dependentPCLQNames, err := identifyFullyQualifiedStartupDependencyNames(pcs, pcsReplica, cliqueName, pclqTemplate)
 	if err != nil {
 		return err
 	}
 	pclq.Spec.StartsAfter = dependentPCLQNames
-
+	// This return fires only for an existing PodClique of a replica not under the coherent update, since
+	// preserveRevision requires pclqExists. Such an object already carries its MNNVL claims from when it was
+	// created, so skip the injection below. A recreated PodClique has preserveRevision false and takes the
+	// injection path.
 	if preserveRevision {
 		return nil
 	}
@@ -391,18 +393,18 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 }
 
 // identifyFullyQualifiedStartupDependencyNames determines the PodClique startup dependencies based on StartupType.
-func identifyFullyQualifiedStartupDependencyNames(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, cliqueName string, pclq *grovecorev1alpha1.PodClique) ([]string, error) {
+func identifyFullyQualifiedStartupDependencyNames(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, cliqueName string, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) ([]string, error) {
 	cliqueStartupType := pcs.Spec.Template.StartupType
 	if cliqueStartupType == nil {
 		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
 		// If it is still nil, then by not returning an error we break the API contract. It is a bug that should be fixed.
-		return nil, groveerr.New(errSyncPodClique, component.OperationSync, fmt.Sprintf("PodClique: %v has nil StartupType", client.ObjectKeyFromObject(pclq)))
+		return nil, groveerr.New(errSyncPodClique, component.OperationSync, fmt.Sprintf("clique %q in PodCliqueSet %v has nil StartupType", cliqueName, client.ObjectKeyFromObject(pcs)))
 	}
 	switch *cliqueStartupType {
 	case grovecorev1alpha1.CliqueStartupTypeInOrder:
 		return getInOrderStartupDependencies(pcs, pcsReplicaIndex, cliqueName), nil
 	case grovecorev1alpha1.CliqueStartupTypeExplicit:
-		return getExplicitStartupDependencies(pcs, pcsReplicaIndex, pclq), nil
+		return getExplicitStartupDependencies(pcs, pcsReplicaIndex, pclqTemplate), nil
 	default:
 		return nil, nil
 	}
@@ -422,9 +424,9 @@ func getInOrderStartupDependencies(pcs *grovecorev1alpha1.PodCliqueSet, pcsRepli
 }
 
 // getExplicitStartupDependencies resolves explicitly declared startup dependencies.
-func getExplicitStartupDependencies(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, pclq *grovecorev1alpha1.PodClique) []string {
-	dependencies := make([]string, 0, len(pclq.Spec.StartsAfter))
-	for _, dependency := range pclq.Spec.StartsAfter {
+func getExplicitStartupDependencies(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) []string {
+	dependencies := make([]string, 0, len(pclqTemplate.Spec.StartsAfter))
+	for _, dependency := range pclqTemplate.Spec.StartsAfter {
 		dependencies = append(dependencies, componentutils.GenerateDependencyNamesForBasePodGang(pcs, pcsReplicaIndex, dependency)...)
 	}
 	return dependencies
