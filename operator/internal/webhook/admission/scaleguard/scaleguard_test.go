@@ -28,6 +28,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -43,7 +44,7 @@ const (
 type guardResource struct {
 	kind      string
 	newEmpty  func() client.Object
-	newTarget func(pcsReplicaIndex int) client.Object
+	newTarget func(pcsReplicaIndex int, minAvailable int32) client.Object
 }
 
 func TestHandle(t *testing.T) {
@@ -51,15 +52,23 @@ func TestHandle(t *testing.T) {
 		{
 			kind:     "PodClique",
 			newEmpty: func() client.Object { return &grovecorev1alpha1.PodClique{} },
-			newTarget: func(pcsReplicaIndex int) client.Object {
-				return testutils.NewPodCliqueBuilder(testPCSName, "uid", "frontend", testNamespace, int32(pcsReplicaIndex)).Build()
+			newTarget: func(pcsReplicaIndex int, minAvailable int32) client.Object {
+				b := testutils.NewPodCliqueBuilder(testPCSName, "uid", "frontend", testNamespace, int32(pcsReplicaIndex))
+				if minAvailable > 0 {
+					b = b.WithMinAvailable(minAvailable)
+				}
+				return b.Build()
 			},
 		},
 		{
 			kind:     "PodCliqueScalingGroup",
 			newEmpty: func() client.Object { return &grovecorev1alpha1.PodCliqueScalingGroup{} },
-			newTarget: func(pcsReplicaIndex int) client.Object {
-				return testutils.NewPodCliqueScalingGroupBuilder("decode", testNamespace, testPCSName, pcsReplicaIndex).Build()
+			newTarget: func(pcsReplicaIndex int, minAvailable int32) client.Object {
+				b := testutils.NewPodCliqueScalingGroupBuilder("decode", testNamespace, testPCSName, pcsReplicaIndex)
+				if minAvailable > 0 {
+					b = b.WithMinAvailable(minAvailable)
+				}
+				return b.Build()
 			},
 		},
 	}
@@ -70,6 +79,7 @@ func TestHandle(t *testing.T) {
 		subResource               string
 		oldReplicas               int32
 		newReplicas               int32
+		targetMinAvailable        int32
 		targetReplicaIndex        int
 		targetPresent             bool
 		pcsPresent                bool
@@ -124,12 +134,36 @@ func TestHandle(t *testing.T) {
 			targetPresent: true, pcsPresent: false,
 			oldReplicas: 2, newReplicas: 4, wantAllowed: true,
 		},
+		{
+			description:   "a replica change on the resource to below minAvailable is rejected",
+			operation:     admissionv1.Update,
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 1, targetMinAvailable: 2, wantAllowed: false,
+		},
+		{
+			description:   "a replica change on the resource to at least minAvailable is allowed",
+			operation:     admissionv1.Update,
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 2, targetMinAvailable: 2, wantAllowed: true,
+		},
+		{
+			description: "a scale to below the stored minAvailable is rejected",
+			operation:   admissionv1.Update, subResource: "scale",
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 1, targetMinAvailable: 2, wantAllowed: false,
+		},
+		{
+			description: "a scale to at least the stored minAvailable is allowed",
+			operation:   admissionv1.Update, subResource: "scale",
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 2, targetMinAvailable: 2, wantAllowed: true,
+		},
 	}
 
 	for _, resource := range resources {
 		for _, tc := range testCases {
 			t.Run(fmt.Sprintf("%s/%s", resource.kind, tc.description), func(t *testing.T) {
-				target := resource.newTarget(tc.targetReplicaIndex)
+				target := resource.newTarget(tc.targetReplicaIndex, tc.targetMinAvailable)
 				var objects []client.Object
 				if tc.targetPresent {
 					objects = append(objects, target)
@@ -145,6 +179,43 @@ func TestHandle(t *testing.T) {
 				assert.Equal(t, tc.wantAllowed, resp.Allowed)
 			})
 		}
+	}
+}
+
+// TestMinAvailableOf checks that minAvailable is read from the stored PodClique or PodCliqueScalingGroup and
+// that any other type yields nil.
+func TestMinAvailableOf(t *testing.T) {
+	testCases := []struct {
+		description string
+		target      client.Object
+		want        *int32
+	}{
+		{
+			description: "reads minAvailable from a PodClique",
+			target:      &grovecorev1alpha1.PodClique{Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To[int32](3)}},
+			want:        ptr.To[int32](3),
+		},
+		{
+			description: "reads minAvailable from a PodCliqueScalingGroup",
+			target:      &grovecorev1alpha1.PodCliqueScalingGroup{Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{MinAvailable: ptr.To[int32](2)}},
+			want:        ptr.To[int32](2),
+		},
+		{
+			description: "returns nil when minAvailable is unset",
+			target:      &grovecorev1alpha1.PodClique{},
+			want:        nil,
+		},
+		{
+			description: "returns nil for an unexpected type",
+			target:      &grovecorev1alpha1.PodCliqueSet{},
+			want:        nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, minAvailableOf(tc.target))
+		})
 	}
 }
 
