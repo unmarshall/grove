@@ -39,15 +39,9 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 		return nil, err
 	}
 
-	liveReplicas := make(map[string]int32, len(standalonePCLQByComponent)+len(pcsgByComponent))
-	for componentName, pclq := range standalonePCLQByComponent {
-		liveReplicas[componentName] = pclq.Spec.Replicas
-	}
-	for componentName, pcsg := range pcsgByComponent {
-		liveReplicas[componentName] = pcsg.Spec.Replicas
-	}
+	desiredReplicas := syncSnap.computeDesiredReplicas(standalonePCLQByComponent, pcsgByComponent)
 
-	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, liveReplicas)
+	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, desiredReplicas)
 	pos, err := planner.ascertainPlanPosition()
 	if err != nil {
 		return nil, err
@@ -129,6 +123,35 @@ func formatPodGangEntries(entries []grovecorev1alpha1.PodGangEntry) []string {
 	return out
 }
 
+// computeDesiredReplicas returns the replica count the plan rolls for each in-scope component: the live
+// child's spec.Replicas when the object exists (so an HPA-scaled count mid-roll is honored), else the PCS
+// template Replicas, since a component deleted out-of-band is recreated at template Replicas. Sourcing
+// every in-scope component this way keeps each count at or above MinAvailable, so the step plan is always
+// well-defined and numAnchorBearingSteps is never zero.
+func (s *syncSnapshot) computeDesiredReplicas(
+	standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique,
+	pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup,
+) map[string]int32 {
+	standaloneTemplateReplicas := componentutils.GetStandalonePCLQReplicasFromPCSTemplateSpec(s.pcs)
+	pcsgTemplateReplicas := componentutils.GetPCSGReplicasFromPCSTemplateSpec(s.pcs)
+	desiredReplicas := make(map[string]int32, len(s.mvuTemplate.standalonePCLQs)+len(s.mvuTemplate.pcsgs))
+	for componentName := range s.mvuTemplate.standalonePCLQs {
+		if pclq, ok := standalonePCLQByComponent[componentName]; ok {
+			desiredReplicas[componentName] = pclq.Spec.Replicas
+		} else {
+			desiredReplicas[componentName] = standaloneTemplateReplicas[componentName]
+		}
+	}
+	for componentName := range s.mvuTemplate.pcsgs {
+		if pcsg, ok := pcsgByComponent[componentName]; ok {
+			desiredReplicas[componentName] = pcsg.Spec.Replicas
+		} else {
+			desiredReplicas[componentName] = pcsgTemplateReplicas[componentName]
+		}
+	}
+	return desiredReplicas
+}
+
 // inScopeStandalonePCLQsByComponent indexes the standalone PodCliques under a coherent update for one PCS
 // replica by component name, keeping only components in the update scope.
 func (s *syncSnapshot) inScopeStandalonePCLQsByComponent(pcsReplicaIndex int) map[string]grovecorev1alpha1.PodClique {
@@ -151,7 +174,7 @@ func (s *syncSnapshot) inScopePCSGsByComponent(pcsReplicaIndex int) (map[string]
 	for _, pcsg := range s.existingPCSGsByReplica[pcsReplicaIndex] {
 		componentName, err := apicommon.ExtractScalingGroupNameFromPCSGFQN(pcsg.Name, pcsNameReplica)
 		if err != nil {
-			return nil, groveerr.WrapError(err, errCodeComputeLiveReplicas, component.OperationSync,
+			return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
 				fmt.Sprintf("failed to extract PodCliqueScalingGroup name from %q", pcsg.Name))
 		}
 		if _, inScope := s.mvuTemplate.pcsgs[componentName]; inScope {
@@ -176,7 +199,7 @@ func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlann
 	if !subsumedPodsReady(standalonePCLQByComponent, pos) {
 		return false, "subsumedPodsReady=false", nil
 	}
-	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.liveReplicas, planner.maxUnavailableByComponent) {
+	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent) {
 		return false, "maxUnavailableBudgetSatisfied=false", nil
 	}
 	return true, "", nil
