@@ -81,7 +81,7 @@ func (s subStep) String() string {
 // identify and size each sub-step.
 type stepPlan struct {
 	// numAnchorBearingSteps is the number of anchor-bearing steps, the min over components of
-	// floor(liveReplicas/MinAvailable).
+	// floor(desiredReplicas/MinAvailable).
 	numAnchorBearingSteps int32
 	// anchorBearingStepTarget is how many of each component one anchor-bearing step rolls, MinAvailable
 	// plus an even share of the tail, keyed by component name.
@@ -112,9 +112,9 @@ type subStepPlanner struct {
 	mvu *mvuTemplate
 	// entries is the current PodGangMap entry set, read-only during planning.
 	entries []grovecorev1alpha1.PodGangEntry
-	// liveReplicas is the live child replica count per component, read fresh every reconcile so a scale
-	// operation on a non-updating boundary is absorbed.
-	liveReplicas map[string]int32
+	// desiredReplicas is the child replica count per component (sourced from spec.Replicas), read fresh every
+	// reconcile so a scale operation on a non-updating boundary is absorbed.
+	desiredReplicas map[string]int32
 	// maxUnavailableByComponent bounds how many of a component a single sub-step may take down, from the
 	// current template.
 	maxUnavailableByComponent map[string]int32
@@ -124,7 +124,7 @@ type subStepPlanner struct {
 
 // newSubStepPlanner builds the planner for one PCS replica from the in-scope live replica counts and the
 // current-template maxUnavailable, and computes the step plan the planner works against.
-func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, liveReplicas map[string]int32) *subStepPlanner {
+func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, desiredReplicas map[string]int32) *subStepPlanner {
 	mvu := syncSnap.mvuTemplate
 	minAvailableByComponent := lo.Assign(mvu.standalonePCLQs, mvu.pcsgs)
 	return &subStepPlanner{
@@ -133,9 +133,9 @@ func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []gr
 		pcsReplicaIndex:           pcsReplicaIndex,
 		mvu:                       mvu,
 		entries:                   entries,
-		liveReplicas:              liveReplicas,
+		desiredReplicas:           desiredReplicas,
 		maxUnavailableByComponent: componentutils.CoherentMaxUnavailableByComponent(syncSnap.pcs, lo.Keys(minAvailableByComponent)),
-		plan:                      computeStepPlan(liveReplicas, mvu),
+		plan:                      computeStepPlan(desiredReplicas, mvu),
 	}
 }
 
@@ -144,22 +144,22 @@ func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []gr
 // entry, so spreading them over floor(replicas/MinAvailable) anchors would create one PodGang per pod. With
 // PodCliqueScalingGroups in the MVU, the anchors are the proportional MVUs, bound by the component supplying
 // the fewest MinAvailable-sized slices, the min over components of floor(replicas/MinAvailable).
-func computeNumAnchorBearingSteps(liveReplicas map[string]int32, mvu *mvuTemplate) int32 {
+func computeNumAnchorBearingSteps(desiredReplicas map[string]int32, mvu *mvuTemplate) int32 {
 	if len(mvu.pcsgs) == 0 {
 		return 1
 	}
 	numAnchorBearingSteps := int32(math.MaxInt32)
 	for componentName, minAvailable := range lo.Assign(mvu.standalonePCLQs, mvu.pcsgs) {
-		numAnchorBearingSteps = min(numAnchorBearingSteps, liveReplicas[componentName]/minAvailable)
+		numAnchorBearingSteps = min(numAnchorBearingSteps, desiredReplicas[componentName]/minAvailable)
 	}
 	return numAnchorBearingSteps
 }
 
 // computeStepPlan derives the step plan for one PCS replica, the number of anchor-bearing steps and each
 // component's per-step target and leftover.
-func computeStepPlan(liveReplicas map[string]int32, mvu *mvuTemplate) stepPlan {
+func computeStepPlan(desiredReplicas map[string]int32, mvu *mvuTemplate) stepPlan {
 	minAvailableByComponent := lo.Assign(mvu.standalonePCLQs, mvu.pcsgs)
-	numAnchorBearingSteps := computeNumAnchorBearingSteps(liveReplicas, mvu)
+	numAnchorBearingSteps := computeNumAnchorBearingSteps(desiredReplicas, mvu)
 
 	// Beyond the MinAvailable that every anchor-bearing step reserves, a component's remaining replicas
 	// are its tail. tailPerStep spreads that tail evenly over the anchor-bearing steps, so each step
@@ -169,9 +169,9 @@ func computeStepPlan(liveReplicas map[string]int32, mvu *mvuTemplate) stepPlan {
 	anchorBearingStepTarget := make(map[string]int32, len(minAvailableByComponent))
 	leftover := make(map[string]int32, len(minAvailableByComponent))
 	for componentName, componentMinAvailable := range minAvailableByComponent {
-		tailPerStep := (liveReplicas[componentName] - numAnchorBearingSteps*componentMinAvailable) / numAnchorBearingSteps
+		tailPerStep := (desiredReplicas[componentName] - numAnchorBearingSteps*componentMinAvailable) / numAnchorBearingSteps
 		anchorBearingStepTarget[componentName] = componentMinAvailable + tailPerStep
-		leftover[componentName] = liveReplicas[componentName] - numAnchorBearingSteps*anchorBearingStepTarget[componentName]
+		leftover[componentName] = desiredReplicas[componentName] - numAnchorBearingSteps*anchorBearingStepTarget[componentName]
 	}
 
 	return stepPlan{
@@ -222,7 +222,7 @@ func (p *subStepPlanner) ascertainPlanPosition() (planPosition, error) {
 	// combined capacity) and what the leftover step moved (the rest).
 	anchorPhaseCount := make(map[string]int32)
 	leftoverCountByComponent := make(map[string]int32)
-	for componentName := range p.liveReplicas {
+	for componentName := range p.desiredReplicas {
 		anchorPhaseCapacity := p.plan.numAnchorBearingSteps * p.plan.anchorBearingStepTarget[componentName]
 		anchorPhaseCount[componentName] = min(currentHashCountByComponent[componentName], anchorPhaseCapacity)
 		leftoverCountByComponent[componentName] = currentHashCountByComponent[componentName] - anchorPhaseCount[componentName]
@@ -231,14 +231,14 @@ func (p *subStepPlanner) ascertainPlanPosition() (planPosition, error) {
 	// An anchor-bearing step is fully committed only when every component met its target for that step, so
 	// the count of fully committed steps is the min over components of floor(anchorPhaseCount/target).
 	anchorBearingStepsDone := p.plan.numAnchorBearingSteps
-	for componentName := range p.liveReplicas {
+	for componentName := range p.desiredReplicas {
 		anchorBearingStepsDone = min(anchorBearingStepsDone, anchorPhaseCount[componentName]/p.plan.anchorBearingStepTarget[componentName])
 	}
 
 	// What the open anchor-bearing step has committed per component is whatever is beyond the fully
 	// committed steps.
 	currentAnchorStepCountByComponent := make(map[string]int32)
-	for componentName := range p.liveReplicas {
+	for componentName := range p.desiredReplicas {
 		currentAnchorStepCountByComponent[componentName] = anchorPhaseCount[componentName] - anchorBearingStepsDone*p.plan.anchorBearingStepTarget[componentName]
 	}
 
@@ -340,7 +340,7 @@ func (p *subStepPlanner) next(pos planPosition) (*subStep, error) {
 // sub-steps, with the anchor and two tail sub-steps committed, still has three tail sub-steps to
 // commit, so this returns true.
 func (p *subStepPlanner) openAnchorStepHasTailRemaining(pos planPosition) bool {
-	for componentName := range p.liveReplicas {
+	for componentName := range p.desiredReplicas {
 		// Opening a step commits MinAvailable to every component, so a committed count above zero means
 		// the step is open, while zero is a step boundary where the step is not yet opened. A committed
 		// count below the step's target means this component still has tail to commit, while a count equal
@@ -367,7 +367,7 @@ func (p *subStepPlanner) openAnchorStepHasTailRemaining(pos planPosition) bool {
 func (p *subStepPlanner) buildTailSubStep(pos planPosition) (*subStep, error) {
 	stepIndex := pos.anchorBearingStepsDone // 0-based index of the open anchor-bearing step
 	remainingByComponent := make(map[string]int32)
-	for componentName := range p.liveReplicas {
+	for componentName := range p.desiredReplicas {
 		if gap := p.plan.anchorBearingStepTarget[componentName] - pos.currentAnchorStepCountByComponent[componentName]; gap > 0 {
 			remainingByComponent[componentName] = gap
 		}
@@ -412,7 +412,7 @@ func (p *subStepPlanner) buildAnchorBearingSubStep(pos planPosition) (*subStep, 
 // live replica count is leftover the leftover step must still roll.
 func (p *subStepPlanner) anyLeftoverRemaining(currentHashCountByComponent map[string]int32) bool {
 	for componentName := range p.plan.leftover {
-		if currentHashCountByComponent[componentName] < p.liveReplicas[componentName] {
+		if currentHashCountByComponent[componentName] < p.desiredReplicas[componentName] {
 			return true
 		}
 	}
@@ -431,7 +431,7 @@ func (p *subStepPlanner) buildLeftoverSubStep(pos planPosition) (*subStep, error
 		}
 	}
 	pcsgIndexStartFn := func(pcsgName string, remaining int32) int32 {
-		return p.liveReplicas[pcsgName] - remaining
+		return p.desiredReplicas[pcsgName] - remaining
 	}
 	return p.buildNonAnchorSubStep(newEpoch(p.clk), pos.mostRecentAnchorEpoch, remainingByComponent, pcsgIndexStartFn)
 }

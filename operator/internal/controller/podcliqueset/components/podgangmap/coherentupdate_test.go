@@ -99,6 +99,73 @@ func TestInScopePCSGsByComponent(t *testing.T) {
 	})
 }
 
+// TestComputeDesiredReplicas checks that the desired replica count of each in-scope component comes from
+// the live child object when it exists and from the PCS template when the object is absent.
+func TestComputeDesiredReplicas(t *testing.T) {
+	const (
+		frontendTemplateReplicas int32 = 4
+		decodeTemplateReplicas   int32 = 6
+	)
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: frontendTemplateReplicas}},
+					{Name: "decode-worker", Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: 1}},
+				},
+				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", CliqueNames: []string{"decode-worker"}, Replicas: ptr.To(decodeTemplateReplicas)},
+				},
+			},
+		},
+	}
+	snap := &syncSnapshot{
+		pcs:         pcs,
+		mvuTemplate: &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
+	}
+	frontendObj := grovecorev1alpha1.PodClique{Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: 5}}
+	decodeObj := grovecorev1alpha1.PodCliqueScalingGroup{Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 7}}
+
+	tests := []struct {
+		name       string
+		standalone map[string]grovecorev1alpha1.PodClique
+		pcsg       map[string]grovecorev1alpha1.PodCliqueScalingGroup
+		want       map[string]int32
+	}{
+		{
+			name:       "both components present use the live spec replicas",
+			standalone: map[string]grovecorev1alpha1.PodClique{"frontend": frontendObj},
+			pcsg:       map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": decodeObj},
+			want:       map[string]int32{"frontend": 5, "decode": 7},
+		},
+		{
+			name:       "absent standalone falls back to the template replicas",
+			standalone: map[string]grovecorev1alpha1.PodClique{},
+			pcsg:       map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": decodeObj},
+			want:       map[string]int32{"frontend": frontendTemplateReplicas, "decode": 7},
+		},
+		{
+			name:       "absent scaling group falls back to the template replicas",
+			standalone: map[string]grovecorev1alpha1.PodClique{"frontend": frontendObj},
+			pcsg:       map[string]grovecorev1alpha1.PodCliqueScalingGroup{},
+			want:       map[string]int32{"frontend": 5, "decode": decodeTemplateReplicas},
+		},
+		{
+			name:       "both absent fall back to the template replicas",
+			standalone: map[string]grovecorev1alpha1.PodClique{},
+			pcsg:       map[string]grovecorev1alpha1.PodCliqueScalingGroup{},
+			want:       map[string]int32{"frontend": frontendTemplateReplicas, "decode": decodeTemplateReplicas},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := snap.computeDesiredReplicas(tc.standalone, tc.pcsg)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // TestSubsumedPodsReady covers the standalone-Pod readiness gate. Each case names the standalone
 // components with their committed current-hash count and their UpdateProgress.UpdatedReadyReplicas, and
 // states whether the gate lets the next sub-step proceed.

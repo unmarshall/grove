@@ -159,10 +159,10 @@ func TestMostRecentAnchorEpoch(t *testing.T) {
 
 func TestAscertainPlanPosition(t *testing.T) {
 	p := &subStepPlanner{
-		pcs:          pcsWithCurrentHash("v2"),
-		mvu:          &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
-		liveReplicas: map[string]int32{"frontend": 10, "decode": 9},
-		plan:         computeStepPlan(map[string]int32{"frontend": 10, "decode": 9}, &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}}),
+		pcs:             pcsWithCurrentHash("v2"),
+		mvu:             &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
+		desiredReplicas: map[string]int32{"frontend": 10, "decode": 9},
+		plan:            computeStepPlan(map[string]int32{"frontend": 10, "decode": 9}, &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}}),
 		entries: []grovecorev1alpha1.PodGangEntry{
 			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 3}, PCSGReplicaIndices: map[string][]int32{"decode": {0, 1, 2}}},
 			{Epoch: "200", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}},
@@ -613,7 +613,7 @@ func newTestPlanner(clk clock.Clock, currentHash string, entries []grovecorev1al
 		pcs:                       pcsWithCurrentHash(currentHash),
 		entries:                   entries,
 		mvu:                       mvu,
-		liveReplicas:              liveReplicas,
+		desiredReplicas:           liveReplicas,
 		maxUnavailableByComponent: maxUnavailableByComponent,
 		plan:                      computeStepPlan(liveReplicas, mvu),
 	}
