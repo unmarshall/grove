@@ -500,13 +500,10 @@ func validateCliqueDependencies(cliques []*grovecorev1alpha1.PodCliqueTemplateSp
 	return allErrs
 }
 
-// updateStrategyType returns the active update strategy, treating an unset strategy as
-// RollingRecreate to mirror the defaulting webhook.
+// updateStrategyType returns the active update strategy, resolving a nil or unset strategy to the
+// Coherent default so the validator agrees with the defaulting webhook and the operator.
 func (v *pcsValidator) updateStrategyType() grovecorev1alpha1.UpdateStrategyType {
-	if v.pcs.Spec.UpdateStrategy == nil || v.pcs.Spec.UpdateStrategy.Type == "" {
-		return grovecorev1alpha1.RollingRecreateStrategy
-	}
-	return v.pcs.Spec.UpdateStrategy.Type
+	return componentutils.ResolveUpdateStrategyType(v.pcs)
 }
 
 // validateRollingUpdateConfiguration checks a component's RollingUpdate against the active update
