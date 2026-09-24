@@ -51,10 +51,10 @@ func TestDefaultPodCliqueSet(t *testing.T) {
 							MinReplicas: ptr.To(int32(2)),
 							MaxReplicas: 3,
 						},
-						MinAvailable: ptr.To[int32](2),
+						MinAvailable: ptr.To[int32](1),
 					},
 					RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{
-						MaxUnavailable: ptr.To[int32](2),
+						MaxUnavailable: ptr.To[int32](1),
 					},
 				}},
 				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{},
@@ -74,7 +74,8 @@ func TestDefaultPodCliqueSet(t *testing.T) {
 				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{{
 					Name: "test",
 					Spec: grovecorev1alpha1.PodCliqueSpec{
-						Replicas: 2,
+						Replicas:     2,
+						MinAvailable: ptr.To[int32](1),
 						ScaleConfig: &grovecorev1alpha1.AutoScalingConfig{
 							MinReplicas: ptr.To[int32](2),
 							MaxReplicas: 3,
@@ -116,7 +117,7 @@ func TestDefaultPodCliqueTemplateSpecs(t *testing.T) {
 			},
 		},
 		{
-			name: "minAvailable and scaleConfig minReplicas default to the defaulted replicas when replicas is 0",
+			name: "scaleConfig minReplicas defaults to the defaulted replicas when replicas is 0",
 			input: []*grovecorev1alpha1.PodCliqueTemplateSpec{
 				{
 					Name: "clique1",
@@ -135,30 +136,9 @@ func TestDefaultPodCliqueTemplateSpecs(t *testing.T) {
 			verify: func(t *testing.T, result []*grovecorev1alpha1.PodCliqueTemplateSpec) {
 				require.Len(t, result, 1)
 				assert.Equal(t, int32(1), result[0].Spec.Replicas)
-				require.NotNil(t, result[0].Spec.MinAvailable)
-				assert.Equal(t, int32(1), *result[0].Spec.MinAvailable)
 				require.NotNil(t, result[0].Spec.ScaleConfig)
 				require.NotNil(t, result[0].Spec.ScaleConfig.MinReplicas)
 				assert.Equal(t, int32(1), *result[0].Spec.ScaleConfig.MinReplicas)
-			},
-		},
-		{
-			name: "minAvailable defaults to replicas when nil",
-			input: []*grovecorev1alpha1.PodCliqueTemplateSpec{
-				{
-					Name: "clique1",
-					Spec: grovecorev1alpha1.PodCliqueSpec{
-						Replicas:     5,
-						RoleName:     "role1",
-						MinAvailable: nil,
-						PodSpec:      corev1.PodSpec{},
-					},
-				},
-			},
-			verify: func(t *testing.T, result []*grovecorev1alpha1.PodCliqueTemplateSpec) {
-				require.Len(t, result, 1)
-				require.NotNil(t, result[0].Spec.MinAvailable)
-				assert.Equal(t, int32(5), *result[0].Spec.MinAvailable)
 			},
 		},
 		{

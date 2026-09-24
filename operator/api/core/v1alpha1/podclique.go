@@ -68,8 +68,9 @@ type PodCliqueSpec struct {
 	// MinAvailable serves two purposes:
 	// 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.
 	// 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
-	// in termination of the PodGang that it belongs to. If MinAvailable is not set, then it will default to the template
-	// Replicas.
+	// in termination of the PodGang that it belongs to.
+	// If MinAvailable is not set, then it defaults to 1.
+	// +kubebuilder:default=1
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 	// StartsAfter provides you a way to explicitly define the startup dependencies amongst cliques.
