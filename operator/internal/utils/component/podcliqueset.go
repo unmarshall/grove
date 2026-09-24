@@ -115,13 +115,25 @@ func GetPodCliqueSetName(objectMeta metav1.ObjectMeta) string {
 	return pcsName
 }
 
+// ResolveUpdateStrategyType returns the effective update strategy type for the PodCliqueSet. It
+// tolerates a nil UpdateStrategy or an empty Type by resolving to the Coherent default. This matches
+// the value the defaulting webhook persists, so an object that predates the UpdateStrategy field and
+// reconciles without re-admission resolves to the same strategy as a re-admitted object. Callers must
+// pass a non-nil PodCliqueSet.
+func ResolveUpdateStrategyType(pcs *grovecorev1alpha1.PodCliqueSet) grovecorev1alpha1.UpdateStrategyType {
+	if pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type == "" {
+		return grovecorev1alpha1.CoherentStrategy
+	}
+	return pcs.Spec.UpdateStrategy.Type
+}
+
 // IsRollingUpdateStrategy returns true when PodCliqueSet update strategy is orchestrated by Grove.
 // Only the OnDelete update strategy is not a rolling update strategy.
 func IsRollingUpdateStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	if pcs == nil {
 		return false
 	}
-	return pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovecorev1alpha1.OnDeleteStrategy
+	return ResolveUpdateStrategyType(pcs) != grovecorev1alpha1.OnDeleteStrategy
 }
 
 // IsRollingUpdateInProgress returns true when the PodCliqueSet uses a rolling update strategy and an
@@ -148,9 +160,12 @@ func IsRollingRecreateUpdateInProgress(pcs *grovecorev1alpha1.PodCliqueSet) bool
 }
 
 // IsCoherentStrategy returns true when the PodCliqueSet uses the Coherent update strategy (the
-// UpdateStrategyType value "Coherent").
+// UpdateStrategyType value "Coherent"). A nil or unset strategy resolves to the Coherent default.
 func IsCoherentStrategy(pcs *grovecorev1alpha1.PodCliqueSet) bool {
-	return pcs != nil && pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy
+	if pcs == nil {
+		return false
+	}
+	return ResolveUpdateStrategyType(pcs) == grovecorev1alpha1.CoherentStrategy
 }
 
 // IsPCSReplicaUnderCoherentUpdate reports whether the given PodCliqueSet replica is the one the

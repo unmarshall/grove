@@ -277,7 +277,7 @@ func TestIsRollingUpdateStrategy(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "nil_update_strategy_defaults_to_auto",
+			name: "nil_update_strategy_defaults_to_coherent",
 			pcs: &grovecorev1alpha1.PodCliqueSet{
 				Spec: grovecorev1alpha1.PodCliqueSetSpec{},
 			},
@@ -310,6 +310,31 @@ func TestIsRollingUpdateStrategy(t *testing.T) {
 	}
 }
 
+// TestResolveUpdateStrategyType tests the ResolveUpdateStrategyType function.
+func TestResolveUpdateStrategyType(t *testing.T) {
+	withStrategy := func(strategyType grovecorev1alpha1.UpdateStrategyType) *grovecorev1alpha1.PodCliqueSet {
+		pcs := &grovecorev1alpha1.PodCliqueSet{}
+		pcs.Spec.UpdateStrategy = &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: strategyType}
+		return pcs
+	}
+	testCases := []struct {
+		description string
+		pcs         *grovecorev1alpha1.PodCliqueSet
+		want        grovecorev1alpha1.UpdateStrategyType
+	}{
+		{"nil UpdateStrategy resolves to Coherent", &grovecorev1alpha1.PodCliqueSet{}, grovecorev1alpha1.CoherentStrategy},
+		{"empty Type resolves to Coherent", withStrategy(""), grovecorev1alpha1.CoherentStrategy},
+		{"Coherent stays Coherent", withStrategy(grovecorev1alpha1.CoherentStrategy), grovecorev1alpha1.CoherentStrategy},
+		{"RollingRecreate stays RollingRecreate", withStrategy(grovecorev1alpha1.RollingRecreateStrategy), grovecorev1alpha1.RollingRecreateStrategy},
+		{"OnDelete stays OnDelete", withStrategy(grovecorev1alpha1.OnDeleteStrategy), grovecorev1alpha1.OnDeleteStrategy},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, ResolveUpdateStrategyType(tc.pcs))
+		})
+	}
+}
+
 // TestGetPodCliqueSet tests the GetPodCliqueSet function
 func TestIsCoherentStrategy(t *testing.T) {
 	withStrategy := func(strategyType grovecorev1alpha1.UpdateStrategyType) *grovecorev1alpha1.PodCliqueSet {
@@ -323,7 +348,7 @@ func TestIsCoherentStrategy(t *testing.T) {
 		want        bool
 	}{
 		{"nil PodCliqueSet is not Coherent", nil, false},
-		{"nil UpdateStrategy is not Coherent", &grovecorev1alpha1.PodCliqueSet{}, false},
+		{"nil UpdateStrategy defaults to Coherent", &grovecorev1alpha1.PodCliqueSet{}, true},
 		{"RollingRecreate is not Coherent", withStrategy(grovecorev1alpha1.RollingRecreateStrategy), false},
 		{"OnDelete is not Coherent", withStrategy(grovecorev1alpha1.OnDeleteStrategy), false},
 		{"Coherent is Coherent", withStrategy(grovecorev1alpha1.CoherentStrategy), true},
@@ -391,7 +416,7 @@ func TestIsRollingRecreateUpdateInProgress(t *testing.T) {
 		want        bool
 	}{
 		{"RollingRecreate with an in-flight update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
-		{"a nil UpdateStrategy defaults to RollingRecreate", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
+		{"a nil UpdateStrategy defaults to Coherent and is not RollingRecreate", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
 		{"Coherent with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
 		{"OnDelete with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.OnDeleteStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
 		{"RollingRecreate with no update in progress", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, nil, false},
