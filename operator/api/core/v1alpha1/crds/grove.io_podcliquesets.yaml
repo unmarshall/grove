@@ -712,12 +712,13 @@ spec:
                               - maxReplicas
                               type: object
                             minAvailable:
+                              default: 1
                               description: |-
                                 MinAvailable serves two purposes:
                                 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.
                                 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
-                                in termination of the PodGang that it belongs to. If MinAvailable is not set, then it will default to the template
-                                Replicas.
+                                in termination of the PodGang that it belongs to.
+                                If MinAvailable is not set, then it defaults to 1.
                               format: int32
                               type: integer
                             podSpec:
