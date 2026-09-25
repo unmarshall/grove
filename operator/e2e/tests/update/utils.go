@@ -23,12 +23,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/ai-dynamo/grove/operator/api/common"
 	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	kubeutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 	"github.com/ai-dynamo/grove/operator/e2e/grove/workload"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/k8sclient"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/pods"
@@ -36,6 +36,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	"github.com/ai-dynamo/grove/operator/e2e/tests"
 	"github.com/ai-dynamo/grove/operator/e2e/waiter"
+	kubeutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1435,11 +1436,114 @@ func notReadyPodForPCSG(tc *testctx.TestContext, pcsgConfigName string) func(*co
 
 // KWOK Stage fixtures used to shape pod lifecycle for rolling update tests.
 const (
-	kwokStageReadyDelayedPath = "../../yaml/kwok/pod-ready-delayed.yaml"
-	kwokStageReadyDelayedName = "pod-ready-delayed"
-	kwokStageCrashloopPath    = "../../yaml/kwok/pod-crashloop.yaml"
-	kwokStageCrashloopName    = "pod-crashloop"
+	kwokStageReadyDelayedPath     = "../../yaml/kwok/pod-ready-delayed.yaml"
+	kwokStageReadyDelayedName     = "pod-ready-delayed"
+	kwokStageReadyDelayedLongPath = "../../yaml/kwok/pod-ready-delayed-long.yaml"
+	kwokStageReadyDelayedLongName = "pod-ready-delayed-long"
+	kwokStageExitedErrorR1Path    = "../../yaml/kwok/pod-exited-error-r1.yaml"
+	kwokStageExitedErrorR1Name    = "pod-exited-error-r1"
+	kwokStageCrashloopPath        = "../../yaml/kwok/pod-crashloop.yaml"
+	kwokStageCrashloopName        = "pod-crashloop"
 )
+
+// livePodsForCliqueOnReplica returns the live pods of the given clique that belong to the given PCS
+// replica index.
+func livePodsForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) ([]corev1.Pod, error) {
+	podList, err := tc.ListPods()
+	if err != nil {
+		return nil, err
+	}
+	wantReplica := strconv.Itoa(pcsReplicaIndex)
+	var matched []corev1.Pod
+	for i := range podList.Items {
+		pod := podList.Items[i]
+		pclq, ok := pod.Labels[common.LabelPodClique]
+		if !ok || !strings.HasSuffix(pclq, "-"+cliqueName) {
+			continue
+		}
+		if pod.Labels[common.LabelPodCliqueSetReplicaIndex] != wantReplica {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		matched = append(matched, pod)
+	}
+	return matched, nil
+}
+
+// deleteAllLivePodsOnReplica deletes every live pod that belongs to the given PCS replica index, so that
+// after the shaping KWOK stages are removed the replica's pods are recreated fresh and become Ready.
+func deleteAllLivePodsOnReplica(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) {
+	t.Helper()
+	podList, err := tc.ListPods()
+	if err != nil {
+		t.Fatalf("failed to list pods: %v", err)
+	}
+	wantReplica := strconv.Itoa(pcsReplicaIndex)
+	for i := range podList.Items {
+		pod := podList.Items[i]
+		if pod.Labels[common.LabelPodCliqueSetReplicaIndex] != wantReplica || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if err := tc.Client.Delete(tc.Ctx, &pod); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to delete pod %s during replica %d recovery: %v", pod.Name, pcsReplicaIndex, err)
+		}
+	}
+}
+
+// getReplicaPodGangMap fetches the PodGangMap object of the given PCS replica.
+func getReplicaPodGangMap(tc *testctx.TestContext, pcsReplicaIndex int) (*grovev1alpha1.PodGangMap, error) {
+	pgmName := common.GeneratePodGangMapName(common.ResourceNameReplica{Name: tc.Workload.Name, Replica: pcsReplicaIndex})
+	var pgm grovev1alpha1.PodGangMap
+	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: pgmName}, &pgm); err != nil {
+		return nil, err
+	}
+	return &pgm, nil
+}
+
+// gangTerminateReplicaAndWaitForPodGangMapRebuild breaches MinAvailable on the inference PodCliqueScalingGroup
+// of the given PCS replica and waits until the replica's PodGangMap is deleted and rebuilt. It deletes every
+// live pod of the given PodCliqueScalingGroup member clique on that replica, which drops the group to zero
+// available replicas. With the readiness-delay stage active the recreated pods stay not-ready past
+// terminationDelay, so the group stays below MinAvailable long enough for the PCS-level gang termination to
+// fire once (its re-fire guard prevents churn) and rebuild the replica. It polls until the replica's
+// PodGangMap carries a new UID, which is how gang termination now resets a fully torn-down replica.
+func gangTerminateReplicaAndWaitForPodGangMapRebuild(t *testing.T, tc *testctx.TestContext, pcsgMemberClique string, pcsReplicaIndex int) {
+	t.Helper()
+	pgmBefore, err := getReplicaPodGangMap(tc, pcsReplicaIndex)
+	if err != nil {
+		t.Fatalf("failed to read PodGangMap for replica %d: %v", pcsReplicaIndex, err)
+	}
+	oldUID := pgmBefore.UID
+
+	victims, err := livePodsForCliqueOnReplica(tc, pcsgMemberClique, pcsReplicaIndex)
+	if err != nil {
+		t.Fatalf("failed to list %s pods on replica %d: %v", pcsgMemberClique, pcsReplicaIndex, err)
+	}
+	if len(victims) == 0 {
+		t.Fatalf("no %s pods found on replica %d to breach MinAvailable", pcsgMemberClique, pcsReplicaIndex)
+	}
+	for i := range victims {
+		if err := tc.Client.Delete(tc.Ctx, &victims[i]); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to delete pod %s to breach MinAvailable: %v", victims[i].Name, err)
+		}
+	}
+
+	pollErr := wait.PollUntilContextTimeout(tc.Ctx, 2*time.Second, 90*time.Second, true, func(context.Context) (bool, error) {
+		pgm, err := getReplicaPodGangMap(tc, pcsReplicaIndex)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil // briefly absent between delete and recreate
+			}
+			return false, err
+		}
+		return pgm.UID != oldUID, nil
+	})
+	if pollErr != nil {
+		t.Fatalf("PodGangMap for replica %d was not rebuilt after gang termination: %v", pcsReplicaIndex, pollErr)
+	}
+}
 
 // standaloneCliqueFQN returns the PodClique name for a standalone clique in PCS replica 0.
 func standaloneCliqueFQN(tc *testctx.TestContext, cliqueName string) string {
