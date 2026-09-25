@@ -42,14 +42,15 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 	desiredReplicas := syncSnap.computeDesiredReplicas(standalonePCLQByComponent, pcsgByComponent)
 
 	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, desiredReplicas)
-	pos, err := planner.ascertainPlanPosition()
+	planPos, err := planner.ascertainPlanPosition()
 	if err != nil {
 		return nil, err
 	}
-	syncSnap.logger.V(1).Info("Computed coherent step plan and position", "pcsReplicaIndex", pcsReplicaIndex, "plan", planner.plan.String(), "position", pos.String())
+	syncSnap.logger.V(1).Info("Computed coherent step plan and position", "pcsReplicaIndex", pcsReplicaIndex, "plan", planner.plan.String(), "position", planPos.String())
 	pcsCurrentGenerationHash := *syncSnap.pcs.Status.CurrentGenerationHash
 
-	ss, err := planner.next(pos)
+	headroom := headroomByComponent(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent)
+	ss, err := planner.next(planPos, headroom)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +63,7 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 
 	// Hold the advance when the gate is not met, so the current sub-step keeps converging before the next
 	// one takes more Pods down.
-	canEmit, holdReason, err := r.canEmitNextSubStep(ctx, planner, pos, standalonePCLQByComponent, pcsgByComponent)
+	canEmit, holdReason, err := r.canEmitNextSubStep(ctx, planner, planPos, ss, standalonePCLQByComponent, pcsgByComponent)
 	if err != nil {
 		return nil, err
 	}
@@ -185,30 +186,36 @@ func (s *syncSnapshot) inScopePCSGsByComponent(pcsReplicaIndex int) (map[string]
 }
 
 // canEmitNextSubStep reports whether the sub-step gate holds for one PCS replica, so the next sub-step may
-// be emitted. It checks that the most recent current-hash batch is ready, then that the standalone Pods
-// subsumed so far are ready, then that no in-scope component is below its MaxUnavailable budget. The first
-// check that fails holds the advance, and its name is returned as the hold reason for tracing.
-func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, pos planPosition, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (canEmit bool, holdReason string, err error) {
-	currentBatchReady, err := r.currentBatchReady(ctx, planner.pcs, planner.pcsReplicaIndex, planner.entries)
+// be emitted. It checks that the most recent current-hash batch is scheduled, then that the standalone Pods
+// subsumed so far are scheduled, then that the next sub-step's drain keeps every in-scope component within
+// its MaxUnavailable budget, and finally that the sub-step still has something to drain after headroom
+// capping. The first check that fails holds the advance, and its name is returned as the hold reason for
+// tracing.
+func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, planPos planPosition, ss *subStep, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (canEmit bool, holdReason string, err error) {
+	currentBatchScheduled, err := r.currentBatchScheduled(ctx, planner.pcs, planner.pcsReplicaIndex, planner.entries)
 	if err != nil {
 		return false, "", err
 	}
-	if !currentBatchReady {
-		return false, "currentBatchReady=false", nil
+	if !currentBatchScheduled {
+		return false, "currentBatchScheduled=false", nil
 	}
-	if !subsumedPodsReady(standalonePCLQByComponent, pos) {
-		return false, "subsumedPodsReady=false", nil
+	if !subsumedPodsScheduled(standalonePCLQByComponent, planPos) {
+		return false, "subsumedPodsScheduled=false", nil
 	}
-	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent) {
+	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent, ss.drainCountByComponent()) {
 		return false, "maxUnavailableBudgetSatisfied=false", nil
+	}
+	if ss.drainsNothing() {
+		return false, "noHeadroomToDrain=true", nil
 	}
 	return true, "", nil
 }
 
-// currentBatchReady reports whether every PodGang carrying the most recent current-hash epoch has become
-// ready at least once. When no current-hash entry exists yet the first sub-step has nothing to wait on, so
-// it reports true.
-func (r _resource) currentBatchReady(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry) (bool, error) {
+// currentBatchScheduled reports whether every PodGang carrying the most recent current-hash epoch has been
+// scheduled at least once. When no current-hash entry exists yet the first sub-step has nothing to wait on,
+// so it reports true. Readiness is not required to advance because MaxUnavailable, checked separately,
+// bounds availability across both revisions.
+func (r _resource) currentBatchScheduled(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry) (bool, error) {
 	latestEpoch, err := componentutils.LatestEpochForGenerationHash(entries, *pcs.Status.CurrentGenerationHash)
 	if err != nil {
 		return false, groveerr.WrapError(err, errCodeInvalidEpoch, component.OperationSync,
@@ -217,40 +224,61 @@ func (r _resource) currentBatchReady(ctx context.Context, pcs *grovecorev1alpha1
 	if latestEpoch == nil {
 		return true, nil
 	}
-	return componentutils.AllPodGangsAtEpochEverReady(ctx, r.client, client.ObjectKeyFromObject(pcs), int32(pcsReplicaIndex), *latestEpoch)
+	return componentutils.AllPodGangsAtEpochEverScheduled(ctx, r.client, client.ObjectKeyFromObject(pcs), int32(pcsReplicaIndex), *latestEpoch)
 }
 
-// subsumedPodsReady reports whether every in-scope standalone PodClique has at least as many new-hash Ready
-// Pods as the plan has committed to the current hash for it. Standalone tail Pods subsume into an anchor
-// whose PodGang stays Ready at MinAvailable, so their readiness is tracked separately through the
-// PodClique's UpdatedReadyReplicas rather than the anchor PodGang. PodCliqueScalingGroups are not checked
-// here because they roll through their own tail PodGangs, whose readiness currentBatchReady covers.
-func subsumedPodsReady(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pos planPosition) bool {
+// subsumedPodsScheduled reports whether every in-scope standalone PodClique has at least as many new-hash
+// scheduled Pods as the plan has committed to the current hash for it. Standalone tail Pods subsume into an
+// anchor rather than getting their own PodGang, so their placement is tracked through the PodClique's
+// UpdatedScheduledReplicas rather than the anchor PodGang. PodCliqueScalingGroups are not checked here
+// because they roll through their own tail PodGangs, whose placement currentBatchScheduled covers.
+func subsumedPodsScheduled(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, planPos planPosition) bool {
 	for componentName, pclq := range standalonePCLQByComponent {
-		readyAtCurrentHash := int32(0)
+		scheduledAtCurrentHash := int32(0)
 		if pclq.Status.UpdateProgress != nil {
-			readyAtCurrentHash = pclq.Status.UpdateProgress.UpdatedReadyReplicas
+			scheduledAtCurrentHash = pclq.Status.UpdateProgress.UpdatedScheduledReplicas
 		}
-		if readyAtCurrentHash < pos.currentHashCountByComponent[componentName] {
+		if scheduledAtCurrentHash < planPos.currentHashCountByComponent[componentName] {
 			return false
 		}
 	}
 	return true
 }
 
-// maxUnavailableBudgetSatisfied reports whether every in-scope component stays at or above its available
-// count for the current update, its live replicas minus MaxUnavailable. A standalone PodClique is measured
-// by its Ready Pods and a PodCliqueScalingGroup by its available replicas.
-func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, liveReplicas, maxUnavailableByComponent map[string]int32) bool {
+// maxUnavailableBudgetSatisfied reports whether every in-scope component can absorb the next sub-step's
+// drain without the number of unavailable replicas exceeding MaxUnavailable. For each component it adds what
+// the sub-step will take down to the replicas already unavailable and holds the sub-step if that total would
+// cross MaxUnavailable, so unrelated unavailability that already uses the budget is not stacked on top of. A
+// standalone PodClique is measured by its Ready Pods and a PodCliqueScalingGroup by its available replicas.
+func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent, drainByComponent map[string]int32) bool {
 	for componentName, pclq := range standalonePCLQByComponent {
-		if pclq.Status.ReadyReplicas < liveReplicas[componentName]-maxUnavailableByComponent[componentName] {
+		unavailableAfterDrain := desiredReplicas[componentName] - pclq.Status.ReadyReplicas + drainByComponent[componentName]
+		if unavailableAfterDrain > maxUnavailableByComponent[componentName] {
 			return false
 		}
 	}
 	for componentName, pcsg := range pcsgByComponent {
-		if pcsg.Status.AvailableReplicas < liveReplicas[componentName]-maxUnavailableByComponent[componentName] {
+		unavailableAfterDrain := desiredReplicas[componentName] - pcsg.Status.AvailableReplicas + drainByComponent[componentName]
+		if unavailableAfterDrain > maxUnavailableByComponent[componentName] {
 			return false
 		}
 	}
 	return true
+}
+
+// headroomByComponent returns, per in-scope component, how many replicas may still be taken down before the
+// number unavailable would exceed MaxUnavailable. It is MaxUnavailable minus the replicas currently
+// unavailable, clamped at zero. A standalone PodClique is measured by its Ready Pods and a
+// PodCliqueScalingGroup by its available replicas.
+func headroomByComponent(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent map[string]int32) map[string]int32 {
+	headroom := make(map[string]int32, len(standalonePCLQByComponent)+len(pcsgByComponent))
+	for componentName, pclq := range standalonePCLQByComponent {
+		unavailable := desiredReplicas[componentName] - pclq.Status.ReadyReplicas
+		headroom[componentName] = max(0, maxUnavailableByComponent[componentName]-unavailable)
+	}
+	for componentName, pcsg := range pcsgByComponent {
+		unavailable := desiredReplicas[componentName] - pcsg.Status.AvailableReplicas
+		headroom[componentName] = max(0, maxUnavailableByComponent[componentName]-unavailable)
+	}
+	return headroom
 }

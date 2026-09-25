@@ -213,10 +213,10 @@ func TestMutateUpdatedReplica(t *testing.T) {
 	}
 }
 
-// TestMutateUpdatedReadyReplicas checks that the new-hash Ready Pod count is published on UpdateProgress
-// only while an update is in progress.
-func TestMutateUpdatedReadyReplicas(t *testing.T) {
-	t.Run("counts only new-hash Ready Pods while an update is in progress", func(t *testing.T) {
+// TestMutateUpdatedScheduledReplicas checks that the new-hash scheduled Pod count is published on
+// UpdateProgress only while an update is in progress.
+func TestMutateUpdatedScheduledReplicas(t *testing.T) {
+	t.Run("counts only new-hash scheduled Pods while an update is in progress", func(t *testing.T) {
 		pclq := &grovecorev1alpha1.PodClique{
 			Status: grovecorev1alpha1.PodCliqueStatus{
 				UpdateProgress: &grovecorev1alpha1.PodCliqueUpdateProgress{PodTemplateHash: "new-hash-v2"},
@@ -228,27 +228,27 @@ func TestMutateUpdatedReadyReplicas(t *testing.T) {
 			createPodWithHash("pod-3", "new-hash-v2"),
 			createPodWithHash("pod-4", "old-hash-v1"),
 		}
-		// Two of the three new-hash Pods are Ready, and an old-hash Ready Pod must not be counted.
-		readyPods := []*corev1.Pod{
+		// Two of the three new-hash Pods are scheduled, and an old-hash scheduled Pod must not be counted.
+		scheduledPods := []*corev1.Pod{
 			createPodWithHash("pod-1", "new-hash-v2"),
 			createPodWithHash("pod-2", "new-hash-v2"),
 			createPodWithHash("pod-4", "old-hash-v1"),
 		}
 
-		mutateUpdatedReplica(pclq, existingPods, readyPods)
+		mutateUpdatedReplica(pclq, existingPods, scheduledPods)
 
 		assert.Equal(t, int32(3), pclq.Status.UpdatedReplicas)
-		assert.Equal(t, int32(2), pclq.Status.UpdateProgress.UpdatedReadyReplicas)
+		assert.Equal(t, int32(2), pclq.Status.UpdateProgress.UpdatedScheduledReplicas)
 	})
 
-	t.Run("leaves UpdatedReadyReplicas unset when no update is in progress", func(t *testing.T) {
+	t.Run("leaves UpdatedScheduledReplicas unset when no update is in progress", func(t *testing.T) {
 		pclq := &grovecorev1alpha1.PodClique{
 			Status: grovecorev1alpha1.PodCliqueStatus{CurrentPodTemplateHash: ptr.To("stable-hash")},
 		}
 		existingPods := []*corev1.Pod{createPodWithHash("pod-1", "stable-hash")}
-		readyPods := []*corev1.Pod{createPodWithHash("pod-1", "stable-hash")}
+		scheduledPods := []*corev1.Pod{createPodWithHash("pod-1", "stable-hash")}
 
-		mutateUpdatedReplica(pclq, existingPods, readyPods)
+		mutateUpdatedReplica(pclq, existingPods, scheduledPods)
 
 		assert.Equal(t, int32(1), pclq.Status.UpdatedReplicas)
 		assert.Nil(t, pclq.Status.UpdateProgress)
