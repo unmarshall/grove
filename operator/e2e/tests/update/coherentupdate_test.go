@@ -35,6 +35,11 @@ const (
 	coherentWorkloadYAML = "../../yaml/workload-coherent.yaml"
 	// frontend 2 + inference PCSG (2 replicas x [prefill 1 + decode 1]) = 6 pods per PCS replica.
 	coherentExpectedPods = 6
+
+	coherentGTWorkloadName = "workload-coherent-gt"
+	coherentGTWorkloadYAML = "../../yaml/workload-coherent-gt.yaml"
+	// Two PCS replicas of 6 pods each.
+	coherentGTExpectedPods = 12
 )
 
 // Test_CU1_CoherentBootstrapLayout verifies that deploying a Coherent-strategy workload lays out the
@@ -480,6 +485,102 @@ func Test_CU10_CoherentUpdatePipelinesUnderDelayedReadiness(t *testing.T) {
 	assert.LessOrEqualf(t, maxUnavailable, 2, "MaxUnavailable=2 must never be exceeded, observed %d", maxUnavailable)
 	assert.Equalf(t, 2, maxUnavailable, "with MaxUnavailable=2 greater than MinAvailable=1 the roll should keep 2 frontend pods in flight, observed %d", maxUnavailable)
 	assertUpdateInProgressCleared(tc)
+}
+
+// Test_CU11_GangTerminationDuringCoherentUpdateRebuildsPodGangMap verifies that when a PCS replica that is
+// not the one under update is fully gang terminated during an in-flight coherent update, its PodGangMap is
+// deleted and rebuilt fresh. The rebuilt replica returns to the initial single-anchor layout, while the
+// updated replica keeps the multi-anchor layout the coherent update produced. This proves the map is reset
+// to match a freshly redeployed replica rather than left stranded at a stale layout.
+func Test_CU11_GangTerminationDuringCoherentUpdateRebuildsPodGangMap(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent-gt with two PCS replicas and verify 12 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentGTWorkloadName,
+		workloadYAML: coherentGTWorkloadYAML,
+		workerNodes:  16,
+		expectedPods: coherentGTExpectedPods,
+	})
+	defer cleanup()
+	tc.Timeout = 4 * time.Minute
+
+	tests.Logger.Info("2. Delay pod readiness so replica 0's coherent update stays in flight while replica 1 is gang terminated")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedLongPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedLongName); err != nil {
+			tests.Logger.Warnf("cleanup: delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+	tests.Logger.Info("2b. Make replica 1's fresh pods crash so gang termination fires for it while replica 0 rolls")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageExitedErrorR1Path); err != nil {
+		t.Fatalf("failed to apply crash KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageExitedErrorR1Name); err != nil {
+			tests.Logger.Warnf("cleanup: delete crash KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Trigger a coherent update of frontend and the inference PCSG, then wait until replica 0 is updating")
+	for _, cliqueName := range []string{"frontend", "prefill"} {
+		if err := triggerPodCliqueUpdate(tc, cliqueName); err != nil {
+			t.Fatalf("failed to trigger update of %s: %v", cliqueName, err)
+		}
+	}
+	if err := waitForOrdinalUpdating(tc, 0); err != nil {
+		t.Fatalf("replica 0 did not start updating: %v", err)
+	}
+
+	tests.Logger.Info("4. While replica 0 is updating, gang terminate replica 1 and wait for its PodGangMap to be rebuilt")
+	gangTerminateReplicaAndWaitForPodGangMapRebuild(t, tc, "prefill", 1)
+
+	tests.Logger.Info("5. Confirm replica 0 was still under update when replica 1 was gang terminated")
+	pcs, err := getPCS(tc, tc.Workload.Name)
+	if err != nil {
+		t.Fatalf("failed to read PodCliqueSet: %v", err)
+	}
+	if assert.NotNilf(t, pcs.Status.UpdateProgress, "expected an in-flight update") &&
+		assert.Lenf(t, pcs.Status.UpdateProgress.CurrentlyUpdating, 1, "expected exactly one replica under update") {
+		assert.Equalf(t, int32(0), pcs.Status.UpdateProgress.CurrentlyUpdating[0].ReplicaIndex, "replica 0 must still be the one under update")
+		assert.Nilf(t, pcs.Status.UpdateProgress.CurrentlyUpdating[0].UpdateEndedAt, "replica 0's update must not have ended yet")
+	}
+
+	tests.Logger.Info("6. Remove the shaping stages, recover replica 1, and wait for the coherent update to complete")
+	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageExitedErrorR1Name); err != nil {
+		t.Fatalf("failed to delete crash KWOK stage: %v", err)
+	}
+	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedLongName); err != nil {
+		t.Fatalf("failed to delete readiness-delay KWOK stage: %v", err)
+	}
+	// Replica 1's rebuilt pods crashed while the stage was active and will not recover on their own, so
+	// delete them once more to let fresh pods come up Ready under the default stage.
+	deleteAllLivePodsOnReplica(t, tc, 1)
+	if err := waitForRollingUpdateComplete(tc, 2); err != nil {
+		t.Fatalf("coherent update did not complete: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+
+	tests.Logger.Info("7. Replica 0 keeps the coherent multi-anchor layout; replica 1 is back to the initial single-anchor layout")
+	newHash := getPCSGenerationHash(t, tc)
+	entries0 := getPodGangMapEntries(t, tc, 0)
+	assertCoherentAnchorCompositions(t, entries0, newHash, "inference", []coherentAnchor{
+		{standalone: map[string]int32{"frontend": 1}, pcsgIndices: []int32{0}},
+		{standalone: map[string]int32{"frontend": 1}, pcsgIndices: []int32{1}},
+	})
+	assert.Empty(t, newHashTailPCSGIndices(entries0, newHash, "inference"), "replica 0's anchor-only plan must leave no leftover tail")
+
+	assertReplicaPodGangMap(t, getPodGangMapEntries(t, tc, 1), expectedReplicaPodGangMap{
+		standalonePodCounts: map[string]int32{"frontend": 2},
+		pcsgName:            "inference",
+		anchorIndices:       []int32{0},
+		tailIndices:         []int32{1},
+	})
+
+	tests.Logger.Info("8. Verify all 12 pods are Ready")
+	if err := tc.WaitForPods(coherentGTExpectedPods); err != nil {
+		t.Fatalf("pods did not become Ready after the coherent update and gang termination: %v", err)
+	}
 }
 
 type coherentAnchor struct {
