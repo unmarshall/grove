@@ -177,11 +177,12 @@ type PodCliqueUpdateProgress struct {
 	// preferential deletions in rolling update strategies, and in all strategies for scale-ins.
 	// PodCliqueStatus.PodTemplateHash is set to this hash once UpdateEndedAt is set, which marks the end of the update.
 	PodTemplateHash string `json:"podTemplateHash"`
-	// UpdatedReadyReplicas is the number of Pods at PodTemplateHash (the target hash of this update) that
-	// have a Ready condition. It is maintained only while the update is in progress. The coherent update
-	// engine reads it to confirm that Pods added in the current sub-step are serving before the next
-	// sub-step takes more Pods down. Once UpdateEndedAt is set it carries no further meaning.
-	UpdatedReadyReplicas int32 `json:"updatedReadyReplicas"`
+	// UpdatedScheduledReplicas is the number of Pods at PodTemplateHash (the target hash of this update) that
+	// have been scheduled. It is maintained only while the update is in progress. The coherent update engine
+	// reads it to confirm that Pods subsumed in the current sub-step are placed before the next sub-step takes
+	// more Pods down, since MaxUnavailable rather than readiness bounds availability. Once UpdateEndedAt is
+	// set it carries no further meaning.
+	UpdatedScheduledReplicas int32 `json:"updatedScheduledReplicas"`
 }
 
 // SetLastErrors sets the last errors observed by the controller when reconciling the PodClique.

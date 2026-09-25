@@ -166,10 +166,10 @@ func TestComputeDesiredReplicas(t *testing.T) {
 	}
 }
 
-// TestSubsumedPodsReady covers the standalone-Pod readiness gate. Each case names the standalone
-// components with their committed current-hash count and their UpdateProgress.UpdatedReadyReplicas, and
+// TestSubsumedPodsScheduled covers the standalone-Pod scheduling gate. Each case names the standalone
+// components with their committed current-hash count and their UpdateProgress.UpdatedScheduledReplicas, and
 // states whether the gate lets the next sub-step proceed.
-func TestSubsumedPodsReady(t *testing.T) {
+func TestSubsumedPodsScheduled(t *testing.T) {
 	testCases := []struct {
 		description                 string
 		standalonePCLQByComponent   map[string]grovecorev1alpha1.PodClique
@@ -177,20 +177,20 @@ func TestSubsumedPodsReady(t *testing.T) {
 		want                        bool
 	}{
 		{
-			description:                 "every subsumed Pod is ready so the gate proceeds",
-			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedReadyReplicas(5)},
+			description:                 "every subsumed Pod is scheduled so the gate proceeds",
+			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedScheduledReplicas(5)},
 			currentHashCountByComponent: map[string]int32{"frontend": 5},
 			want:                        true,
 		},
 		{
 			description:                 "a component is still catching up so the gate holds",
-			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedReadyReplicas(3)},
+			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedScheduledReplicas(3)},
 			currentHashCountByComponent: map[string]int32{"frontend": 5},
 			want:                        false,
 		},
 		{
 			description:                 "nothing committed yet so there is nothing to wait on",
-			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedReadyReplicas(0)},
+			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedScheduledReplicas(0)},
 			currentHashCountByComponent: map[string]int32{"frontend": 0},
 			want:                        true,
 		},
@@ -201,80 +201,85 @@ func TestSubsumedPodsReady(t *testing.T) {
 			want:                        false,
 		},
 		{
-			description:                 "a previously ready Pod regressed so the gate re-holds",
-			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedReadyReplicas(7)},
+			description:                 "a previously scheduled Pod regressed so the gate re-holds",
+			standalonePCLQByComponent:   map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithUpdatedScheduledReplicas(7)},
 			currentHashCountByComponent: map[string]int32{"frontend": 8},
 			want:                        false,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, subsumedPodsReady(tc.standalonePCLQByComponent, planPosition{currentHashCountByComponent: tc.currentHashCountByComponent}))
+			assert.Equal(t, tc.want, subsumedPodsScheduled(tc.standalonePCLQByComponent, planPosition{currentHashCountByComponent: tc.currentHashCountByComponent}))
 		})
 	}
 }
 
-// TestMaxUnavailableBudgetSatisfied covers the disruption budget gate. Each case names the in-scope
-// components with their live replicas, MaxUnavailable, and the available count a standalone PodClique
-// reports through ReadyReplicas or a PodCliqueScalingGroup through AvailableReplicas, and states whether
-// every component stays at or above liveReplicas minus MaxUnavailable.
+// TestMaxUnavailableBudgetSatisfied covers the drain-aware disruption budget gate. Each case names the
+// in-scope components with their desired replicas, MaxUnavailable, the available count a standalone
+// PodClique reports through ReadyReplicas or a PodCliqueScalingGroup through AvailableReplicas, and what the
+// next sub-step would drain, and states whether the drain keeps unavailability within MaxUnavailable.
 func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 	testCases := []struct {
 		description               string
 		standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique
 		pcsgByComponent           map[string]grovecorev1alpha1.PodCliqueScalingGroup
-		liveReplicas              map[string]int32
+		desiredReplicas           map[string]int32
 		maxUnavailableByComponent map[string]int32
+		drainByComponent          map[string]int32
 		want                      bool
 	}{
 		{
-			description:               "a standalone PodClique at its budget threshold proceeds",
+			description:               "a fully available standalone PodClique absorbs a full-budget drain",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 3},
+			want:                      true,
+		},
+		{
+			description:               "a standalone PodClique already at the budget holds any further drain",
 			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(7)},
-			liveReplicas:              map[string]int32{"frontend": 10},
+			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
-			want:                      true,
-		},
-		{
-			description:               "a standalone PodClique below its budget threshold holds",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
-			liveReplicas:              map[string]int32{"frontend": 10},
-			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 1},
 			want:                      false,
 		},
 		{
-			description:               "a PodCliqueScalingGroup at its budget threshold proceeds",
+			description:               "unrelated unavailability plus the sub-step drain crossing the budget holds",
 			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(4)},
-			liveReplicas:              map[string]int32{"decode": 6},
+			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
-			want:                      true,
-		},
-		{
-			description:               "a PodCliqueScalingGroup below its budget threshold holds",
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(3)},
-			liveReplicas:              map[string]int32{"decode": 6},
-			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			drainByComponent:          map[string]int32{"decode": 2},
 			want:                      false,
 		},
 		{
-			description:               "a standalone PodClique and a PodCliqueScalingGroup both within budget proceed",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(5)},
-			liveReplicas:              map[string]int32{"frontend": 10, "decode": 6},
-			maxUnavailableByComponent: map[string]int32{"frontend": 3, "decode": 2},
+			description:               "a PodCliqueScalingGroup drain that exactly reaches the budget proceeds",
+			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			drainByComponent:          map[string]int32{"decode": 2},
 			want:                      true,
+		},
+		{
+			description:               "a component not touched by the sub-step but already over budget holds",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{},
+			want:                      false,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.liveReplicas, tc.maxUnavailableByComponent))
+			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent))
 		})
 	}
 }
 
-// TestCurrentBatchReady covers the readiness gate on the most recent current-hash batch. It reports true
-// when no current-hash entry exists yet, and otherwise tracks whether the PodGangs at the latest
-// current-hash epoch have become ready at least once.
-func TestCurrentBatchReady(t *testing.T) {
+// TestCurrentBatchScheduled covers the scheduling gate on the most recent current-hash batch. It reports
+// true when no current-hash entry exists yet, and otherwise tracks whether the PodGangs at the latest
+// current-hash epoch have been scheduled at least once.
+func TestCurrentBatchScheduled(t *testing.T) {
 	pcs := &grovecorev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
@@ -285,25 +290,25 @@ func TestCurrentBatchReady(t *testing.T) {
 		entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}}
 		r := _resource{client: testutils.NewTestClientBuilder().Build()}
 
-		ready, err := r.currentBatchReady(t.Context(), pcs, 0, entries)
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, entries)
 
 		require.NoError(t, err)
 		assert.True(t, ready)
 	})
 
-	t.Run("latest current-hash batch is ready", func(t *testing.T) {
+	t.Run("latest current-hash batch is scheduled", func(t *testing.T) {
 		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch("pg-200", "200", true)).Build()}
 
-		ready, err := r.currentBatchReady(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
 
 		require.NoError(t, err)
 		assert.True(t, ready)
 	})
 
-	t.Run("latest current-hash batch is not ready", func(t *testing.T) {
+	t.Run("latest current-hash batch is not scheduled", func(t *testing.T) {
 		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch("pg-200", "200", false)).Build()}
 
-		ready, err := r.currentBatchReady(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
 
 		require.NoError(t, err)
 		assert.False(t, ready)
@@ -334,7 +339,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	t.Run("gate holds when the current batch is not ready so the entries are unchanged", func(t *testing.T) {
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{anchorV1, anchorV2}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, ptr.To[int32](2))
-		// No PodGang exists at the latest current-hash epoch, so currentBatchReady is false.
+		// No PodGang exists at the latest current-hash epoch, so currentBatchScheduled is false.
 		r := _resource{client: testutils.NewTestClientBuilder().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
 
 		entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
@@ -359,83 +364,8 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	})
 }
 
-// pclqWithUpdatedReadyReplicas builds a standalone PodClique reporting the given new-hash Ready Pod count on
-// its in-progress UpdateProgress.
-func pclqWithUpdatedReadyReplicas(updatedReady int32) grovecorev1alpha1.PodClique {
-	return grovecorev1alpha1.PodClique{
-		Status: grovecorev1alpha1.PodCliqueStatus{
-			UpdateProgress: &grovecorev1alpha1.PodCliqueUpdateProgress{UpdatedReadyReplicas: updatedReady},
-		},
-	}
-}
-
-// pclqWithReadyReplicas builds a standalone PodClique reporting the given total Ready Pod count.
-func pclqWithReadyReplicas(ready int32) grovecorev1alpha1.PodClique {
-	return grovecorev1alpha1.PodClique{Status: grovecorev1alpha1.PodCliqueStatus{ReadyReplicas: ready}}
-}
-
-// pcsgWithAvailableReplicas builds a PodCliqueScalingGroup reporting the given available replica count.
-func pcsgWithAvailableReplicas(available int32) grovecorev1alpha1.PodCliqueScalingGroup {
-	return grovecorev1alpha1.PodCliqueScalingGroup{Status: grovecorev1alpha1.PodCliqueScalingGroupStatus{AvailableReplicas: available}}
-}
-
-// podGangAtEpoch builds a PodGang owned by the test PCS replica 0 and stamped with the given epoch, marked
-// ready when ready is true.
-func podGangAtEpoch(name, epoch string, ready bool) *groveschedulerv1alpha1.PodGang {
-	builder := testutils.NewPodGangBuilder(name, coherentTestNamespace).
-		WithLabels(map[string]string{
-			apicommon.LabelPartOfKey:                coherentTestPCSName,
-			apicommon.LabelPodCliqueSetReplicaIndex: "0",
-			apicommon.LabelEpoch:                    epoch,
-		})
-	if ready {
-		builder = builder.WithLastReady()
-	}
-	return builder.Build()
-}
-
-// newCoherentTestSnapshot builds a syncSnapshot for a single standalone component frontend under a coherent
-// update, with the given live replicas and MinAvailable. maxUnavailable sets the component's
-// RollingUpdate.MaxUnavailable, or leaves it unset so the Coherent default of MinAvailable applies. It sets
-// a Ready and UpdatedReady count equal to liveReplicas so the subsumed-Pods and budget gates pass unless a
-// case overrides them.
-func newCoherentTestSnapshot(pcsNameReplica apicommon.ResourceNameReplica, liveReplicas, minAvailable int32, maxUnavailable *int32) *syncSnapshot {
-	pcs := &grovecorev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
-		Spec: grovecorev1alpha1.PodCliqueSetSpec{
-			Replicas: 1,
-			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
-				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
-					{
-						Name:          "frontend",
-						RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: maxUnavailable},
-						Spec: grovecorev1alpha1.PodCliqueSpec{
-							Replicas:     liveReplicas,
-							MinAvailable: ptr.To(minAvailable),
-						},
-					},
-				},
-			},
-		},
-		Status: grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
-	}
-	frontendPCLQ := grovecorev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: apicommon.GeneratePodCliqueName(pcsNameReplica, "frontend")},
-		Spec:       grovecorev1alpha1.PodCliqueSpec{Replicas: liveReplicas},
-		Status: grovecorev1alpha1.PodCliqueStatus{
-			ReadyReplicas:  liveReplicas,
-			UpdateProgress: &grovecorev1alpha1.PodCliqueUpdateProgress{UpdatedReadyReplicas: liveReplicas},
-		},
-	}
-	return &syncSnapshot{
-		pcs:                              pcs,
-		mvuTemplate:                      &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": minAvailable}},
-		existingStandalonePCLQsByReplica: map[int][]grovecorev1alpha1.PodClique{0: {frontendPCLQ}},
-	}
-}
-
-// TestEntryHoldsInScopeContent checks the predicate that gates reconvergence, reporting whether an entry
-// still carries pods or replica indices for any component within the coherent update scope.
+// pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled Pod
+// count on its in-progress UpdateProgress.
 func TestEntryHoldsInScopeContent(t *testing.T) {
 	mvu := &mvuTemplate{
 		standalonePCLQs: map[string]int32{"frontend": 1},
@@ -486,3 +416,92 @@ func TestAdvanceFullyDrainedEntries(t *testing.T) {
 		})
 	}
 }
+
+// TestHeadroomByComponent checks the per-component MaxUnavailable headroom used to cap a sub-step's drain,
+// including the clamp to zero when a component is already over budget.
+func TestHeadroomByComponent(t *testing.T) {
+	standalone := map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)}
+	pcsg := map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)}
+
+	got := headroomByComponent(standalone, pcsg, map[string]int32{"frontend": 10, "decode": 6}, map[string]int32{"frontend": 3, "decode": 2})
+	assert.Equal(t, map[string]int32{"frontend": 1, "decode": 2}, got)
+
+	overBudget := headroomByComponent(map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)}, nil, map[string]int32{"frontend": 10}, map[string]int32{"frontend": 3})
+	assert.Equal(t, map[string]int32{"frontend": 0}, overBudget)
+}
+
+func pclqWithUpdatedScheduledReplicas(updatedReady int32) grovecorev1alpha1.PodClique {
+	return grovecorev1alpha1.PodClique{
+		Status: grovecorev1alpha1.PodCliqueStatus{
+			UpdateProgress: &grovecorev1alpha1.PodCliqueUpdateProgress{UpdatedScheduledReplicas: updatedReady},
+		},
+	}
+}
+
+// pclqWithReadyReplicas builds a standalone PodClique reporting the given total Ready Pod count.
+func pclqWithReadyReplicas(ready int32) grovecorev1alpha1.PodClique {
+	return grovecorev1alpha1.PodClique{Status: grovecorev1alpha1.PodCliqueStatus{ReadyReplicas: ready}}
+}
+
+// pcsgWithAvailableReplicas builds a PodCliqueScalingGroup reporting the given available replica count.
+func pcsgWithAvailableReplicas(available int32) grovecorev1alpha1.PodCliqueScalingGroup {
+	return grovecorev1alpha1.PodCliqueScalingGroup{Status: grovecorev1alpha1.PodCliqueScalingGroupStatus{AvailableReplicas: available}}
+}
+
+// podGangAtEpoch builds a PodGang owned by the test PCS replica 0 and stamped with the given epoch, marked
+// scheduled when scheduled is true.
+func podGangAtEpoch(name, epoch string, scheduled bool) *groveschedulerv1alpha1.PodGang {
+	builder := testutils.NewPodGangBuilder(name, coherentTestNamespace).
+		WithLabels(map[string]string{
+			apicommon.LabelPartOfKey:                coherentTestPCSName,
+			apicommon.LabelPodCliqueSetReplicaIndex: "0",
+			apicommon.LabelEpoch:                    epoch,
+		})
+	if scheduled {
+		builder = builder.WithLastScheduled()
+	}
+	return builder.Build()
+}
+
+// newCoherentTestSnapshot builds a syncSnapshot for a single standalone component frontend under a coherent
+// update, with the given live replicas and MinAvailable. maxUnavailable sets the component's
+// RollingUpdate.MaxUnavailable, or leaves it unset so the Coherent default of MinAvailable applies. It sets
+// a Ready and UpdatedReady count equal to liveReplicas so the subsumed-Pods and budget gates pass unless a
+// case overrides them.
+func newCoherentTestSnapshot(pcsNameReplica apicommon.ResourceNameReplica, liveReplicas, minAvailable int32, maxUnavailable *int32) *syncSnapshot {
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Replicas: 1,
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{
+						Name:          "frontend",
+						RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: maxUnavailable},
+						Spec: grovecorev1alpha1.PodCliqueSpec{
+							Replicas:     liveReplicas,
+							MinAvailable: ptr.To(minAvailable),
+						},
+					},
+				},
+			},
+		},
+		Status: grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
+	}
+	frontendPCLQ := grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{Name: apicommon.GeneratePodCliqueName(pcsNameReplica, "frontend")},
+		Spec:       grovecorev1alpha1.PodCliqueSpec{Replicas: liveReplicas},
+		Status: grovecorev1alpha1.PodCliqueStatus{
+			ReadyReplicas:  liveReplicas,
+			UpdateProgress: &grovecorev1alpha1.PodCliqueUpdateProgress{UpdatedScheduledReplicas: liveReplicas},
+		},
+	}
+	return &syncSnapshot{
+		pcs:                              pcs,
+		mvuTemplate:                      &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": minAvailable}},
+		existingStandalonePCLQsByReplica: map[int][]grovecorev1alpha1.PodClique{0: {frontendPCLQ}},
+	}
+}
+
+// TestEntryHoldsInScopeContent checks the predicate that gates reconvergence, reporting whether an entry
+// still carries pods or replica indices for any component within the coherent update scope.

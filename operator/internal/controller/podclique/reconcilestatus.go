@@ -64,7 +64,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 
 	// mutate PodClique Status Replicas, ReadyReplicas, ScheduleGatedReplicas and UpdatedReplicas.
 	mutateReplicas(pclq, podCategories, len(existingPods))
-	mutateUpdatedReplica(pclq, existingPods, podCategories[corev1.PodReady])
+	mutateUpdatedReplica(pclq, existingPods, podCategories[corev1.PodScheduled])
 	// mutate PodClique.Status.CurrentPodTemplateHash and PodClique.Status.CurrentPodCliqueSetGenerationHash
 	if err = mutateCurrentHashes(logger, pcs, pclq); err != nil {
 		logger.Error(err, "failed to compute PodClique current hashes")
@@ -149,8 +149,8 @@ func mutateReplicas(pclq *grovecorev1alpha1.PodClique, podCategories map[corev1.
 }
 
 // mutateUpdatedReplica calculates and sets the number of pods with the expected template hash, and while
-// an update is in progress the number of those pods that are also Ready.
-func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods, readyPods []*corev1.Pod) {
+// an update is in progress the number of those pods that are also scheduled.
+func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods, scheduledPods []*corev1.Pod) {
 	var expectedPodTemplateHash string
 	// If UpdateProgress exists (update in progress or recently completed), use the target hash from it.
 	// This covers both the active update phase and the window after completion before CurrentPodTemplateHash is synced.
@@ -171,10 +171,10 @@ func mutateUpdatedReplica(pclq *grovecorev1alpha1.PodClique, existingPods, ready
 	// Once the PCLQ is successfully reconciled, the expectedPodTemplateHash will be set and the updated replicas can be calculated correctly.
 	if expectedPodTemplateHash != "" {
 		pclq.Status.UpdatedReplicas = countPodsAtTemplateHash(existingPods, expectedPodTemplateHash)
-		// UpdatedReadyReplicas lives on UpdateProgress and is meaningful only while an update runs. When no
-		// update is in flight the count carries no distinct information over ReadyReplicas.
+		// UpdatedScheduledReplicas lives on UpdateProgress and is meaningful only while an update runs. When no
+		// update is in flight the count carries no distinct information over ScheduledReplicas.
 		if pclq.Status.UpdateProgress != nil {
-			pclq.Status.UpdateProgress.UpdatedReadyReplicas = countPodsAtTemplateHash(readyPods, expectedPodTemplateHash)
+			pclq.Status.UpdateProgress.UpdatedScheduledReplicas = countPodsAtTemplateHash(scheduledPods, expectedPodTemplateHash)
 		}
 	}
 }

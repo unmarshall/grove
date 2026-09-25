@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/kwok"
@@ -389,6 +390,98 @@ func Test_CU8_CoherentUpdateResumesAfterOperatorRestart(t *testing.T) {
 // coherentAnchor is the expected composition of one anchor entry a coherent update commits, its standalone
 // PodClique pod counts and the inference PCSG replica indices it carries. It is matched against actual
 // anchors as a multiset, so epoch and anchor index ordering do not matter.
+const (
+	coherentMaxUnavailWorkloadName = "workload-coherent-mu"
+	coherentMaxUnavailWorkloadYAML = "../../yaml/workload-coherent-mu.yaml"
+	// frontend 4 + inference PCSG (2 replicas x [prefill 1 + decode 1]) = 8 pods.
+	coherentMaxUnavailExpectedPods = 8
+)
+
+// Test_CU9_CoherentUpdateNeverExceedsMaxUnavailable verifies a coherent update never leaves more than
+// MaxUnavailable pods of a component unavailable at once, even while the batch it just created is not yet
+// Ready. The readiness-delay stage holds new pods not-Ready, so a gate that ignored the incoming drain
+// would take the next batch down on top and exceed MaxUnavailable. The drain-aware gate holds instead.
+func Test_CU9_CoherentUpdateNeverExceedsMaxUnavailable(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Delay pod readiness so the unavailability window is observable")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+			t.Errorf("failed to delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Roll the frontend clique while sampling not-ready frontend pods")
+	tcLong := *tc
+	tcLong.Timeout = 2 * time.Minute
+	maxUnavailable, err := maxUnavailablePods(&tcLong, notReadyPodForClique("frontend"), func() error {
+		if err := triggerPodCliqueUpdate(&tcLong, "frontend"); err != nil {
+			return err
+		}
+		return waitForRollingUpdateComplete(&tcLong, 1)
+	})
+	if err != nil {
+		t.Fatalf("coherent update of frontend did not complete: %v", err)
+	}
+
+	tests.Logger.Info("4. Verify MaxUnavailable=1 was never exceeded")
+	assert.LessOrEqualf(t, maxUnavailable, 1, "a coherent update must never leave more than MaxUnavailable=1 frontend pods unavailable at once, observed %d", maxUnavailable)
+	assertUpdateInProgressCleared(tc)
+}
+
+// Test_CU10_CoherentUpdatePipelinesUnderDelayedReadiness verifies that when MaxUnavailable (2) exceeds
+// MinAvailable (1), a coherent update keeps up to MaxUnavailable pods in flight rather than serializing on
+// readiness. With readiness delayed it drives two frontend pods unavailable at once, and never more. At
+// MaxUnavailable equal to MinAvailable the same measurement would be 1.
+func Test_CU10_CoherentUpdatePipelinesUnderDelayedReadiness(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent-mu and verify 8 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentMaxUnavailWorkloadName,
+		workloadYAML: coherentMaxUnavailWorkloadYAML,
+		workerNodes:  12,
+		expectedPods: coherentMaxUnavailExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Delay pod readiness so the in-flight batches stay observable")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath); err != nil {
+		t.Fatalf("failed to apply readiness-delay KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName); err != nil {
+			t.Errorf("failed to delete readiness-delay KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Roll the frontend clique while sampling not-ready frontend pods")
+	tcLong := *tc
+	tcLong.Timeout = 3 * time.Minute
+	maxUnavailable, err := maxUnavailablePods(&tcLong, notReadyPodForClique("frontend"), func() error {
+		if err := triggerPodCliqueUpdate(&tcLong, "frontend"); err != nil {
+			return err
+		}
+		return waitForRollingUpdateComplete(&tcLong, 1)
+	})
+	if err != nil {
+		t.Fatalf("coherent update of frontend did not complete: %v", err)
+	}
+
+	tests.Logger.Info("4. Verify the roll pipelined to MaxUnavailable=2 and never exceeded it")
+	assert.LessOrEqualf(t, maxUnavailable, 2, "MaxUnavailable=2 must never be exceeded, observed %d", maxUnavailable)
+	assert.Equalf(t, 2, maxUnavailable, "with MaxUnavailable=2 greater than MinAvailable=1 the roll should keep 2 frontend pods in flight, observed %d", maxUnavailable)
+	assertUpdateInProgressCleared(tc)
+}
+
 type coherentAnchor struct {
 	standalone  map[string]int32
 	pcsgIndices []int32

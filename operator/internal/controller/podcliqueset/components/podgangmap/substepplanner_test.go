@@ -171,13 +171,13 @@ func TestAscertainPlanPosition(t *testing.T) {
 	// Step plan is numAnchorBearingSteps 3, target {frontend:3, decode:3}, leftover {frontend:1, decode:0}. The
 	// committed entries carry frontend:5 and decode:3, so step 0 is fully committed and the open step 1 holds
 	// frontend:2, decode:0, no leftover yet.
-	pos, err := p.ascertainPlanPosition()
+	planPos, err := p.ascertainPlanPosition()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]int32{"frontend": 5, "decode": 3}, pos.currentHashCountByComponent)
-	assert.Equal(t, int32(1), pos.anchorBearingStepsDone)
-	assert.Equal(t, map[string]int32{"frontend": 2, "decode": 0}, pos.currentAnchorStepCountByComponent)
-	assert.Equal(t, map[string]int32{"frontend": 0, "decode": 0}, pos.leftoverCountByComponent)
-	assert.Equal(t, "200", pos.mostRecentAnchorEpoch)
+	assert.Equal(t, map[string]int32{"frontend": 5, "decode": 3}, planPos.currentHashCountByComponent)
+	assert.Equal(t, int32(1), planPos.anchorBearingStepsDone)
+	assert.Equal(t, map[string]int32{"frontend": 2, "decode": 0}, planPos.currentAnchorStepCountByComponent)
+	assert.Equal(t, map[string]int32{"frontend": 0, "decode": 0}, planPos.leftoverCountByComponent)
+	assert.Equal(t, "200", planPos.mostRecentAnchorEpoch)
 }
 
 // -----------------------------------------------------------------------------
@@ -274,7 +274,7 @@ func TestBuildNonAnchorSubStep(t *testing.T) {
 	indexStartFn := func(_ string, _ int32) int32 { return 2 }
 
 	t.Run("clamps a PCSG to MaxUnavailable and subsumes standalone pods", func(t *testing.T) {
-		ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{"frontend": 2, "decode": 4}, indexStartFn)
+		ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{"frontend": 2, "decode": 4}, indexStartFn, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ss)
 		assert.Equal(t, "12345", ss.epoch)
@@ -286,7 +286,7 @@ func TestBuildNonAnchorSubStep(t *testing.T) {
 		assert.Equal(t, map[string]int32{"frontend": 2}, ss.drainStandalonePCLQCounts)
 	})
 	t.Run("returns nil when nothing remains", func(t *testing.T) {
-		ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{}, indexStartFn)
+		ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{}, indexStartFn, nil)
 		require.NoError(t, err)
 		assert.Nil(t, ss)
 	})
@@ -337,7 +337,7 @@ func TestBuildTailSubStep(t *testing.T) {
 		"prefill":  {liveReplicas: 4, minAvailable: 2, maxUnavailable: 2},
 		"decode":   {liveReplicas: 12, minAvailable: 2, maxUnavailable: 3},
 	})
-	ss, err := planner.buildTailSubStep(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 2, "prefill": 2, "decode": 2}})
+	ss, err := planner.buildTailSubStep(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 2, "prefill": 2, "decode": 2}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]int32{"decode": {2, 3, 4}}, ss.tailPCSGReplicaIndices)
 	assert.Equal(t, map[string]int32{"frontend": 2}, ss.subsumeStandalonePCLQCounts)
@@ -356,7 +356,7 @@ func TestBuildLeftoverSubStep(t *testing.T) {
 		"frontend": {liveReplicas: 9, minAvailable: 2, maxUnavailable: 2, standalone: true},
 		"decode":   {liveReplicas: 22, minAvailable: 3, maxUnavailable: 4},
 	})
-	ss, err := planner.buildLeftoverSubStep(planPosition{leftoverCountByComponent: map[string]int32{"frontend": 0, "decode": 0}})
+	ss, err := planner.buildLeftoverSubStep(planPosition{leftoverCountByComponent: map[string]int32{"frontend": 0, "decode": 0}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]int32{"decode": {20, 21}}, ss.tailPCSGReplicaIndices)
 	assert.Equal(t, map[string]int32{"frontend": 1}, ss.subsumeStandalonePCLQCounts)
@@ -381,26 +381,26 @@ func TestNext(t *testing.T) {
 	}
 	t.Run("an open step with tail returns a tail sub-step", func(t *testing.T) {
 		// Anchor of step 0 just committed MinAvailable, so frontend and decode still have tail.
-		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 2, "prefill": 3, "decode": 3}})
+		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 2, "prefill": 3, "decode": 3}}, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ss)
 		assert.False(t, ss.opensAnchor)
 		assert.NotEmpty(t, ss.tailPCSGReplicaIndices)
 	})
 	t.Run("no open step opens the next anchor-bearing step", func(t *testing.T) {
-		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 0, "prefill": 0, "decode": 0}})
+		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 0, currentAnchorStepCountByComponent: map[string]int32{"frontend": 0, "prefill": 0, "decode": 0}}, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ss)
 		assert.True(t, ss.opensAnchor)
 	})
 	t.Run("all anchor-bearing steps committed rolls leftover", func(t *testing.T) {
-		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 3, currentHashCountByComponent: map[string]int32{"frontend": 9, "prefill": 9, "decode": 18}, leftoverCountByComponent: map[string]int32{"frontend": 0, "prefill": 0, "decode": 0}})
+		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 3, currentHashCountByComponent: map[string]int32{"frontend": 9, "prefill": 9, "decode": 18}, leftoverCountByComponent: map[string]int32{"frontend": 0, "prefill": 0, "decode": 0}}, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ss)
 		assert.NotEmpty(t, ss.tailPCSGReplicaIndices)
 	})
 	t.Run("fully committed returns nil", func(t *testing.T) {
-		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 3, currentHashCountByComponent: map[string]int32{"frontend": 10, "prefill": 10, "decode": 20}, leftoverCountByComponent: map[string]int32{"frontend": 1, "prefill": 1, "decode": 2}})
+		ss, err := newPlanner().next(planPosition{anchorBearingStepsDone: 3, currentHashCountByComponent: map[string]int32{"frontend": 10, "prefill": 10, "decode": 20}, leftoverCountByComponent: map[string]int32{"frontend": 1, "prefill": 1, "decode": 2}}, nil)
 		require.NoError(t, err)
 		assert.Nil(t, ss)
 	})
@@ -472,7 +472,7 @@ func TestNextForStandaloneOnlyMVU(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			ss, err := newPlanner().next(tc.position)
+			ss, err := newPlanner().next(tc.position, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, ss)
 		})
@@ -546,7 +546,7 @@ func TestNextForPCSGOnlyMVU(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			ss, err := newPlanner().next(tc.position)
+			ss, err := newPlanner().next(tc.position, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, ss)
 		})
@@ -572,6 +572,52 @@ func TestDependsOnLatestEpoch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, dependsOn)
 	})
+}
+
+func TestBuildNonAnchorSubStepCapsByHeadroom(t *testing.T) {
+	// frontend standalone MaxUnavailable 5, decode PCSG MaxUnavailable 3. Remaining 4/4 would roll 4/3, but
+	// headroom 1/2 caps them to 1/2.
+	entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "100", PodCliqueSetGenerationHash: "v2"}}
+	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 12345)), "v2", entries, map[string]testComponent{
+		"frontend": {liveReplicas: 10, minAvailable: 2, maxUnavailable: 5, standalone: true},
+		"decode":   {liveReplicas: 20, minAvailable: 3, maxUnavailable: 3},
+	})
+	indexStartFn := func(_ string, _ int32) int32 { return 2 }
+
+	ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{"frontend": 4, "decode": 4}, indexStartFn, map[string]int32{"frontend": 1, "decode": 2})
+
+	require.NoError(t, err)
+	require.NotNil(t, ss)
+	assert.Equal(t, map[string]int32{"frontend": 1}, ss.subsumeStandalonePCLQCounts)
+	assert.Equal(t, map[string]int32{"frontend": 1}, ss.drainStandalonePCLQCounts)
+	assert.Equal(t, map[string][]int32{"decode": {2, 3}}, ss.tailPCSGReplicaIndices)
+	assert.Equal(t, map[string][]int32{"decode": {2, 3}}, ss.drainPCSGReplicaIndices)
+}
+
+func TestBuildNonAnchorSubStepHeadroomZeroDrainsNothing(t *testing.T) {
+	// With zero headroom on every component the sub-step rolls nothing this reconcile.
+	entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "100", PodCliqueSetGenerationHash: "v2"}}
+	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 12345)), "v2", entries, map[string]testComponent{
+		"frontend": {liveReplicas: 10, minAvailable: 2, maxUnavailable: 5, standalone: true},
+		"decode":   {liveReplicas: 20, minAvailable: 3, maxUnavailable: 3},
+	})
+	indexStartFn := func(_ string, _ int32) int32 { return 2 }
+
+	ss, err := planner.buildNonAnchorSubStep(newEpoch(planner.clk), "100", map[string]int32{"frontend": 4, "decode": 4}, indexStartFn, map[string]int32{"frontend": 0, "decode": 0})
+
+	require.NoError(t, err)
+	require.NotNil(t, ss)
+	assert.True(t, ss.drainsNothing())
+}
+
+func TestSubStepDrainCountAndDrainsNothing(t *testing.T) {
+	ss := subStep{
+		drainStandalonePCLQCounts: map[string]int32{"frontend": 2},
+		drainPCSGReplicaIndices:   map[string][]int32{"decode": {0, 1, 2}},
+	}
+	assert.Equal(t, map[string]int32{"frontend": 2, "decode": 3}, ss.drainCountByComponent())
+	assert.False(t, ss.drainsNothing())
+	assert.True(t, subStep{}.drainsNothing())
 }
 
 func pcsWithCurrentHash(currentGenerationHash string) *grovecorev1alpha1.PodCliqueSet {
