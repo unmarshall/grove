@@ -21,6 +21,7 @@ import (
 	"strconv"
 
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 )
 
 // newPodGangEntry constructs a fresh PodGangEntry setting epoch, PodCliqueSet generation hash and
@@ -102,7 +103,7 @@ func advanceEntriesGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsC
 // entries, so a PodGangMap deliberately holds entries for more than one generation hash at once.
 // Advancing all entries to the current hash would erase that distinction.
 func shouldAdvanceEntriesGenerationHash(pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry) bool {
-	if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy {
+	if componentutils.IsCoherentStrategy(pcs) {
 		return false
 	}
 	currentHash := *pcs.Status.CurrentGenerationHash

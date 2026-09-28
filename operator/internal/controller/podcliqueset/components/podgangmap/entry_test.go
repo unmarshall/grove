@@ -112,9 +112,9 @@ func TestShouldAdvanceEntriesGenerationHash(t *testing.T) {
 		expected     bool
 	}{
 		{
-			name:        "nil strategy defaults to RollingRecreate and advances on drift",
+			name:        "nil strategy defaults to Coherent and never advances when entries lag",
 			entryHashes: []string{"old"},
-			expected:    true,
+			expected:    false,
 		},
 		{
 			name:         "RollingRecreate advances when an entry lags the current hash",
@@ -150,7 +150,7 @@ func TestShouldAdvanceEntriesGenerationHash(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pcsBuilder := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
-				WithPodCliqueSetGenerationHash(ptr.To("new"))
+				WithPodCliqueSetGenerationHash(new("new"))
 			if tt.strategyType != nil {
 				pcsBuilder.WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: *tt.strategyType})
 			}

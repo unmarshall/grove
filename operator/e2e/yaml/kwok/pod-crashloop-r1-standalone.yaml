@@ -1,21 +1,22 @@
-# KWOK Stage that makes a fresh pod of PCS replica 1 report a container that terminated with a non-zero
-# exit code and stays not-ready, simulating a genuinely crashing workload (an unrelated failure). Scoped to
-# replica 1 by the podcliqueset-replica-index label so it does not affect replica 0's in-flight coherent
-# update. Grove counts such a pod as unavailable (PodHasAtleastOneContainerWithNonZeroExitCode), so the
-# component drops below MinAvailable and, after terminationDelay, the PCS-level gang termination fires.
-# Higher weight than the readiness-delay and default stages so it wins for replica 1's fresh pods.
+# KWOK Stage that makes a fresh standalone-PodClique pod of PCS replica 1 report a container that
+# terminated with a non-zero exit code and stays NotReady (a crash-looping workload). Scoped to replica 1
+# by the podcliqueset-replica-index label and to standalone PodCliques by the absence of the
+# podcliquescalinggroup label, so it never touches replica 0's in-flight update or any PodCliqueScalingGroup
+# pod. Grove counts a pod whose container has a non-zero last-terminated exit code as unavailable
+# (PodHasAtleastOneContainerWithNonZeroExitCode), so the standalone PodClique drops below MinAvailable and,
+# after terminationDelay, the PCS-level gang termination fires for replica 1. It matches a fresh pod before
+# its podIP is assigned, then assigns a podIP so the default pod-ready stage cannot re-fire and recover it.
+# Higher weight than the default pod-ready stage so it wins for matching pods.
 apiVersion: kwok.x-k8s.io/v1alpha1
 kind: Stage
 metadata:
-  name: pod-exited-error-r1
+  name: pod-crashloop-r1-standalone
 spec:
   resourceRef:
     apiGroup: v1
     kind: Pod
   selector:
     matchExpressions:
-      # match newly-created pods that hasn't been advanced yet and isn't being torn down
-      # and whose label associates it to PCS replica 1.
       - key: .metadata.deletionTimestamp
         operator: DoesNotExist
       - key: .status.podIP
@@ -24,6 +25,8 @@ spec:
         operator: In
         values:
           - "1"
+      - key: '.metadata.labels["grove.io/podcliquescalinggroup"]'
+        operator: DoesNotExist
   weight: 20
   next:
     statusSubresource: status
@@ -50,7 +53,7 @@ spec:
         state:
           waiting:
             reason: CrashLoopBackOff
-            message: "simulated crash"
+            message: "simulated crash loop"
         lastState:
           terminated:
             exitCode: 1
