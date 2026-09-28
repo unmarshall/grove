@@ -98,7 +98,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		return groveerr.New(
 			groveerr.ErrCodeContinueReconcileAndRequeue,
 			component.OperationSync,
-			fmt.Sprintf("rolling update of PodCliqueScalingGroup %v has no disruption headroom this reconcile (availability floor or in-flight replacements), re-queuing", client.ObjectKeyFromObject(sc.pcsg)),
+			fmt.Sprintf("rolling update of PodCliqueScalingGroup %v has no disruption headroom this reconcile (availability minimum or in-flight replacements), re-queuing", client.ObjectKeyFromObject(sc.pcsg)),
 		)
 	}
 

@@ -61,7 +61,7 @@ type updateWork struct {
 // processPendingUpdates advances the rolling update of a PodClique by one reconcile step.
 //
 // It always deletes old-hash Pods that are not Ready, then, honoring both the MaxUnavailable budget
-// and the MinAvailable floor, deletes a bounded number of Ready old-hash Pods so the normal create
+// and the MinAvailable minimum, deletes a bounded number of Ready old-hash Pods so the normal create
 // flow can recreate them with the expected template hash. The update completes only when no old-hash
 // Pods remain and the desired number of new-hash Pods are Ready.
 func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger, ss *syncSnapshot) error {

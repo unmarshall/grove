@@ -152,7 +152,7 @@ func (r _resource) migrateReplica(ctx context.Context, pcs *grovecorev1alpha1.Po
 func resolveTargetPodGangName(pgm *grovecorev1alpha1.PodGangMap, pcsRnr apicommon.ResourceNameReplica, objMeta *metav1.ObjectMeta) (string, error) {
 	pcsgFQN, isPCSGOwned := objMeta.Labels[apicommon.LabelPodCliqueScalingGroup]
 	if !isPCSGOwned {
-		epoch, err := componentutils.AnchorPodGangEpoch(pgm)
+		epoch, err := componentutils.BaseAnchorPodGangEpoch(pgm)
 		if err != nil {
 			return "", groveerr.WrapError(err, errCodeResolvePodGangName, component.OperationSync,
 				fmt.Sprintf("failed to resolve anchor PodGang epoch for %q", objMeta.Name))

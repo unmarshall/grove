@@ -267,6 +267,18 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 		}
 	}
 
+	// A PodCliqueScalingGroup intentionally scaled to zero has no replicas to keep available, so it is not
+	// in breach. A non-zero replica count below MinAvailable, or a loss of replicas below MinAvailable at
+	// an unchanged replica count, is still a breach.
+	if pcsg.Spec.Replicas == 0 {
+		return metav1.Condition{
+			Type:    constants.ConditionTypeMinAvailableBreached,
+			Status:  metav1.ConditionFalse,
+			Reason:  constants.ConditionReasonSufficientAvailablePCSGReplicas,
+			Message: "PodCliqueScalingGroup is scaled to zero, so MinAvailable is not breached",
+		}
+	}
+
 	// The apiserver defaults Spec.MinAvailable to 1 (+kubebuilder:default), but objects
 	// persisted under an older CRD schema can still read back nil until their next write —
 	// dereferencing unguarded would crash-loop the operator off a single legacy object.

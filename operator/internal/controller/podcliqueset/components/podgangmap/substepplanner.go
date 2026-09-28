@@ -16,6 +16,7 @@ package podgangmap
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 
@@ -78,9 +79,7 @@ func (s subStep) String() string {
 // drainCountByComponent returns how many replicas of each in-scope component this sub-step takes down.
 func (s subStep) drainCountByComponent() map[string]int32 {
 	drainByComponent := make(map[string]int32, len(s.drainStandalonePCLQCounts)+len(s.drainPCSGReplicaIndices))
-	for componentName, count := range s.drainStandalonePCLQCounts {
-		drainByComponent[componentName] = count
-	}
+	maps.Copy(drainByComponent, s.drainStandalonePCLQCounts)
 	for componentName, indices := range s.drainPCSGReplicaIndices {
 		drainByComponent[componentName] = int32(len(indices))
 	}
@@ -110,7 +109,7 @@ func (s subStep) drainsNothing() bool {
 // identify and size each sub-step.
 type stepPlan struct {
 	// numAnchorBearingSteps is the number of anchor-bearing steps, the min over components of
-	// floor(desiredReplicas/MinAvailable).
+	// the integer division desiredReplicas/MinAvailable.
 	numAnchorBearingSteps int32
 	// anchorBearingStepTarget is how many of each component one anchor-bearing step rolls, MinAvailable
 	// plus an even share of the tail, keyed by component name.
@@ -168,20 +167,45 @@ func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []gr
 	}
 }
 
-// computeNumAnchorBearingSteps returns how many anchor-bearing steps a coherent update takes for one PCS
-// replica. A standalone-only MVU uses a single anchor because standalone pods can live only on an anchor
-// entry, so spreading them over floor(replicas/MinAvailable) anchors would create one PodGang per pod. With
-// PodCliqueScalingGroups in the MVU, the anchors are the proportional MVUs, bound by the component supplying
-// the fewest MinAvailable-sized slices, the min over components of floor(replicas/MinAvailable).
+// computeNumAnchorBearingSteps returns how many anchor-bearing steps the plan rolls. Only components with
+// replicas participate, since a component scaled to zero has no pods to place in an anchor. The count is
+// one of:
+//   - the minimum of desiredReplicas/minAvailable across the components with replicas, when any PodCliqueScalingGroup has replicas.
+//   - 1 when no PodCliqueScalingGroup has replicas but a standalone PodClique does, so a single anchor carries the standalone pods.
+//   - 0 when no component has replicas, since there is nothing to roll.
 func computeNumAnchorBearingSteps(desiredReplicas map[string]int32, mvu *mvuTemplate) int32 {
-	if len(mvu.pcsgs) == 0 {
-		return 1
-	}
 	numAnchorBearingSteps := int32(math.MaxInt32)
-	for componentName, minAvailable := range lo.Assign(mvu.standalonePCLQs, mvu.pcsgs) {
-		numAnchorBearingSteps = min(numAnchorBearingSteps, desiredReplicas[componentName]/minAvailable)
+	anyPCSGHasReplicas := false
+	for pcsgName, minAvailable := range mvu.pcsgs {
+		if desiredReplicas[pcsgName] == 0 {
+			continue
+		}
+		anyPCSGHasReplicas = true
+		numAnchorBearingSteps = min(numAnchorBearingSteps, desiredReplicas[pcsgName]/minAvailable)
+	}
+	if !anyPCSGHasReplicas {
+		if anyComponentHasReplicas(desiredReplicas, mvu.standalonePCLQs) {
+			return 1
+		}
+		return 0
+	}
+	for pclqName, minAvailable := range mvu.standalonePCLQs {
+		if desiredReplicas[pclqName] == 0 {
+			continue
+		}
+		numAnchorBearingSteps = min(numAnchorBearingSteps, desiredReplicas[pclqName]/minAvailable)
 	}
 	return numAnchorBearingSteps
+}
+
+// anyComponentHasReplicas reports whether any of the given components has a non-zero desired replica count.
+func anyComponentHasReplicas(desiredReplicas map[string]int32, minAvailableByComponent map[string]int32) bool {
+	for componentName := range minAvailableByComponent {
+		if desiredReplicas[componentName] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // computeStepPlan derives the step plan for one PCS replica, the number of anchor-bearing steps and each
@@ -190,14 +214,19 @@ func computeStepPlan(desiredReplicas map[string]int32, mvu *mvuTemplate) stepPla
 	minAvailableByComponent := lo.Assign(mvu.standalonePCLQs, mvu.pcsgs)
 	numAnchorBearingSteps := computeNumAnchorBearingSteps(desiredReplicas, mvu)
 
-	// Beyond the MinAvailable that every anchor-bearing step reserves, a component's remaining replicas
-	// are its tail. tailPerStep spreads that tail evenly over the anchor-bearing steps, so each step
-	// rolls MinAvailable plus tailPerStep of the component, which is its anchorBearingStepTarget. Integer
-	// division rounds tailPerStep down, so leftover is what remains once every anchor-bearing step has
-	// rolled its target, drained afterward by the single leftover step.
 	anchorBearingStepTarget := make(map[string]int32, len(minAvailableByComponent))
 	leftover := make(map[string]int32, len(minAvailableByComponent))
+	// Every in-scope component is scaled to zero, so there is nothing to roll. The plan opens no
+	// anchor-bearing step and every target and leftover stays zero.
+	if numAnchorBearingSteps == 0 {
+		return stepPlan{numAnchorBearingSteps: 0, anchorBearingStepTarget: anchorBearingStepTarget, leftover: leftover}
+	}
 	for componentName, componentMinAvailable := range minAvailableByComponent {
+		// A scaled-to-zero component takes no anchor or tail. Its resource still advances and its
+		// completion is tracked outside the plan.
+		if desiredReplicas[componentName] == 0 {
+			continue
+		}
 		tailPerStep := (desiredReplicas[componentName] - numAnchorBearingSteps*componentMinAvailable) / numAnchorBearingSteps
 		anchorBearingStepTarget[componentName] = componentMinAvailable + tailPerStep
 		leftover[componentName] = desiredReplicas[componentName] - numAnchorBearingSteps*anchorBearingStepTarget[componentName]
@@ -258,10 +287,16 @@ func (p *subStepPlanner) ascertainPlanPosition() (planPosition, error) {
 	}
 
 	// An anchor-bearing step is fully committed only when every component met its target for that step, so
-	// the count of fully committed steps is the min over components of floor(anchorPhaseCount/target).
+	// the count of fully committed steps is the min over components of the integer division anchorPhaseCount/target.
 	anchorBearingStepsDone := p.plan.numAnchorBearingSteps
 	for componentName := range p.desiredReplicas {
-		anchorBearingStepsDone = min(anchorBearingStepsDone, anchorPhaseCount[componentName]/p.plan.anchorBearingStepTarget[componentName])
+		// A scaled-to-zero component takes no anchor-bearing step, so it has a zero target and does not
+		// bound how many steps are committed. Skip it to avoid dividing by zero.
+		target := p.plan.anchorBearingStepTarget[componentName]
+		if target == 0 {
+			continue
+		}
+		anchorBearingStepsDone = min(anchorBearingStepsDone, anchorPhaseCount[componentName]/target)
 	}
 
 	// What the open anchor-bearing step has committed per component is whatever is beyond the fully
@@ -424,14 +459,24 @@ func (p *subStepPlanner) buildAnchorBearingSubStep(planPos planPosition) (*subSt
 	stepIndex := planPos.anchorBearingStepsDone
 	anchorPCSGIndices := make(map[string][]int32, len(p.mvu.pcsgs))
 	for pcsgName, minAvailable := range p.mvu.pcsgs {
+		if p.desiredReplicas[pcsgName] == 0 {
+			continue // a scaled-to-zero PodCliqueScalingGroup has no replicas to place in the anchor
+		}
 		anchorPCSGIndices[pcsgName] = lo.RangeFrom(stepIndex*p.plan.anchorBearingStepTarget[pcsgName], int(minAvailable))
+	}
+	anchorStandalonePCLQCounts := make(map[string]int32, len(p.mvu.standalonePCLQs))
+	for pclqName, minAvailable := range p.mvu.standalonePCLQs {
+		if p.desiredReplicas[pclqName] == 0 {
+			continue // a scaled-to-zero standalone PodClique has no pods to place in the anchor
+		}
+		anchorStandalonePCLQCounts[pclqName] = minAvailable
 	}
 	return &subStep{
 		epoch:                     newEpoch(p.clk),
 		dependsOn:                 dependsOn,
 		opensAnchor:               true,
 		anchorPCSGReplicaIndices:  anchorPCSGIndices,
-		drainStandalonePCLQCounts: p.mvu.standalonePCLQs,
+		drainStandalonePCLQCounts: anchorStandalonePCLQCounts,
 		drainPCSGReplicaIndices:   anchorPCSGIndices,
 	}, nil
 }

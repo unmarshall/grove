@@ -41,16 +41,34 @@ func TestComputeNumAnchorBearingSteps(t *testing.T) {
 			want:         1,
 		},
 		{
-			description:  "single PCSG uses floor(replicas/MinAvailable)",
+			description:  "single PCSG uses the integer division replicas/MinAvailable",
 			liveReplicas: map[string]int32{"decode": 20},
 			mvu:          &mvuTemplate{pcsgs: map[string]int32{"decode": 3}},
-			want:         6, // floor(20/3)
+			want:         6, // 20/3 rounded down
 		},
 		{
-			description:  "multiple components use the minimum floor across them",
+			description:  "multiple components use the minimum step count across them",
 			liveReplicas: map[string]int32{"frontend": 10, "decode": 9},
 			mvu:          &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
-			want:         3, // min(floor(10/2), floor(9/3)) = min(5, 3)
+			want:         3, // min(⌊10/2⌋, ⌊9/3⌋) = min(5, 3)
+		},
+		{
+			description:  "a PodCliqueScalingGroup scaled to zero does not bound the step count and a single anchor carries the active standalone",
+			liveReplicas: map[string]int32{"frontend": 10, "decode": 0},
+			mvu:          &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
+			want:         1,
+		},
+		{
+			description:  "a zero-replica PodCliqueScalingGroup alongside an active one uses the active one",
+			liveReplicas: map[string]int32{"frontend": 10, "decodeA": 9, "decodeB": 0},
+			mvu:          &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decodeA": 3, "decodeB": 3}},
+			want:         3, // min(⌊9/3⌋, ⌊10/2⌋) with decodeB skipped
+		},
+		{
+			description:  "all components scaled to zero roll nothing",
+			liveReplicas: map[string]int32{"frontend": 0, "decode": 0},
+			mvu:          &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
+			want:         0,
 		},
 	}
 	for _, tc := range testCases {
@@ -73,7 +91,7 @@ func TestComputeStepPlan(t *testing.T) {
 			description:        "single PCSG rolls MinAvailable per step",
 			liveReplicas:       map[string]int32{"prefill": 3},
 			mvu:                &mvuTemplate{pcsgs: map[string]int32{"prefill": 3}},
-			wantNumAnchorSteps: 1, // floor(3/3)
+			wantNumAnchorSteps: 1, // ⌊3/3⌋
 			wantStepTarget:     map[string]int32{"prefill": 3},
 			wantLeftover:       map[string]int32{"prefill": 0},
 		},
@@ -90,16 +108,32 @@ func TestComputeStepPlan(t *testing.T) {
 			liveReplicas:       map[string]int32{"prefill": 13},
 			mvu:                &mvuTemplate{pcsgs: map[string]int32{"prefill": 5}},
 			wantNumAnchorSteps: 2,
-			wantStepTarget:     map[string]int32{"prefill": 6}, // 5 + floor((13-2*5)/2)
+			wantStepTarget:     map[string]int32{"prefill": 6}, // 5 + ⌊(13-2*5)/2⌋
 			wantLeftover:       map[string]int32{"prefill": 1}, // 13 - 2*6
 		},
 		{
 			description:        "each component sizes its own tail and leftover, step count is the min across them",
 			liveReplicas:       map[string]int32{"frontend": 10, "decode": 9},
 			mvu:                &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 2}, pcsgs: map[string]int32{"decode": 3}},
-			wantNumAnchorSteps: 3,                                            // min(floor(10/2), floor(9/3))
-			wantStepTarget:     map[string]int32{"frontend": 3, "decode": 3}, // frontend 2+floor((10-6)/3)=3, decode 3+0
+			wantNumAnchorSteps: 3,                                            // min(⌊10/2⌋, ⌊9/3⌋)
+			wantStepTarget:     map[string]int32{"frontend": 3, "decode": 3}, // frontend 2+⌊(10-6)/3⌋=3, decode 3+0
 			wantLeftover:       map[string]int32{"frontend": 1, "decode": 0}, // frontend 10-3*3, decode 9-3*3
+		},
+		{
+			description:        "a zero-replica PodCliqueScalingGroup takes no anchor or tail and a single anchor carries the active standalone",
+			liveReplicas:       map[string]int32{"frontend": 2, "decode": 0},
+			mvu:                &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 1}, pcsgs: map[string]int32{"decode": 3}},
+			wantNumAnchorSteps: 1,
+			wantStepTarget:     map[string]int32{"frontend": 2},
+			wantLeftover:       map[string]int32{"frontend": 0},
+		},
+		{
+			description:        "all components scaled to zero produce an empty plan",
+			liveReplicas:       map[string]int32{"frontend": 0, "decode": 0},
+			mvu:                &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 1}, pcsgs: map[string]int32{"decode": 3}},
+			wantNumAnchorSteps: 0,
+			wantStepTarget:     map[string]int32{},
+			wantLeftover:       map[string]int32{},
 		},
 	}
 	for _, tc := range testCases {
@@ -180,14 +214,35 @@ func TestAscertainPlanPosition(t *testing.T) {
 	assert.Equal(t, "200", planPos.mostRecentAnchorEpoch)
 }
 
+func TestAscertainPlanPositionSkipsZeroTargetComponent(t *testing.T) {
+	// decode is in scope but scaled to zero, so its anchor-bearing step target is zero. The position
+	// computation must skip it rather than divide its committed count by a zero target.
+	mvu := &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": 1}, pcsgs: map[string]int32{"decode": 1}}
+	desiredReplicas := map[string]int32{"frontend": 2, "decode": 0}
+	p := &subStepPlanner{
+		pcs:             pcsWithCurrentHash("v2"),
+		mvu:             mvu,
+		desiredReplicas: desiredReplicas,
+		plan:            computeStepPlan(desiredReplicas, mvu),
+		entries: []grovecorev1alpha1.PodGangEntry{
+			{Epoch: "100", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 1}},
+		},
+	}
+	require.Zero(t, p.plan.anchorBearingStepTarget["decode"])
+	planPos, err := p.ascertainPlanPosition()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int32{"frontend": 1}, planPos.currentHashCountByComponent)
+	assert.Equal(t, int32(0), planPos.anchorBearingStepsDone)
+}
+
 // -----------------------------------------------------------------------------
 // Coherent step-plan and sub-step planner tests.
 //
 // computeStepPlan derives the plan for one PCS replica from each in-scope component's live child
-// Spec.Replicas (liveReplicas), MinAvailable, and MaxUnavailable. All division is integer (floor):
+// Spec.Replicas (liveReplicas), MinAvailable, and MaxUnavailable. All division is integer division:
 //
-//	numAnchorBearingSteps      = min over components c of floor(liveReplicas[c] / minAvailable[c])
-//	tailPerStep[c]             = floor((liveReplicas[c] - numAnchorBearingSteps*minAvailable[c]) / numAnchorBearingSteps)
+//	numAnchorBearingSteps      = min over components c of ⌊liveReplicas[c] / minAvailable[c]⌋
+//	tailPerStep[c]             = ⌊(liveReplicas[c] - numAnchorBearingSteps*minAvailable[c]) / numAnchorBearingSteps⌋
 //	anchorBearingStepTarget[c] = minAvailable[c] + tailPerStep[c]
 //	leftover[c]                = liveReplicas[c] - numAnchorBearingSteps*anchorBearingStepTarget[c]
 //
@@ -202,8 +257,8 @@ func TestOpenAnchorStepHasTailRemaining(t *testing.T) {
 	//	frontend   12            2             3               standalone PodClique
 	//	decode     4             2             2               PCSG
 	//
-	//	numAnchorBearingSteps   = min(floor(12/2), floor(4/2)) = min(6, 2) = 2
-	//	anchorBearingStepTarget = {frontend: 2 + floor((12-2*2)/2) = 6, decode: 2 + floor((4-2*2)/2) = 2}
+	//	numAnchorBearingSteps   = min(⌊12/2⌋, ⌊4/2⌋) = min(6, 2) = 2
+	//	anchorBearingStepTarget = {frontend: 2 + ⌊(12-2*2)/2⌋ = 6, decode: 2 + ⌊(4-2*2)/2⌋ = 2}
 	//	leftover                = {frontend: 0, decode: 0}
 	//
 	// Within a step the anchor commits MinAvailable {frontend: 2, decode: 2}. decode's target equals its
@@ -234,8 +289,8 @@ func TestAnyLeftoverRemaining(t *testing.T) {
 	// frontend   9             2             2               standalone PodClique
 	// decode     22            3             4               PCSG
 	//
-	//	numAnchorBearingSteps   = min(floor(9/2), floor(22/3)) = min(4, 7) = 4
-	//	anchorBearingStepTarget = {frontend: 2+floor((9-4*2)/4)=2, decode: 3+floor((22-4*3)/4)=5}
+	//	numAnchorBearingSteps   = min(⌊9/2⌋, ⌊22/3⌋) = min(4, 7) = 4
+	//	anchorBearingStepTarget = {frontend: 2+⌊(9-4*2)/4⌋=2, decode: 3+⌊(22-4*3)/4⌋=5}
 	//	leftover                = {frontend: 9-4*2=1, decode: 22-4*5=2}
 	// anyLeftoverRemaining runs once all anchor-bearing steps are committed, so each component is at least at its
 	// anchor-phase total (frontend 8, decode 20) and the leftover step drains the rest up to liveReplicas.
@@ -298,7 +353,7 @@ func TestBuildAnchorBearingSubStep(t *testing.T) {
 	// prefill    10            3             3               PCSG
 	// decode     20            3             4               PCSG
 	//
-	//	numAnchorBearingSteps   = min(floor(10/2), floor(10/3), floor(20/3)) = min(5, 3, 6) = 3
+	//	numAnchorBearingSteps   = min(⌊10/2⌋, ⌊10/3⌋, ⌊20/3⌋) = min(5, 3, 6) = 3
 	//	anchorBearingStepTarget = {frontend: 3, prefill: 3, decode: 6}
 	//
 	// Opening step k=1 claims each PCSG's MinAvailable indices from its block [k*target, k*target+minAvailable):
@@ -325,8 +380,8 @@ func TestBuildTailSubStep(t *testing.T) {
 	// prefill    4             2             2               PCSG
 	// decode     12            2             3               PCSG
 	//
-	//	numAnchorBearingSteps   = min(floor(8/2), floor(4/2), floor(12/2)) = min(4, 2, 6) = 2
-	//	anchorBearingStepTarget = {frontend: 2+floor((8-4)/2)=4, prefill: 2, decode: 2+floor((12-4)/2)=6}
+	//	numAnchorBearingSteps   = min(⌊8/2⌋, ⌊4/2⌋, ⌊12/2⌋) = min(4, 2, 6) = 2
+	//	anchorBearingStepTarget = {frontend: 2+⌊(8-4)/2⌋=4, prefill: 2, decode: 2+⌊(12-4)/2⌋=6}
 	//
 	// In step k=0 the anchor already committed MinAvailable {frontend:2, prefill:2, decode:2}. This tail sub-step
 	// rolls each component's remaining toward its target: frontend 2 (subsumed, within MaxUnavailable 2), prefill 0
@@ -487,7 +542,7 @@ func TestNextForPCSGOnlyMVU(t *testing.T) {
 	// decode     20            3             4
 	//
 	// With PodCliqueScalingGroups in scope the usual computation applies: numAnchorBearingSteps =
-	// min(floor(10/3), floor(20/3)) = 3, target {prefill:3, decode:6}, leftover {prefill:1, decode:2}. Each
+	// min(⌊10/3⌋, ⌊20/3⌋) = 3, target {prefill:3, decode:6}, leftover {prefill:1, decode:2}. Each
 	// anchor-bearing step creates an anchor carrying MinAvailable PCSG indices, everything above rolls as tail
 	// PodGangs at most MaxUnavailable at a time, and nothing subsumes since there is no standalone PodClique.
 	newPlanner := func() *subStepPlanner {

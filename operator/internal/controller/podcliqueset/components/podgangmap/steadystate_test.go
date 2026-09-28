@@ -385,7 +385,7 @@ func TestSyncEntries(t *testing.T) {
 // TestReconcileStandaloneCliqueCountAcrossAnchors verifies a standalone clique's counts are driven
 // toward the desired total by adding to the highest-epoch anchor on scale-out and draining the
 // highest-epoch anchor first on scale-in, spilling to the next-highest as each empties. It does
-// not floor at MinAvailable, so a scale-in can drain every anchor to zero.
+// not clamped to MinAvailable, so a scale-in can drain every anchor to zero.
 func TestReconcileStandaloneCliqueCountAcrossAnchors(t *testing.T) {
 	const clique = "clq-a"
 	// anchorsHighestFirst builds anchor entries ordered by descending epoch, as

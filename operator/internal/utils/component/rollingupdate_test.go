@@ -130,7 +130,7 @@ func TestComputeAllowedBudget(t *testing.T) {
 		{"budget exhausted by an in-flight disruption", 3, 2, 1, 0},
 		{"maxUnavailable allows multiple disruptions", 5, 5, 2, 2},
 		{"full disruption when maxUnavailable equals replicas", 4, 4, 4, 4},
-		{"floored at zero when unavailable exceeds the budget", 3, 1, 1, 0},
+		{"clamped at zero when unavailable exceeds the budget", 3, 1, 1, 0},
 		{"budget accounts for existing unavailable units", 6, 5, 3, 2},
 	}
 	for _, tt := range tests {

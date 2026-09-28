@@ -583,6 +583,128 @@ func Test_CU11_GangTerminationDuringCoherentUpdateRebuildsPodGangMap(t *testing.
 	}
 }
 
+// Test_CU12_CoherentUpdateWithPodCliqueScalingGroupScaledToZero verifies that a coherent update completes
+// when an in-scope PodCliqueScalingGroup is scaled to zero before the update. The group has no pods to
+// roll, so the update rolls only the active standalone frontend, converges the group by hash, and a later
+// scale-out of the group launches new-revision pods.
+func Test_CU12_CoherentUpdateWithPodCliqueScalingGroupScaledToZero(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Scale the inference PodCliqueScalingGroup to 0 so only the frontend has pods")
+	tc.ScalePCSGAcrossAllReplicasAndWait(coherentWorkloadName, "inference", 1, 0, 2, 0)
+
+	tests.Logger.Info("3. Trigger a coherent update of frontend and the inference PCSG")
+	for _, cliqueName := range []string{"frontend", "prefill"} {
+		if err := triggerPodCliqueUpdate(tc, cliqueName); err != nil {
+			t.Fatalf("failed to trigger update of %s: %v", cliqueName, err)
+		}
+	}
+
+	tests.Logger.Info("4. Wait for the coherent update to complete and converge")
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertGenerationHashConverged(tc)
+	assertPodGangMapSingleGeneration(t, tc)
+
+	tests.Logger.Info("5. Scale the inference PCSG back to 2 and verify new-revision pods launch")
+	tc.ScalePCSGAcrossAllReplicasAndWait(coherentWorkloadName, "inference", 1, 2, coherentExpectedPods, 0)
+	assertGenerationHashConverged(tc)
+	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
+		t.Fatalf("pods did not become Ready after scaling the inference PCSG back up: %v", err)
+	}
+}
+
+// Test_CU13_CoherentUpdateWithStandaloneScaledToZero verifies that a coherent update completes when an
+// in-scope standalone PodClique is scaled to zero before the update. The standalone PodClique has no pods
+// to roll, yet its resource still advances to the new revision, so a later scale-out launches new-revision
+// pods. The active inference PCSG rolls normally.
+func Test_CU13_CoherentUpdateWithStandaloneScaledToZero(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Scale the frontend PodClique to 0 so only the inference PCSG has pods")
+	tc.ScalePodCliqueAndWait(coherentWorkloadName+"-0-frontend", 0, 4, 0)
+
+	tests.Logger.Info("3. Trigger a coherent update of frontend and the inference PCSG")
+	for _, cliqueName := range []string{"frontend", "prefill"} {
+		if err := triggerPodCliqueUpdate(tc, cliqueName); err != nil {
+			t.Fatalf("failed to trigger update of %s: %v", cliqueName, err)
+		}
+	}
+
+	tests.Logger.Info("4. Wait for the coherent update to complete and converge")
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertGenerationHashConverged(tc)
+	assertPodGangMapSingleGeneration(t, tc)
+
+	tests.Logger.Info("5. Scale the frontend back to 2 and verify new-revision pods launch")
+	tc.ScalePodCliqueAndWait(coherentWorkloadName+"-0-frontend", 2, coherentExpectedPods, 0)
+	assertGenerationHashConverged(tc)
+	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
+		t.Fatalf("pods did not become Ready after scaling the frontend back up: %v", err)
+	}
+}
+
+// Test_CU14_CoherentUpdateWithAllComponentsScaledToZero verifies that a coherent update completes when
+// every in-scope component is scaled to zero before the update. There is nothing to roll, so the update
+// advances each component's resource to the new revision, the PodGangMap ends with no entries, and a later
+// scale-out launches new-revision pods.
+func Test_CU14_CoherentUpdateWithAllComponentsScaledToZero(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Scale the inference PCSG and the frontend to 0 so no component has pods")
+	tc.ScalePCSGAcrossAllReplicasAndWait(coherentWorkloadName, "inference", 1, 0, 2, 0)
+	tc.ScalePodCliqueAndWait(coherentWorkloadName+"-0-frontend", 0, 0, 0)
+
+	tests.Logger.Info("3. Trigger a coherent update of frontend and the inference PCSG")
+	for _, cliqueName := range []string{"frontend", "prefill"} {
+		if err := triggerPodCliqueUpdate(tc, cliqueName); err != nil {
+			t.Fatalf("failed to trigger update of %s: %v", cliqueName, err)
+		}
+	}
+
+	tests.Logger.Info("4. Wait for the coherent update to complete and verify the PodGangMap has no entries")
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertGenerationHashConverged(tc)
+	assert.Empty(t, getPodGangMapEntries(t, tc, 0), "an all-zero replica must leave the PodGangMap with no entries")
+
+	tests.Logger.Info("5. Scale the frontend and the inference PCSG back up and verify new-revision pods launch")
+	tc.ScalePodCliqueAndWait(coherentWorkloadName+"-0-frontend", 2, 2, 0)
+	tc.ScalePCSGAcrossAllReplicasAndWait(coherentWorkloadName, "inference", 1, 2, coherentExpectedPods, 0)
+	assertGenerationHashConverged(tc)
+	if err := tc.WaitForPods(coherentExpectedPods); err != nil {
+		t.Fatalf("pods did not become Ready after scaling both components back up: %v", err)
+	}
+}
+
 type coherentAnchor struct {
 	standalone  map[string]int32
 	pcsgIndices []int32

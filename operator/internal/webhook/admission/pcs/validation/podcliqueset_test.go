@@ -2020,7 +2020,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			wantErrType:    ptr.To(field.ErrorTypeInvalid),
 		},
 		{
-			description:    "rollingRecreate MaxUnavailable below minAvailable accepted, the floor is Coherent only",
+			description:    "rollingRecreate MaxUnavailable below minAvailable accepted, the bound is Coherent only",
 			updateStrategy: grovecorev1alpha1.RollingRecreateStrategy,
 			rollingUpdate:  &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](1)},
 			replicas:       5,

@@ -111,7 +111,7 @@ func subsumeIntoAnchor(entries []grovecorev1alpha1.PodGangEntry, anchorEpoch str
 }
 
 // newHashEntryForSubStep builds the one new-hash entry a sub-step adds, if any. An anchor sub-step adds an
-// anchor entry carrying MinAvailable of every standalone PodClique plus the sub-step's PCSG floor indices. A
+// anchor entry carrying MinAvailable of every standalone PodClique plus the sub-step's PCSG MinAvailable indices. A
 // sub-step that rolls PCSG tail indices adds a single tail entry holding them. A sub-step that only subsumes
 // standalone PodClique pods into an existing anchor adds no entry. So a sub-step yields at most one entry,
 // returned with ok true, or ok false when it adds none.

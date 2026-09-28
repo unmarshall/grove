@@ -458,13 +458,7 @@ func TestBuildResource_MNNVLInjection(t *testing.T) {
 				eventRecorder: record.NewFakeRecorder(10),
 			}
 
-			// A standalone PodClique belongs to the anchor entry, so buildResource resolves its PodGang
-			// name from the anchor entry's epoch.
-			pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), pcsReplica).WithEntries(
-				testutils.NewPodGangEntryBuilder("hash", "1000").
-					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
-			).Build()
-			err := operator.buildResource(logr.Discard(), pcs, pcsReplica, false, pgm, pclq)
+			err := operator.buildResource(logr.Discard(), pcs, pcsReplica, false, pclq)
 			require.NoError(t, err)
 
 			// Verify pod-level claims
@@ -518,13 +512,7 @@ func TestBuildResource_StripsTopologyAnnotation(t *testing.T) {
 	}
 
 	operator := &_resource{scheme: groveclientscheme.Scheme}
-	// A standalone PodClique belongs to the anchor entry, so buildResource resolves its PodGang name
-	// from the anchor entry's epoch.
-	pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), 0).WithEntries(
-		testutils.NewPodGangEntryBuilder("hash", "1000").
-			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
-	).Build()
-	err := operator.buildResource(logr.Discard(), pcs, 0, false, pgm, pclq)
+	err := operator.buildResource(logr.Discard(), pcs, 0, false, pclq)
 	require.NoError(t, err)
 	require.NotNil(t, pclq.Annotations)
 	assert.Equal(t, "yes", pclq.Annotations["example.com/keep"])
@@ -577,12 +565,8 @@ func TestBuildResource_PreservesRevisionForReplicaNotUnderCoherentUpdate(t *test
 			}
 
 			operator := &_resource{scheme: groveclientscheme.Scheme}
-			pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), tc.pcsReplica).WithEntries(
-				testutils.NewPodGangEntryBuilder("hash", "1000").
-					WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
-			).Build()
 
-			err := operator.buildResource(logr.Discard(), pcs, tc.pcsReplica, true, pgm, pclq)
+			err := operator.buildResource(logr.Discard(), pcs, tc.pcsReplica, true, pclq)
 			require.NoError(t, err)
 
 			if tc.expectPreserved {
@@ -629,13 +613,10 @@ func TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed(t *testing.T) {
 	}
 
 	operator := &_resource{scheme: groveclientscheme.Scheme}
-	pgm := testutils.NewPodGangMapBuilder(testPCSName, testPCSNamespace, uuid.NewUUID(), pcsReplica).WithEntries(
-		testutils.NewPodGangEntryBuilder("hash", "1000").WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).Build(),
-	).Build()
 
 	// Reconcile twice. StartsAfter must remain the single-prefix FQN both times.
 	for i := range 2 {
-		err := operator.buildResource(logr.Discard(), pcs, pcsReplica, true, pgm, pclq)
+		err := operator.buildResource(logr.Discard(), pcs, pcsReplica, true, pclq)
 		require.NoError(t, err, "reconcile %d", i)
 		assert.Equal(t, wantStartsAfter, pclq.Spec.StartsAfter, "reconcile %d", i)
 	}

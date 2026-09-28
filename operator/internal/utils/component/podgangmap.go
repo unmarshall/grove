@@ -128,10 +128,10 @@ func podGangEntryForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName stri
 	return nil, fmt.Errorf("no PodGangMap entry owns replica index %d of PodCliqueScalingGroup %q and no ScaleOut entry exists in PodGangMap %s", pcsgReplicaIndex, pcsgName, pgm.Name)
 }
 
-// AnchorPodGangEpoch returns the epoch of the MinAvailable anchor of the PodGangMap, which carries the
-// MinAvailable replicas that standalone Pods key off. See MinAvailableAnchorEpoch.
-func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
-	epoch, found, err := MinAvailableAnchorEpoch(pgm.Spec.Entries, nil)
+// BaseAnchorPodGangEpoch returns the epoch of the base anchor of the PodGangMap. The base anchor is the
+// PodGang that standalone Pods key off for their guaranteed MinAvailable. See BaseAnchorEpoch.
+func BaseAnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
+	epoch, found, err := BaseAnchorEpoch(pgm.Spec.Entries, nil)
 	if err != nil {
 		return "", err
 	}
@@ -141,17 +141,16 @@ func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
 	return epoch, nil
 }
 
-// MinAvailableAnchorEpoch returns the epoch of the MinAvailable anchor, considering only entries at
-// pcsGenerationHash when it is non-nil, or all entries when it is nil. It returns found false when no
-// such anchor exists, and an error when an anchor epoch is not numeric.
+// BaseAnchorEpoch returns the epoch of the base anchor, considering only entries at pcsGenerationHash
+// when it is non-nil, or all entries when it is nil. It returns found false when no such anchor exists,
+// and an error when an anchor epoch is not numeric.
 //
-// The MinAvailable anchor is the anchor entry that holds a PodCliqueSet replica's guaranteed
-// MinAvailable floor for its standalone PodCliques. It is the lowest-epoch anchor of the generation in
-// question. Steady-state standalone scale-in drains from the highest-epoch anchor downward, so the
-// MinAvailable anchor is drained last and always retains the final MinAvailable pods. Its standalone
-// PodGroups keep MinReplicas at the template MinAvailable. Every other anchor clamps MinReplicas to its
-// per-anchor count.
-func MinAvailableAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
+// The base anchor is the lowest-epoch anchor of the generation in question, the first one created. It
+// holds a PodCliqueSet replica's guaranteed MinAvailable for its standalone PodCliques. Steady-state
+// standalone scale-in drains from the highest-epoch anchor downward, so the base anchor is drained last
+// and always retains the final MinAvailable pods. Its standalone PodGroups keep MinReplicas at the
+// template MinAvailable, while every other anchor clamps MinReplicas to its per-anchor count.
+func BaseAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
 	var (
 		lowestEpoch      string
 		found            bool
@@ -212,4 +211,16 @@ func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsG
 		return nil, nil
 	}
 	return &latestEpoch, nil
+}
+
+// IsPodGangMapAtSingleGeneration reports whether every entry carries pcsGenerationHash, so the PodGangMap
+// has reconverged to a single generation with no older-generation entries left to drain. An empty entry
+// set is vacuously single-generation.
+func IsPodGangMapAtSingleGeneration(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) bool {
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			return false
+		}
+	}
+	return true
 }

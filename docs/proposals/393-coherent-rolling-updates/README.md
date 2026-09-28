@@ -142,7 +142,7 @@ The current iteration of Coherent Rolling Updates carries the following known li
 1. **No surge-style availability headroom during a coherent update.** Coherent always replaces in place — pods of an updated component are taken down before their new-version replacements are created.
 
    *Mitigation:* operators who need additional availability headroom during a coherent update can either:
-   - Provision more replicas at the PCLQ / PCSG level (so MinAvailable < Replicas, and the surplus continues serving while the MinAvailable floor is rolled), or
+   - Provision more replicas at the PCLQ / PCSG level (so MinAvailable < Replicas, and the surplus continues serving while the MinAvailable pods are rolled), or
    - Provision more PCS replicas (so a fraction of the fleet is always at a non-updating replica index).
 
 2. **Initial PCS deployment ungates all non-anchor pods at once.** A freshly created `PodCliqueSet` lays out one anchor PodGang carrying the full standalone-PodClique count plus `MinAvailable` of every scaling group, one tail PodGang per scaling group replica above `MinAvailable`, and an empty scale-out entry. All the tail pods have their scheduling gates lifted in a single batch once the anchor reports `Scheduled=True`.
@@ -332,7 +332,7 @@ The role of `PodGangMap` in the update flow, and how it is the single source of 
 
 ##### Capturing MVU scope in PodCliqueSetUpdateProgress
 
-Two new fields are added to `PodCliqueSetUpdateProgress` to capture the **set of components in scope** for the current coherent update. This set is the user-declared compatibility boundary that the MVU floor must hold across, and it drives the step plan ([Step plan](#step-plan)) for every step.
+Two new fields are added to `PodCliqueSetUpdateProgress` to capture the **set of components in scope** for the current coherent update. This set is the user-declared compatibility boundary that the MVU must hold across, and it drives the step plan ([Step plan](#step-plan)) for every step.
 
 ```go
 type PodCliqueSetUpdateProgress struct {
@@ -355,7 +355,7 @@ type PodCliqueSetUpdateProgress struct {
 }
 ```
 
-**Why a frozen set rather than a live computation.** The in-scope set is the compatibility boundary the user implicitly declared when they edited the PCS spec — "these are the components that must roll together to remain version-compatible." Recomputing it live from per-PCLQ status every reconcile would not preserve this intent: as components finish rolling, a live recompute would shrink the set and the orchestrator would continue creating anchors against a smaller and smaller MVU floor, breaking the original compatibility-boundary guarantee. The set is therefore established at update start and held fixed for the lifetime of the update.
+**Why a frozen set rather than a live computation.** The in-scope set is the compatibility boundary the user implicitly declared when they edited the PCS spec — "these are the components that must roll together to remain version-compatible." Recomputing it live from per-PCLQ status every reconcile would not preserve this intent: as components finish rolling, a live recompute would shrink the set and the orchestrator would continue creating anchors against a smaller and smaller MVU, breaking the original compatibility-boundary guarantee. The set is therefore established at update start and held fixed for the lifetime of the update.
 
 **Establishment.** When a PCS hash advance is first observed and no coherent update is in flight, the set is built from components whose pod templates differ between the new PCS spec and what each child PCLQ is currently running. Concretely: a standalone PCLQ is added if its target template (computed from the new PCS spec) differs from its `Status.CurrentPodTemplateHash`; a PCSG is added if any of its member PCLQs satisfies the same condition. Components whose pod templates did not change in this PCS spec change are not added — they may have their `Status.CurrentPodCliqueSetGenerationHash` advance synchronously to the new PCS hash without rolling any pods, but they are not part of this update's MVU compatibility boundary.
 
@@ -453,7 +453,7 @@ Each entry has its own epoch. The PodGang component then materializes the PodGan
 
 A PCS is composed of PCLQs and PCSGs. Updates may target a subset of them or all of them. The compatibility-boundary set of in-scope components is captured in `Status.UpdateProgress` when an update begins and is preserved for the lifetime of the update (with merge on a mid-flight PCS spec change — see [Capturing MVU scope in PodCliqueSetUpdateProgress](#capturing-mvu-scope-in-podcliquesetupdateprogress)). A validating webhook rejects scale-in/out across the entire PCS for the lifetime of the update (see [Handling scale-outs and scale-ins during update](#handling-scale-outs-and-scale-ins-during-update)).
 
-The orchestrator turns this scope into a [Step plan](#step-plan), a sequence of steps where each step rolls a per-component `stepTarget[c]` of replicas, and each step is delivered through one or more sub-steps. Each anchor-bearing step starts by creating an anchor carrying `minAvailable[c]` of every updated component, the gang-scheduled MVU floor for that step, and subsequent sub-steps drain the step's tail. Scaling group replicas in the tail each get a dedicated tail PodGang that depends on the step's anchor. Standalone PodClique pods in the tail are subsumed into the same step's anchor and never get a dedicated PodGang. Sub-step advancement is gated by the predicates in [Per-sub-step gate](#per-sub-step-gate).
+The orchestrator turns this scope into a [Step plan](#step-plan), a sequence of steps where each step rolls a per-component `stepTarget[c]` of replicas, and each step is delivered through one or more sub-steps. Each anchor-bearing step starts by creating an anchor carrying `minAvailable[c]` of every updated component, the gang-scheduled MVU for that step, and subsequent sub-steps drain the step's tail. Scaling group replicas in the tail each get a dedicated tail PodGang that depends on the step's anchor. Standalone PodClique pods in the tail are subsumed into the same step's anchor and never get a dedicated PodGang. Sub-step advancement is gated by the predicates in [Per-sub-step gate](#per-sub-step-gate).
 
 The remainder of this section describes:
 
@@ -520,8 +520,8 @@ The algorithm runs as follows.
 The anchor-bearing steps come first and a leftover step drains whatever is left over. In the formulas below, S is the set of in-scope components and c ranges over S. Every division is integer division.
 
 ```
-anchorSteps    = min_{c ∈ S} floor( replicas[c] / minAvailable[c] )
-tailPerStep[c] = floor( ( replicas[c] - anchorSteps * minAvailable[c] ) / anchorSteps )
+anchorSteps    = min_{c ∈ S} ⌊ replicas[c] / minAvailable[c] ⌋
+tailPerStep[c] = ⌊ ( replicas[c] - anchorSteps * minAvailable[c] ) / anchorSteps ⌋
 stepTarget[c]  = minAvailable[c] + tailPerStep[c]
 leftover[c]    = replicas[c] - anchorSteps * stepTarget[c]
 ```
@@ -532,9 +532,11 @@ leftover[c]    = replicas[c] - anchorSteps * stepTarget[c]
 
 When no scaling group is in scope the plan collapses to a single anchor-bearing step. Spreading standalone pods over more anchors would create one PodGang per pod, which defeats the purpose of the anchor.
 
+A component scaled to zero is in scope for template advance but has no pods to place, so it is left out of the placement math. `anchorSteps` is the minimum over only the components with `replicas[c] > 0`, and a zero-replica component takes no anchor and no tail. When every in-scope component is at zero the plan is empty. Placement and completion tracking therefore diverge for such a component. Its child resource and generation hash still advance to the new revision, so a later scale-out launches new-revision pods, and for a standalone PodClique the new revision is stored in the PodClique resource itself. A PodCliqueScalingGroup at zero has no member PodCliques to advance, so its scale-out reads the current PodCliqueSet template. The frozen in-scope set governs which components the update tracks to completion, while `replicas[c] > 0` governs which ones actually place pods, so the two are read as complementary rather than contradictory.
+
 Two placement rules apply to every step.
 
-- Standalone PodClique pods are always subsumed into an anchor. A standalone PodClique never gets its own dedicated PodGang. In an anchor-bearing step the tail joins that step's anchor. In a leftover step it joins the most recently created anchor. The anchor keeps its `MinReplicas` at `minAvailable[c]` because the floor was set when the anchor was created.
+- Standalone PodClique pods are always subsumed into an anchor. A standalone PodClique never gets its own dedicated PodGang. In an anchor-bearing step the tail joins that step's anchor. In a leftover step it joins the most recently created anchor. The anchor keeps its `MinReplicas` at `minAvailable[c]` because its MinReplicas was set when the anchor was created.
 - Scaling group replicas each get a dedicated non-anchor PodGang. There is one such PodGang per scaling group replica rolled, with the member PodCliques inside. Each one depends on the most recent anchor, expressed through `DependsOn`.
 
 After the steps finish the map is reconverged. Any old-generation entry that has no more in-scope content to drain and is not empty is advanced to the current generation. This is how the map returns to a single generation by the time the update completes. An entry that is empty is removed rather than advanced.
@@ -574,7 +576,7 @@ The plan is 2 anchor-bearing steps and 1 leftover step. Each anchor-bearing step
 
 **Step 1** rolls `{1F, 2P, 1D}`.
 
-*Sub-step 1.1* creates a new anchor entry `e3` at the floor `{1F, P[0], D[0]}` and drains that content out of `e0`.
+*Sub-step 1.1* creates a new anchor entry `e3` carrying the MVU `{1F, P[0], D[0]}` and drains that content out of `e0`.
 
 | Epoch | Role | Gen | frontend | prefill | decode |
 | --- | --- | --- | --- | --- | --- |
@@ -597,7 +599,7 @@ The gate waits for the `v2` PodGangs of `e3` and `e4` to be ready before Step 2.
 
 **Step 2** rolls `{1F, 2P, 1D}`.
 
-*Sub-step 2.1* creates a new anchor entry `e5` at the floor `{1F, P[2], D[1]}`. It drains the last frontend pod out of `e0`, which empties `e0` so it is removed, and drains `P[2]` and `D[1]` out of `e1`.
+*Sub-step 2.1* creates a new anchor entry `e5` carrying the MVU `{1F, P[2], D[1]}`. It drains the last frontend pod out of `e0`, which empties `e0` so it is removed, and drains `P[2]` and `D[1]` out of `e1`.
 
 | Epoch | Role | Gen | frontend | prefill | decode |
 | --- | --- | --- | --- | --- | --- |
@@ -658,7 +660,7 @@ An update is then triggered that changes only prefill.
 
 **Step 1** rolls one prefill replica. 
 
-*Sub-step 1.1* creates a new anchor entry `e3` carrying the in-scope floor `{P[0]}` and drains `P[0]` out of `e0`. `e0` now holds no prefill, only the out-of-scope frontend and decode, so reconvergence advances it to `v2`.
+*Sub-step 1.1* creates a new anchor entry `e3` carrying the in-scope MVU `{P[0]}` and drains `P[0]` out of `e0`. `e0` now holds no prefill, only the out-of-scope frontend and decode, so reconvergence advances it to `v2`.
 
 | Epoch | Role | Gen | frontend | prefill | decode |
 | --- | --- | --- | --- | --- | --- |
@@ -822,14 +824,14 @@ sequenceDiagram
 
 #### PodGang.MinReplicas lifecycle and conditions
 
-Every `PodGang` resource carries a `MinReplicas` value on each of its `PodGroups`. This value is the gang-scheduling floor: the scheduler must place at least `MinReplicas` pods of each group together for the gang to be considered placed.
+Every `PodGang` resource carries a `MinReplicas` value on each of its `PodGroups`. This value is the gang-scheduling minimum: the scheduler must place at least `MinReplicas` pods of each group together for the gang to be considered placed.
 
 A PodGang has two kinds of PodGroup, and the standalone kind sets `MinReplicas` differently across anchors:
 
 - **Standalone-PCLQ PodGroup** — one PodGroup carrying the pods of a single standalone PCLQ. On the MinAvailable anchor its `MinReplicas` is the PCLQ's `MinAvailable`. On every other anchor its `MinReplicas` is clamped to the per-anchor pod count, see [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors).
-- **PCSG-member PodGroup** — within a PodGang carrying one or more PCSG replicas, each PCSG replica contributes one PodGroup per member PCLQ. For a PCSG replica with member PCLQs `pleader` and `pworker`, that's two PodGroups. `MinReplicas` is the member PCLQ's own `MinAvailable` (e.g. `pleader.MinAvailable`, `pworker.MinAvailable`), not the PCSG-level `MinAvailable`, and it is never clamped. The PCSG-level `MinAvailable` governs how many *replicas worth* of PodGroup sets are co-required in the gang, not the floor on any single PodGroup.
+- **PCSG-member PodGroup** — within a PodGang carrying one or more PCSG replicas, each PCSG replica contributes one PodGroup per member PCLQ. For a PCSG replica with member PCLQs `pleader` and `pworker`, that's two PodGroups. `MinReplicas` is the member PCLQ's own `MinAvailable` (e.g. `pleader.MinAvailable`, `pworker.MinAvailable`), not the PCSG-level `MinAvailable`, and it is never clamped. The PCSG-level `MinAvailable` governs how many *replicas worth* of PodGroup sets are co-required in the gang, not the minimum on any single PodGroup.
 
-> Depending on the backend scheduler, `MinReplicas` may also act as a termination floor — for example, the KAI scheduler will terminate a gang whose running pod count drops below `MinReplicas` for longer than a configured termination delay. This termination behavior is not enforced by Grove itself and may vary across scheduler implementations.
+> Depending on the backend scheduler, `MinReplicas` may also act as a termination threshold — for example, the KAI scheduler will terminate a gang whose running pod count drops below `MinReplicas` for longer than a configured termination delay. This termination behavior is not enforced by Grove itself and may vary across scheduler implementations.
 
 The PodGang component reports two conditions on every `PodGang.Status` to express the lifecycle of the gang from creation to fully serving:
 
@@ -858,7 +860,7 @@ These timestamps are updated on every `False→True` transition of their respect
 
 The lifecycle of a PodGang the PodGang component creates, anchor, tail, and legacy base and scaled PodGang alike, proceeds in three stages:
 
-1. **Set on creation.** Each `PodGroup`'s `MinReplicas` is set to the `MinAvailable` defined in the PCS spec for the constituent PCLQ (standalone-PCLQ PodGroups) or for the member PCLQ (PCSG-member PodGroups), except a standalone-PCLQ PodGroup on a non-MinAvailable anchor, whose `MinReplicas` is clamped to the per-anchor pod count (see [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors)). This forces the scheduler to place the gang's floor at once before any constituent pod can run.
+1. **Set on creation.** Each `PodGroup`'s `MinReplicas` is set to the `MinAvailable` defined in the PCS spec for the constituent PCLQ (standalone-PCLQ PodGroups) or for the member PCLQ (PCSG-member PodGroups), except a standalone-PCLQ PodGroup on a non-MinAvailable anchor, whose `MinReplicas` is clamped to the per-anchor pod count (see [MinReplicas clamping on non-MinAvailable anchors](#minreplicas-clamping-on-non-minavailable-anchors)). This forces the scheduler to place the gang's minimum at once before any constituent pod can run.
 2. **First placement: mark `Scheduled=True`, capture `LastScheduled`.** Once the scheduler has placed each `PodGroup`'s `MinReplicas` pods on nodes, the PodGang component sets `Status.Conditions[Type=Scheduled]=True` with `Reason=PodGangScheduled` and sets `Status.LastScheduled = metav1.Now()`. `MinReplicas` is not changed after creation. Pod-component scheduling-gate-removal logic uses `LastScheduled` (see [DependsOn and scheduling order](#dependson-and-scheduling-order)).
 3. **First readiness: mark `Ready=True`, capture `LastReady`.** Once every `PodGroup` has at least its `MinReplicas` pods passing readiness probes, the PodGang component sets `Status.Conditions[Type=Ready]=True` with `Reason=PodGangReady` and sets `Status.LastReady = metav1.Now()`. The orchestrator uses `LastReady` (together with the rest of the per-sub-step gate) to advance coherent-update sub-steps (see [Per-sub-step gate](#per-sub-step-gate)).
 
@@ -868,13 +870,13 @@ After the first `False→True` transition, both conditions become live signals. 
 
 After a coherent update a PCS replica can have more than one anchor PodGang, each carrying part of a standalone PodClique's pods.
 
-The MinAvailable anchor is the anchor that holds the replica's guaranteed `MinAvailable` floor for its standalone PodCliques. It is the lowest-epoch anchor. Steady-state standalone scale-in drains from the highest-epoch anchor downward, so the MinAvailable anchor is drained last and always retains the final `MinAvailable` pods.
+The MinAvailable anchor is the anchor that holds the replica's guaranteed `MinAvailable` for its standalone PodCliques. It is the lowest-epoch anchor. Steady-state standalone scale-in drains from the highest-epoch anchor downward, so the MinAvailable anchor is drained last and always retains the final `MinAvailable` pods.
 
-`MinReplicas` is the gang-scheduling floor the backend scheduler enforces. Some backends (notably KAI) also treat it as a termination floor and terminate a gang whose running count for a PodGroup stays below `MinReplicas` for longer than a configured delay. That termination would take down the whole PodGang, including any co-located PodCliqueScalingGroup replicas.
+`MinReplicas` is the gang-scheduling minimum the backend scheduler enforces. Some backends (notably KAI) also treat it as a termination threshold and terminate a gang whose running count for a PodGroup stays below `MinReplicas` for longer than a configured delay. That termination would take down the whole PodGang, including any co-located PodCliqueScalingGroup replicas.
 
-A standalone scale-in that drains a non-MinAvailable anchor can leave that anchor carrying fewer than the template `MinAvailable`, while the clique total across all anchors is still at or above `MinAvailable`. That is not a real availability breach. To keep the backend from terminating such a PodGang, the standalone PodGroup's `MinReplicas` on a non-MinAvailable anchor is clamped to the per-anchor pod count. The MinAvailable anchor is never clamped, so a genuine drop below the floor there still lets the backend gang-terminate, which is the intended behavior.
+A standalone scale-in that drains a non-MinAvailable anchor can leave that anchor carrying fewer than the template `MinAvailable`, while the clique total across all anchors is still at or above `MinAvailable`. That is not a real availability breach. To keep the backend from terminating such a PodGang, the standalone PodGroup's `MinReplicas` on a non-MinAvailable anchor is clamped to the per-anchor pod count. The MinAvailable anchor is never clamped, so a genuine drop below `MinAvailable` there still lets the backend gang-terminate, which is the intended behavior.
 
-The clamp is standalone-only because PodCliqueScalingGroup scale-in works differently. It removes whole PodCliqueScalingGroup replicas, and each removed replica is a set of PodGroups removed from the PodGang entirely. The PodGroups that remain keep their full member-PCLQ pod count and their original `MinReplicas`, so no PodGroup's count dips below its floor and there is nothing to clamp.
+The clamp is standalone-only because PodCliqueScalingGroup scale-in works differently. It removes whole PodCliqueScalingGroup replicas, and each removed replica is a set of PodGroups removed from the PodGang entirely. The PodGroups that remain keep their full member-PCLQ pod count and their original `MinReplicas`, so no PodGroup's count dips below its minimum and there is nothing to clamp.
 
 Grove's own gang-termination evaluator at the PodCliqueSet level, driven by `MinAvailable` on PodCliques and PodCliqueScalingGroups and the `TerminationDelay` on the PCS spec, remains the source of truth for what counts as a healthy gang, and is paused during an update, see [Gang termination suppression during updates](#gang-termination-suppression-during-updates).
 

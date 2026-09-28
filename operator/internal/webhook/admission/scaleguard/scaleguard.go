@@ -41,7 +41,8 @@ type replicasSpec struct {
 
 // Handle validates a PodClique or PodCliqueScalingGroup update. It first rejects a spec.replicas change
 // while a coherent update is in progress on the owning PodCliqueSet. When no coherent update is in progress
-// it then rejects a change that would leave spec.replicas below spec.minAvailable. Both checks matter only
+// it then rejects a change that would leave spec.replicas strictly between 1 and spec.minAvailable, while
+// allowing a scale all the way to 0. Both checks matter only
 // when spec.replicas changes, and both cover a change made on the resource and one made through the scale
 // subresource. The webhook fires only on updates, so a create is never seen here and the PodCliqueSet
 // template validation covers it.
@@ -111,15 +112,19 @@ func denyReplicasChangeDuringCoherentUpdate(ctx context.Context, cl client.Clien
 	return admission.Allowed("owning PodCliqueSet has no coherent update in progress")
 }
 
-// denyReplicasBelowMinAvailable denies a change that would leave spec.replicas below spec.minAvailable.
-// minAvailable is immutable, so its value is read from the stored resource in target for a full update and
-// for a scale subresource request alike.
+// denyReplicasBelowMinAvailable validates a spec.replicas change against the component's immutable
+// spec.minAvailable, read from the stored resource in target (which also covers a scale subresource).
+// The allowed values are:
+//   - 0, so a component can be parked idle and scaled back up later.
+//   - minAvailable or above.
+//
+// A value between 1 and minAvailable is rejected.
 func denyReplicasBelowMinAvailable(target client.Object, newReplicas int32) admission.Response {
 	minAvailable := minAvailableOf(target)
-	if minAvailable != nil && newReplicas < *minAvailable {
-		return admission.Denied(fmt.Sprintf("spec.replicas %d must not be less than spec.minAvailable %d", newReplicas, *minAvailable))
+	if minAvailable != nil && newReplicas > 0 && newReplicas < *minAvailable {
+		return admission.Denied(fmt.Sprintf("spec.replicas %d must be either 0 or at least spec.minAvailable %d", newReplicas, *minAvailable))
 	}
-	return admission.Allowed("spec.replicas is at or above spec.minAvailable")
+	return admission.Allowed("spec.replicas is 0 or at least spec.minAvailable")
 }
 
 // minAvailableOf returns spec.minAvailable of the fetched PodClique or PodCliqueScalingGroup, or nil for any

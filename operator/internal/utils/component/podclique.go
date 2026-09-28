@@ -236,8 +236,11 @@ func IsPCLQUpdateComplete(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1
 		pclq.Status.CurrentPodTemplateHash != nil && *pclq.Status.CurrentPodTemplateHash == expectedPodTemplateHash
 	pcsGenerationHashConverged := pclq.Status.CurrentPodCliqueSetGenerationHash != nil &&
 		*pclq.Status.CurrentPodCliqueSetGenerationHash == *pcs.Status.CurrentGenerationHash
-	minAvailablePodsUpdatedAndReady := pclq.Status.UpdatedReplicas >= *pclq.Spec.MinAvailable &&
-		pclq.Status.ReadyReplicas >= *pclq.Spec.MinAvailable
+	// A PodClique scaled to zero has no pods to make Ready, so hash convergence alone completes it. Its
+	// resource spec still advances to the new revision, so a later scale-out launches new-spec pods.
+	minAvailablePodsUpdatedAndReady := pclq.Spec.Replicas == 0 ||
+		(pclq.Status.UpdatedReplicas >= *pclq.Spec.MinAvailable &&
+			pclq.Status.ReadyReplicas >= *pclq.Spec.MinAvailable)
 
 	return podTemplateHashConverged && pcsGenerationHashConverged && minAvailablePodsUpdatedAndReady
 }

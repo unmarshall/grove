@@ -1086,7 +1086,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 
 	t.Run("disrupts a worst-off unavailable replica instead of deadlocking when unavailable replicas exhaust MaxUnavailable", func(t *testing.T) {
 		// Two of three replicas are unavailable with MaxUnavailable=1. The old readiness-delta budget was 0
-		// here and blocked forever. The count-anchored budget is existing(3) - floor(3-1=2) -
+		// here and blocked forever. The count-anchored budget is existing(3) - reserve(3-1=2) -
 		// newNotReady(0) = 1, so one worst-off (unavailable) replica is disrupted instead of stalling.
 		sc := buildRollingUpdateSnapshot(3, 1, 1, []testReplica{oldReadyReplica(0), oldUnavailableReplica(1), oldUnavailableReplica(2)})
 		r, cl := newResource(sc)
@@ -1097,7 +1097,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 	})
 
 	t.Run("disrupts worst-off replicas first up to the budget", func(t *testing.T) {
-		// Budget is existing(3) - floor(3-2=1) - newNotReady(0) = 2. The unavailable replica 2 is worst-off
+		// Budget is existing(3) - reserve(3-2=1) - newNotReady(0) = 2. The unavailable replica 2 is worst-off
 		// and is selected before Ready replicas, and one Ready replica (0) fills the remaining budget.
 		sc := buildRollingUpdateSnapshot(3, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldUnavailableReplica(2)})
 		r, cl := newResource(sc)
@@ -1108,7 +1108,7 @@ func TestProcessPendingUpdates(t *testing.T) {
 	})
 
 	t.Run("updates a pending replica whose own unavailability would have exhausted the budget", func(t *testing.T) {
-		// The single replica is pending. floor is 1-1=0, so the budget is existing(1) - 0 - 0 = 1 and the
+		// The single replica is pending. The reserve is 1-1=0, so the budget is existing(1) - 0 - 0 = 1 and the
 		// pending replica is updated rather than deadlocking.
 		sc := buildRollingUpdateSnapshot(1, 1, 1, []testReplica{oldPendingReplica(0)})
 		r, cl := newResource(sc)
@@ -1118,16 +1118,16 @@ func TestProcessPendingUpdates(t *testing.T) {
 		assert.Empty(t, remainingReplicaIndices(t, cl), "the pending replica must be disrupted for replacement")
 	})
 
-	t.Run("does not disrupt when existing replicas are below the availability floor", func(t *testing.T) {
+	t.Run("does not disrupt when existing replicas are below the availability reserve", func(t *testing.T) {
 		// desired=5 but only 2 replicas are present (the rest deleted externally, awaiting recreation).
-		// floor is 5-2=3, so the budget is existing(2) - 3 - 0 = -1 <= 0: no disruption this reconcile
+		// The reserve is 5-2=3, so the budget is existing(2) - 3 - 0 = -1 <= 0: no disruption this reconcile
 		// until the missing replicas are recreated and availability recovers.
 		sc := buildRollingUpdateSnapshot(5, 1, 2, []testReplica{oldReadyReplica(0), oldReadyReplica(1)})
 		r, cl := newResource(sc)
 
 		err := r.processPendingUpdates(t.Context(), logr.Discard(), sc)
 		testutils.AssertGroveError(t, requeueErr, err)
-		assert.ElementsMatch(t, []string{"0", "1"}, remainingReplicaIndices(t, cl), "no replica may be disrupted while below the availability floor")
+		assert.ElementsMatch(t, []string{"0", "1"}, remainingReplicaIndices(t, cl), "no replica may be disrupted while below the availability reserve")
 	})
 }
 

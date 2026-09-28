@@ -95,16 +95,42 @@ func (r _resource) getPCSReplicaInfos(ctx context.Context, pcs *grovecorev1alpha
 			fmt.Sprintf("could not list PCSGs for PCS: %v", pcsObjectKey),
 		)
 	}
+	// A coherent update gates completion on the replica's PodGangMap having reconverged to a single
+	// generation, so its entries are gathered here. One list serves every replica.
+	var pgmEntriesByPCSIndex map[int]*grovecorev1alpha1.PodGangMap
+	if componentutils.IsCoherentStrategy(pcs) {
+		pgms, listErr := componentutils.ListPodGangMapsForPCS(ctx, r.client, pcs.ObjectMeta)
+		if listErr != nil {
+			return nil, groveerr.WrapError(listErr,
+				errCodeGetPodGangMap,
+				component.OperationSync,
+				fmt.Sprintf("could not list PodGangMaps for PCS: %v", pcsObjectKey),
+			)
+		}
+		pgmEntriesByPCSIndex, err = componentutils.PodGangMapByPCSReplicaIndex(pgms)
+		if err != nil {
+			return nil, groveerr.WrapError(err,
+				errCodeGetPodGangMap,
+				component.OperationSync,
+				fmt.Sprintf("could not index PodGangMaps by PCS replica for PCS: %v", pcsObjectKey),
+			)
+		}
+	}
 	replicaInfos := make([]pcsReplicaInfo, 0, pcs.Spec.Replicas)
 	for pcsReplicaIndex := range int(pcs.Spec.Replicas) {
 		if slices.Contains(pcsIndicesToTerminate, pcsReplicaIndex) {
 			continue
 		}
 		pcsReplicaIndexStr := strconv.Itoa(pcsReplicaIndex)
+		var pgmEntries []grovecorev1alpha1.PodGangEntry
+		if pgm := pgmEntriesByPCSIndex[pcsReplicaIndex]; pgm != nil {
+			pgmEntries = pgm.Spec.Entries
+		}
 		replicaInfos = append(replicaInfos, pcsReplicaInfo{
 			replicaIndex: pcsReplicaIndex,
 			pclqs:        pclqsByPCSIndex[pcsReplicaIndexStr],
 			pcsgs:        pcsgsByPCSIndex[pcsReplicaIndexStr],
+			pgmEntries:   pgmEntries,
 		})
 	}
 	return replicaInfos, nil
@@ -222,11 +248,17 @@ type pcsReplicaInfo struct {
 	replicaIndex int
 	pclqs        []grovecorev1alpha1.PodClique
 	pcsgs        []grovecorev1alpha1.PodCliqueScalingGroup
+	// pgmEntries holds the replica's PodGangMap entries under a coherent update, used to gate completion
+	// on the map having reconverged to a single generation. It is nil for a non-coherent update or when
+	// the PodGangMap does not exist yet.
+	pgmEntries []grovecorev1alpha1.PodGangEntry
 }
 
 // isUpdateComplete reports whether every expected PodClique and PodCliqueScalingGroup of the replica has
 // converged to the current generation hash. A missing PodClique keeps the replica incomplete because the
-// count of converged PodCliques falls short of the expected count.
+// count of converged PodCliques falls short of the expected count. Under a coherent update it also requires
+// the replica's PodGangMap to have reconverged to a single generation, so a mid-flight intermediate anchor
+// left by back-to-back updates is drained before the update is declared complete.
 func (pri *pcsReplicaInfo) isUpdateComplete(pcs *grovecorev1alpha1.PodCliqueSet) bool {
 	completeStandalonePCLQs := 0
 	for i := range pri.pclqs {
@@ -244,7 +276,13 @@ func (pri *pcsReplicaInfo) isUpdateComplete(pcs *grovecorev1alpha1.PodCliqueSet)
 			completePCSGs++
 		}
 	}
-	return completePCSGs == len(pcs.Spec.Template.PodCliqueScalingGroupConfigs)
+	if completePCSGs != len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) {
+		return false
+	}
+	if componentutils.IsCoherentStrategy(pcs) && !componentutils.IsPodGangMapAtSingleGeneration(pri.pgmEntries, currentGenerationHash) {
+		return false
+	}
+	return true
 }
 
 // getNumScheduledPods calculates total scheduled pods across PCLQs and PCSGs for a replica.

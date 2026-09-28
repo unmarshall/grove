@@ -174,13 +174,13 @@ func (r _resource) computeExpectedPodGangs(ctx context.Context, ss *syncState) (
 		if err != nil {
 			return nil, err
 		}
-		minAvailableAnchorEpoch, foundMinAvailableAnchor, err := componentutils.MinAvailableAnchorEpoch(pgm.Spec.Entries, ss.pcs.Status.CurrentGenerationHash)
+		baseAnchorEpoch, foundBaseAnchor, err := componentutils.BaseAnchorEpoch(pgm.Spec.Entries, ss.pcs.Status.CurrentGenerationHash)
 		if err != nil {
 			return nil, err
 		}
 		for _, entry := range pgm.Spec.Entries {
-			isMinAvailableAnchor := foundMinAvailableAnchor && entry.Epoch == minAvailableAnchorEpoch
-			pgInfos, err := r.buildPodGangInfosFromEntry(ss, pcsReplicaIndex, entry, isMinAvailableAnchor)
+			isBaseAnchor := foundBaseAnchor && entry.Epoch == baseAnchorEpoch
+			pgInfos, err := r.buildPodGangInfosFromEntry(ss, pcsReplicaIndex, entry, isBaseAnchor)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build PodGang info from entry with epoch %q in PodGangMap %s: %w", entry.Epoch, pgm.Name, err)
 			}
@@ -193,10 +193,10 @@ func (r _resource) computeExpectedPodGangs(ctx context.Context, ss *syncState) (
 // buildPodGangInfosFromEntry translates a PodGangMap entry into the PodGangs it materializes into.
 // An Anchor entry yields a single PodGang carrying the standalone PodCliques and the PodCliqueScalingGroup
 // replica indices the entry holds. A non-anchor entry (Tail or ScaleOut) yields one PodGang per
-// (PodCliqueScalingGroup, replica index) it carries. isMinAvailableAnchor is true only for the
-// MinAvailable anchor entry and controls standalone PodGroup MinReplicas clamping, see
+// (PodCliqueScalingGroup, replica index) it carries. isBaseAnchor is true only for the base anchor
+// entry and controls standalone PodGroup MinReplicas clamping, see
 // buildStandalonePCLQInfosForAnchorEntry.
-func (r _resource) buildPodGangInfosFromEntry(ss *syncState, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry, isMinAvailableAnchor bool) ([]*podGangInfo, error) {
+func (r _resource) buildPodGangInfosFromEntry(ss *syncState, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry, isBaseAnchor bool) ([]*podGangInfo, error) {
 	if pgEntry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
 		rnr := apicommon.ResourceNameReplica{Name: ss.pcs.Name, Replica: pcsReplicaIndex}
 		pg := &podGangInfo{
@@ -205,7 +205,7 @@ func (r _resource) buildPodGangInfosFromEntry(ss *syncState, pcsReplicaIndex int
 			extraLabels:        buildAdditionalLabelsFromPodGangEntry(pgEntry),
 			topologyConstraint: createTopologyPackConstraint(ss, client.ObjectKeyFromObject(ss.pcs), ss.pcs.Spec.Template.TopologyConstraint),
 		}
-		pg.pclqs = buildStandalonePCLQInfosForAnchorEntry(ss, pcsReplicaIndex, pgEntry, isMinAvailableAnchor)
+		pg.pclqs = buildStandalonePCLQInfosForAnchorEntry(ss, pcsReplicaIndex, pgEntry, isBaseAnchor)
 		pcsgPCLQInfos, pcsgTopoConstraints, err := buildPCSGPCLQInfosAndTopoConstraintsFromAnchorEntry(ss, pcsReplicaIndex, pgEntry)
 		if err != nil {
 			return nil, err
@@ -231,29 +231,28 @@ func buildAdditionalLabelsFromPodGangEntry(pgEntry grovecorev1alpha1.PodGangEntr
 
 // buildStandalonePCLQInfosForAnchorEntry builds pclqInfo entries for the standalone PodCliques the
 // anchor entry carries. The pod count comes from the entry, since the PodGangMap is the source of
-// truth. Iterates template cliques in order for deterministic output. isMinAvailableAnchor is true
-// only for the MinAvailable anchor and controls MinReplicas clamping, see the clamp comment below.
-func buildStandalonePCLQInfosForAnchorEntry(ss *syncState, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry, isMinAvailableAnchor bool) []pclqInfo {
+// truth. Iterates template cliques in order for deterministic output. isBaseAnchor is true
+// only for the base anchor and controls MinReplicas clamping, see the clamp comment below.
+func buildStandalonePCLQInfosForAnchorEntry(ss *syncState, pcsReplicaIndex int, pgEntry grovecorev1alpha1.PodGangEntry, isBaseAnchor bool) []pclqInfo {
 	pclqInfos := make([]pclqInfo, 0, len(ss.pcs.Spec.Template.Cliques))
 	for _, cliqueTemplate := range ss.pcs.Spec.Template.Cliques {
 		desiredPCLQReplicas, ok := pgEntry.PodCliques[cliqueTemplate.Name]
-		// A scale-in can leave a zero count on an anchor entry that survives for its other
-		// constituents. Skip it so this PodGang carries no PodGroup with zero pods but a positive
-		// MinReplicas, which would keep the PodGang from ever becoming Scheduled or Ready. This
-		// mirrors the standalone pod distribution, which also skips zero counts.
+		// Only cliques that this anchor actually carries get a PodGroup. A scale-in can drain a clique off
+		// this anchor while other cliques remain, and a PodGroup that asks for MinReplicas pods it has none
+		// of can never be scheduled. So skip a clique this anchor holds no pods for.
 		if !ok || desiredPCLQReplicas == 0 {
 			continue
 		}
 		minAvailable := *cliqueTemplate.Spec.MinAvailable
-		if !isMinAvailableAnchor {
-			// Clamp MinReplicas to the per-anchor count on a non-MinAvailable anchor. Scale-in drains
-			// higher-epoch anchors first, so such an anchor can carry fewer than the template
-			// MinAvailable while the clique total across anchors is still at or above MinAvailable.
-			// That is not a real availability breach, so MinReplicas must track the per-anchor count.
-			// Otherwise, the gang scheduler sees the count below MinReplicas and gang-terminates this
-			// PodGang, taking its co-located PodCliqueScalingGroup replicas down with it. The
-			// MinAvailable anchor keeps the template MinAvailable so a genuine drop below the floor
-			// still gang-terminates.
+		if !isBaseAnchor {
+			// MinReplicas is the pod count the scheduler must gang schedule, and it decides gang termination.
+			// Only the base anchor carries the clique's guaranteed MinAvailable. Scale-in drains the newer
+			// anchors first, so a non-base anchor can hold fewer pods than MinAvailable even though the
+			// clique's total across all anchors is still at or above it, which is expected and not a
+			// breach. Set this anchor's MinReplicas to the pods it actually holds so the scheduler does not
+			// read it as under-provisioned and gang-terminate it, which would also take down the
+			// PodCliqueScalingGroup replicas co-located in this PodGang. The base anchor keeps MinAvailable,
+			// so a genuine drop below the clique's guarantee still gang-terminates there.
 			minAvailable = min(minAvailable, desiredPCLQReplicas)
 		}
 		pclqFQN := apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: ss.pcs.Name, Replica: pcsReplicaIndex}, cliqueTemplate.Name)

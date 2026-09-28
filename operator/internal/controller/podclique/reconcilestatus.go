@@ -239,6 +239,18 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 	}
 	// dereferencing is considered safe as MinAvailable will always be set by the defaulting webhook. If this changes in the future,
 	// make sure that you check for nil explicitly.
+	// A PodClique intentionally scaled to zero has no pods to keep available, so it is not in breach. A
+	// non-zero replica count below MinAvailable, or a loss of pods below MinAvailable at an unchanged
+	// replica count, is still a breach.
+	if pclq.Spec.Replicas == 0 {
+		return metav1.Condition{
+			Type:               constants.ConditionTypeMinAvailableBreached,
+			Status:             metav1.ConditionFalse,
+			Reason:             constants.ConditionReasonSufficientReadyPods,
+			Message:            "PodClique is scaled to zero, so MinAvailable is not breached",
+			LastTransitionTime: metav1.Now(),
+		}
+	}
 	minAvailable := int(*pclq.Spec.MinAvailable)
 	scheduledReplicas := int(pclq.Status.ScheduledReplicas)
 	now := metav1.Now()

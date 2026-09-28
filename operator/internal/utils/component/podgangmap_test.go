@@ -197,7 +197,7 @@ func TestDependsOnForEpoch(t *testing.T) {
 	})
 }
 
-func TestAnchorPodGangEpoch(t *testing.T) {
+func TestBaseAnchorPodGangEpoch(t *testing.T) {
 	const (
 		pcsName     = "pcs"
 		namespace   = "default"
@@ -214,7 +214,7 @@ func TestAnchorPodGangEpoch(t *testing.T) {
 			testutils.NewPodGangEntryBuilder(genHash, "1002").
 				WithRole(grovecorev1alpha1.PodGangEntryRoleScaleOut).Build(),
 		).Build()
-		actual, err := AnchorPodGangEpoch(pgm)
+		actual, err := BaseAnchorPodGangEpoch(pgm)
 		require.NoError(t, err)
 		assert.Equal(t, anchorEpoch, actual)
 	})
@@ -224,15 +224,15 @@ func TestAnchorPodGangEpoch(t *testing.T) {
 			testutils.NewPodGangEntryBuilder(genHash, "1002").
 				WithRole(grovecorev1alpha1.PodGangEntryRoleScaleOut).Build(),
 		).Build()
-		_, err := AnchorPodGangEpoch(pgm)
+		_, err := BaseAnchorPodGangEpoch(pgm)
 		require.Error(t, err)
 	})
 }
 
-// TestMinAvailableAnchorEpoch verifies that the MinAvailable anchor (the lowest-epoch anchor) is
+// TestBaseAnchorEpoch verifies that the MinAvailable anchor (the lowest-epoch anchor) is
 // selected, optionally filtered by generation hash, that non-anchor entries are ignored, and that a
 // non-numeric epoch surfaces an error.
-func TestMinAvailableAnchorEpoch(t *testing.T) {
+func TestBaseAnchorEpoch(t *testing.T) {
 	entries := []grovecorev1alpha1.PodGangEntry{
 		{Epoch: "300", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
 		{Epoch: "100", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor},
@@ -241,21 +241,21 @@ func TestMinAvailableAnchorEpoch(t *testing.T) {
 	}
 
 	t.Run("returns the lowest-epoch anchor across all generations when the hash filter is nil", func(t *testing.T) {
-		epoch, found, err := MinAvailableAnchorEpoch(entries, nil)
+		epoch, found, err := BaseAnchorEpoch(entries, nil)
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, "100", epoch)
 	})
 
 	t.Run("filters to the given generation hash and ignores the lower-epoch tail", func(t *testing.T) {
-		epoch, found, err := MinAvailableAnchorEpoch(entries, ptr.To("v2"))
+		epoch, found, err := BaseAnchorEpoch(entries, ptr.To("v2"))
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, "200", epoch)
 	})
 
 	t.Run("reports not found when no anchor matches the generation hash", func(t *testing.T) {
-		epoch, found, err := MinAvailableAnchorEpoch(entries, ptr.To("v3"))
+		epoch, found, err := BaseAnchorEpoch(entries, ptr.To("v3"))
 		require.NoError(t, err)
 		assert.False(t, found)
 		assert.Equal(t, "", epoch)
@@ -263,7 +263,7 @@ func TestMinAvailableAnchorEpoch(t *testing.T) {
 
 	t.Run("errors on a non-numeric anchor epoch", func(t *testing.T) {
 		bad := []grovecorev1alpha1.PodGangEntry{{Epoch: "abc", Role: grovecorev1alpha1.PodGangEntryRoleAnchor}}
-		_, _, err := MinAvailableAnchorEpoch(bad, nil)
+		_, _, err := BaseAnchorEpoch(bad, nil)
 		require.Error(t, err)
 	})
 }
@@ -362,5 +362,29 @@ func TestLatestEpochForGenerationHash(t *testing.T) {
 		badEntries := []grovecorev1alpha1.PodGangEntry{testutils.NewPodGangEntryBuilder(hashA, "not-a-number").Build()}
 		_, err := LatestEpochForGenerationHash(badEntries, hashA)
 		require.Error(t, err)
+	})
+}
+
+func TestPodGangMapAtSingleGeneration(t *testing.T) {
+	const (
+		hashA = "hash-a"
+		hashB = "hash-b"
+	)
+	t.Run("true when every entry carries the queried generation hash", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{
+			testutils.NewPodGangEntryBuilder(hashA, "1000").Build(),
+			testutils.NewPodGangEntryBuilder(hashA, "2000").Build(),
+		}
+		assert.True(t, IsPodGangMapAtSingleGeneration(entries, hashA))
+	})
+	t.Run("false when any entry carries an older generation hash", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{
+			testutils.NewPodGangEntryBuilder(hashB, "1000").Build(),
+			testutils.NewPodGangEntryBuilder(hashA, "2000").Build(),
+		}
+		assert.False(t, IsPodGangMapAtSingleGeneration(entries, hashA))
+	})
+	t.Run("true for an empty entry set", func(t *testing.T) {
+		assert.True(t, IsPodGangMapAtSingleGeneration(nil, hashA))
 	})
 }

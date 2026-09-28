@@ -135,10 +135,16 @@ func TestHandle(t *testing.T) {
 			oldReplicas: 2, newReplicas: 4, wantAllowed: true,
 		},
 		{
-			description:   "a replica change on the resource to below minAvailable is rejected",
+			description:   "a partial replica count between 1 and minAvailable is rejected",
 			operation:     admissionv1.Update,
 			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
 			oldReplicas: 4, newReplicas: 1, targetMinAvailable: 2, wantAllowed: false,
+		},
+		{
+			description:   "a scale to zero is allowed",
+			operation:     admissionv1.Update,
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 0, targetMinAvailable: 2, wantAllowed: true,
 		},
 		{
 			description:   "a replica change on the resource to at least minAvailable is allowed",
@@ -147,13 +153,19 @@ func TestHandle(t *testing.T) {
 			oldReplicas: 4, newReplicas: 2, targetMinAvailable: 2, wantAllowed: true,
 		},
 		{
-			description: "a scale to below the stored minAvailable is rejected",
+			description: "a scale subresource to a partial count between 1 and minAvailable is rejected",
 			operation:   admissionv1.Update, subResource: "scale",
 			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
 			oldReplicas: 4, newReplicas: 1, targetMinAvailable: 2, wantAllowed: false,
 		},
 		{
-			description: "a scale to at least the stored minAvailable is allowed",
+			description: "a scale subresource to zero is allowed",
+			operation:   admissionv1.Update, subResource: "scale",
+			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
+			oldReplicas: 4, newReplicas: 0, targetMinAvailable: 2, wantAllowed: true,
+		},
+		{
+			description: "a scale subresource to at least the stored minAvailable is allowed",
 			operation:   admissionv1.Update, subResource: "scale",
 			targetPresent: true, pcsPresent: true, pcsUpdatingReplicaIndices: nil,
 			oldReplicas: 4, newReplicas: 2, targetMinAvailable: 2, wantAllowed: true,
