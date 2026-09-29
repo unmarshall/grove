@@ -158,3 +158,20 @@ func TestApplySubStep(t *testing.T) {
 		})
 	}
 }
+
+func TestDrainStandalonePCLQsSkipsNilPodCliquesAnchor(t *testing.T) {
+	// A subset update that had only a PodCliqueScalingGroup in scope leaves a PCSG-only anchor whose empty
+	// PodCliques map round-trips to nil through the API server. A later frontend update rolls the standalone
+	// onto a higher-epoch anchor, so in a cascade the nil-map anchor sits at the lower epoch. Sorted
+	// oldest-first, the frontend drain reaches the nil-map anchor with remaining > 0. It must skip that
+	// anchor without writing to its nil map, and drain frontend from the anchor that carries it.
+	entries := []grovecorev1alpha1.PodGangEntry{
+		{Epoch: "100", PodCliqueSetGenerationHash: "v1", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PCSGReplicaIndices: map[string][]int32{"decode": {0}}},
+		{Epoch: "150", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}},
+	}
+
+	drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 1})
+
+	assert.Nil(t, entries[0].PodCliques, "the nil-PodCliques PCSG anchor must be left untouched, not written with a spurious frontend key")
+	assert.Equal(t, int32(1), entries[1].PodCliques["frontend"], "one frontend pod must be drained from the anchor that carries it")
+}

@@ -17,7 +17,7 @@
   - [Limitations/Risks &amp; Mitigations](#limitationsrisks--mitigations)
 - [Design Details](#design-details)
   - [API Changes](#api-changes)
-    - [UpdateStrategyType — Coherent is the default](#updatestrategytype--coherent-is-the-default)
+    - [UpdateStrategyType — RollingRecreate is the default](#updatestrategytype--rollingrecreate-is-the-default)
     - [RollingUpdateConfiguration — per-component update knobs](#rollingupdateconfiguration--per-component-update-knobs)
     - [RollingUpdate defaulting and validation](#rollingupdate-defaulting-and-validation)
     - [PodGangMap — new CRD](#podgangmap--new-crd)
@@ -56,7 +56,7 @@
 
 ## Summary
 
-Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (context generation) and **decode** (token generation) — running as separate, independently scalable components. While this can improve throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling availability-preserving software upgrades that progress in bounded steps. Each step pairs an atomic **Minimum Viable Unit (MVU)** — the smallest set of components that must come up together at the new version to remain compatible — with subsequent tail sub-steps that drain the remainder under a per-component **`MaxUnavailable`** disruption budget. `Coherent` is the default `UpdateStrategy` for `PodCliqueSet`.
+Disaggregated inference architectures split LLM serving into distinct phases — most commonly (but not limited to) **prefill** (context generation) and **decode** (token generation) — running as separate, independently scalable components. While this can improve throughput and hardware utilisation, it introduces a hard operational constraint during version upgrades: prefill and decode instances that communicate must always run compatible software versions. This proposal introduces **Coherent Rolling Updates** for `PodCliqueSet`, enabling availability-preserving software upgrades that progress in bounded steps. Each step pairs an atomic **Minimum Viable Unit (MVU)** — the smallest set of components that must come up together at the new version to remain compatible — with subsequent tail sub-steps that drain the remainder under a per-component **`MaxUnavailable`** disruption budget. `RollingRecreate` is the default `UpdateStrategy` for `PodCliqueSet`. `Coherent` is opt-in.
 
 ## Motivation
 
@@ -78,7 +78,7 @@ AI inference frameworks are evolving rapidly as new architectures/models are rel
 * Ensure equal or better topology optimized placement of the workload after rolling update.
 * Explicit support for `maxSurge`. A future iteration will add `maxSurge` to the same per-component update configuration that carries `MaxUnavailable` today.
 * User-configurable concurrency control during a coherent update — neither the number of `PodCliqueSet` replicas updated simultaneously nor the number of MVU steps in flight per replica is configurable in the current iteration. Both default to one. Configurable knobs will be supported in future.
-* `scale-out` and `scale-in` of scale sub-resources (`PodClique`, `PodCliqueScalingGroup`, `PodCliqueSet`) during a coherent update. The current iteration rejects these operations PCS-wide for the duration of an in-flight coherent update — see [Handling scale-outs and scale-ins during update](#handling-scale-outs-and-scale-ins-during-update) for the precise scope and rationale. Narrower per-replica scoping and otherwise composing scale operations with an in-flight coherent update will be supported in future iterations.
+* `scale-out` and `scale-in` of scale sub-resources (`PodClique`, `PodCliqueScalingGroup`) during a coherent update. The current iteration rejects these operations PCS-wide for the duration of an in-flight coherent update — see [Handling scale-outs and scale-ins during update](#handling-scale-outs-and-scale-ins-during-update) for the precise scope and rationale. Narrower per-replica scoping and otherwise composing scale operations with an in-flight coherent update will be supported in future iterations.
 * Rollback and roll-forward of `PodCliqueSet` revisions. Tracking PCS revision history and providing operator-driven rollback / roll-forward to a prior version will be supported in future.
 * Solving cross-version communication between updating and existing components. This iteration leaves that concern to the application — the data plane is responsible for ensuring traffic respects version compatibility. As stated in [Motivation](#motivation), the goal of Coherent is to design a rolling update strategy that maintains balanced, compatible capacity across components, with operator control over how much capacity may be unavailable at any moment. A primitive for application-level routing or proportional traffic selection by revision can be added in a future increment if the need arises.
 
@@ -111,13 +111,20 @@ If pods in different PodCliques can't communicate safely across disaggregation b
 
 Coherent expresses the MVU model with three roles that a PodGangMap entry can take, plus two legacy PodGang shapes it recognizes for migration. The role is recorded on the entry and mirrored onto each materialized PodGang as the `grove.io/podgang-role` label.
 
-| Role | New or legacy | When created | What it holds |
-| ---- | ------------- | ------------ | ------------- |
-| Anchor | New | At bootstrap, and at the first sub-step of every anchor-bearing step of a coherent update. | The MinAvailable replicas of every in-scope component, the standalone PodClique pod counts and the MinAvailable replica indices of every scaling group. It is the smallest PodGang that satisfies availability. |
-| Tail | New | During a coherent update, and at bootstrap when a scaling group has replicas above MinAvailable. | Scaling group replica indices above MinAvailable. Its PodGang depends on an anchor epoch via `DependsOn`, so the scheduler places it only after that anchor is scheduled. |
-| ScaleOut | New | Once per PodGangMap when the PCS has at least one scaling group. It starts empty and later scale-outs append their new replica indices to it. | Scaling group replica indices added by steady-state scale-out. Its PodGang depends on an anchor epoch via `DependsOn`. |
-| Base PodGang | Legacy | Initial deployment under a pre-Coherent strategy, before the migration. | One per PCS replica, carrying MinAvailable replicas of every standalone PodClique and every scaling group. |
-| Scaled PodGang | Legacy | One per scaling group replica above MinAvailable under a pre-Coherent strategy, before the migration. Named `<pcsg-fqn>-<index>`. | A single scaling group replica. |
+| Role | New or legacy | When created                                                                                                                                  | What it holds                                                                                                                                                             |
+| ---- | ------------- |-----------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anchor | New | At bootstrap, and at the first sub-step of every anchor-bearing step of a coherent update.| MinAvailable replica indices of PodCliqueScalingGroup(s) and at least MinAvailable pods of Standalone PodCliques.|
+| Tail | New | During a coherent update, and at bootstrap when a scaling group has replicas above MinAvailable.                                              | Scaling group replica indices above MinAvailable. Its PodGang depends on an anchor epoch via `DependsOn`, so the scheduler places it only after that anchor is scheduled. |
+| ScaleOut | New | Once per PodGangMap when the PCS has at least one scaling group. It starts empty and later scale-outs append their new replica indices to it. | Scaling group replica indices added by steady-state scale-out. Its PodGang depends on an anchor epoch via `DependsOn`.                                                    |
+| Base PodGang | Legacy | Initial deployment under a pre-Coherent strategy, before the migration.                                                                       | One per PCS replica, carrying MinAvailable replicas of every standalone PodClique and every scaling group.                                                                |
+| Scaled PodGang | Legacy | One per scaling group replica above MinAvailable under a pre-Coherent strategy, before the migration. Named `<pcsg-fqn>-<index>`.             | A single scaling group replica.                                                                                                                                           |
+
+> **Note:** 
+> 
+> For Anchor the constituents change and that is determined by whether it's an initial deployment (bootstrap) or post a Coherent update. 
+> * During initial deployment it contains all pods for all standalone PodCliques and MinAvailable replicas of all scaling groups. This composition is retained during/after update if the update strategy is `RollingRecreate`.
+> * During or after a `Coherent` update, the first anchor PodGang contains the MinAvailable replicas of in-scope scaling groups and MinAvailable pods of in-scope standalone PodCliques. Other anchor PodGangs will contain MinAvailable replica indices of in-scope scaling groups and at least MinAvailable pods of in-scope standalone PodCliques, with the pods above MinAvailable
+    subsumed into the highest-epoch anchor.
 
 A single PCS replica can hold a mix of the three new roles at once. Mid-update a replica can still carry its old-generation anchor and tail PodGangs alongside the new-generation ones, until the old ones are fully drained.
 
@@ -161,9 +168,9 @@ The current iteration of Coherent Rolling Updates carries the following known li
 
 This section consolidates every API surface added or modified to support Coherent Rolling Updates.
 
-#### UpdateStrategyType — Coherent is the default
+#### UpdateStrategyType — RollingRecreate is the default
 
-A new value `Coherent` is introduced on `UpdateStrategyType`. It is the **default** `UpdateStrategy` for a `PodCliqueSet`.
+A new value `Coherent` is introduced on `UpdateStrategyType`. `RollingRecreate` is the **default** `UpdateStrategy` for a `PodCliqueSet`, and `Coherent` is opt-in.
 
 ```go
 // +kubebuilder:validation:Enum={Coherent,RollingRecreate,OnDelete}
@@ -177,13 +184,13 @@ const (
     // version-compatible, ratio-preserving subset of the workload. Each step pairs
     // an MVU PodGang (carrying MinAvailable replicas of every updated component) with
     // subsequent tail sub-steps that drain the per-step remainder under each
-    // component's MaxUnavailable budget. This is the default update strategy.
+    // component's MaxUnavailable budget.
     CoherentStrategy UpdateStrategyType = "Coherent"
 )
 
 type PodCliqueSetUpdateStrategy struct {
-    // Default is Coherent.
-    // +kubebuilder:default=Coherent
+    // Default is RollingRecreate.
+    // +kubebuilder:default=RollingRecreate
     Type UpdateStrategyType `json:"type,omitempty"`
 }
 ```
@@ -258,7 +265,7 @@ The two defaults are chosen for internal consistency with the strategy's own mec
 - Under the `Coherent` strategy, `MaxUnavailable` must not be less than the component's `MinAvailable`, because the MVU sub-step takes down `MinAvailable` pods of the component at once. This check is specific to `Coherent`.
 - When set, `ProgressDeadline` must be greater than 0.
 
-**Strategy-flip safety.** If the user later switches `UpdateStrategy.Type` (e.g. `RollingRecreate` → `Coherent`) without explicitly setting `MaxUnavailable`, the previously-defaulted value (e.g. `1`) sticks — the defaulting webhook only defaults *unset* fields. The `MaxUnavailable < MinAvailable` rule closes this loop: under `Coherent`, the previously-defaulted `1` is below `MinAvailable` for any component with `MinAvailable >= 2`, and admission rejects the PCS until the operator sets an appropriate value. No strategy-conditional check at runtime is needed.
+**Strategy-flip safety.** If the user later switches `UpdateStrategy.Type` (e.g. `RollingRecreate` → `Coherent`) without explicitly setting `MaxUnavailable`, the previously-defaulted value (e.g. `1`) sticks — the defaulting webhook only defaults *unset* fields. The `MaxUnavailable < MinAvailable` rule closes this loop: under `Coherent`, the previously-defaulted `1` is below `MinAvailable` for any component with `MinAvailable >= 2`, and admission rejects the PCS until the user sets an appropriate value. No strategy-conditional check at runtime is needed.
 
 #### PodGangMap — new CRD
 
@@ -966,7 +973,7 @@ The status surface is shaped to allow broader concurrency in the future: `Curren
 
 ### Handling scale-outs and scale-ins during update
 
-Scale operations on PCLQ, PCSG, and PCS resources are gated by the rules in [Limitations/Risks & Mitigations](#limitationsrisks--mitigations) — they are **rejected by the validating webhook PCS-wide** for the entire duration of a coherent update. The block is intentionally coarse in this iteration:
+Scale operations on PCLQ and PCSG resources are gated by the rules in [Limitations/Risks & Mitigations](#limitationsrisks--mitigations) — they are **rejected by the validating webhook PCS-wide** for the entire duration of a coherent update. The block is intentionally coarse in this iteration:
 
 - It applies to children of **every** PCS replica, not just the replica currently being updated. Replicas that have already finished their rollout and replicas that have not yet started are equally blocked.
 - The mutation is **rejected at admission time** — the user receives an immediate error, the spec on the API server is never updated, and there is no reconciler-side hold to drain after the update closes out.

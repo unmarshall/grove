@@ -112,9 +112,9 @@ func TestShouldAdvanceEntriesGenerationHash(t *testing.T) {
 		expected     bool
 	}{
 		{
-			name:        "nil strategy defaults to Coherent and never advances when entries lag",
+			name:        "nil strategy defaults to RollingRecreate and advances when entries lag",
 			entryHashes: []string{"old"},
-			expected:    false,
+			expected:    true,
 		},
 		{
 			name:         "RollingRecreate advances when an entry lags the current hash",

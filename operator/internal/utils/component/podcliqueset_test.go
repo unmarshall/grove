@@ -322,8 +322,8 @@ func TestResolveUpdateStrategyType(t *testing.T) {
 		pcs         *grovecorev1alpha1.PodCliqueSet
 		want        grovecorev1alpha1.UpdateStrategyType
 	}{
-		{"nil UpdateStrategy resolves to Coherent", &grovecorev1alpha1.PodCliqueSet{}, grovecorev1alpha1.CoherentStrategy},
-		{"empty Type resolves to Coherent", withStrategy(""), grovecorev1alpha1.CoherentStrategy},
+		{"nil UpdateStrategy resolves to RollingRecreate", &grovecorev1alpha1.PodCliqueSet{}, grovecorev1alpha1.RollingRecreateStrategy},
+		{"empty Type resolves to RollingRecreate", withStrategy(""), grovecorev1alpha1.RollingRecreateStrategy},
 		{"Coherent stays Coherent", withStrategy(grovecorev1alpha1.CoherentStrategy), grovecorev1alpha1.CoherentStrategy},
 		{"RollingRecreate stays RollingRecreate", withStrategy(grovecorev1alpha1.RollingRecreateStrategy), grovecorev1alpha1.RollingRecreateStrategy},
 		{"OnDelete stays OnDelete", withStrategy(grovecorev1alpha1.OnDeleteStrategy), grovecorev1alpha1.OnDeleteStrategy},
@@ -348,7 +348,7 @@ func TestIsCoherentStrategy(t *testing.T) {
 		want        bool
 	}{
 		{"nil PodCliqueSet is not Coherent", nil, false},
-		{"nil UpdateStrategy defaults to Coherent", &grovecorev1alpha1.PodCliqueSet{}, true},
+		{"nil UpdateStrategy defaults to RollingRecreate and is not Coherent", &grovecorev1alpha1.PodCliqueSet{}, false},
 		{"RollingRecreate is not Coherent", withStrategy(grovecorev1alpha1.RollingRecreateStrategy), false},
 		{"OnDelete is not Coherent", withStrategy(grovecorev1alpha1.OnDeleteStrategy), false},
 		{"Coherent is Coherent", withStrategy(grovecorev1alpha1.CoherentStrategy), true},
@@ -416,7 +416,7 @@ func TestIsRollingRecreateUpdateInProgress(t *testing.T) {
 		want        bool
 	}{
 		{"RollingRecreate with an in-flight update", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
-		{"a nil UpdateStrategy defaults to Coherent and is not RollingRecreate", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
+		{"a nil UpdateStrategy defaults to RollingRecreate and is RollingRecreate", nil, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, true},
 		{"Coherent with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
 		{"OnDelete with an in-flight update is not RollingRecreate", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.OnDeleteStrategy}, &grovecorev1alpha1.PodCliqueSetUpdateProgress{}, false},
 		{"RollingRecreate with no update in progress", &grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}, nil, false},

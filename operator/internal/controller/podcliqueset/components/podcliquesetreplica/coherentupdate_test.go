@@ -215,7 +215,8 @@ func coherentTestPCS(standaloneCliques, pcsgConfigs []string) *grovecorev1alpha1
 	for _, pcsgConfig := range pcsgConfigs {
 		builder = builder.WithScalingGroupConfig(pcsgConfig, []string{pcsgConfig + "-worker"}, 1, 1)
 	}
-	pcs := builder.WithPodCliqueSetGenerationHash(new(coherentTestCurrentGen)).Build()
+	pcs := builder.WithPodCliqueSetGenerationHash(new(coherentTestCurrentGen)).
+		WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.CoherentStrategy}).Build()
 	pcs.Status.UpdateProgress = &grovecorev1alpha1.PodCliqueSetUpdateProgress{
 		InScopeStandalonePodCliques:   standaloneCliques,
 		InScopePodCliqueScalingGroups: pcsgConfigs,

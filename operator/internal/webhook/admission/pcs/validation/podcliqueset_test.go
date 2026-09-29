@@ -2012,12 +2012,11 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			minAvailable:   2,
 		},
 		{
-			description:    "unset strategy resolves to Coherent, MaxUnavailable below minAvailable rejected",
+			description:    "unset strategy resolves to RollingRecreate, MaxUnavailable below minAvailable accepted",
 			updateStrategy: "",
 			rollingUpdate:  &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To[int32](1)},
 			replicas:       5,
 			minAvailable:   2,
-			wantErrType:    ptr.To(field.ErrorTypeInvalid),
 		},
 		{
 			description:    "rollingRecreate MaxUnavailable below minAvailable accepted, the bound is Coherent only",

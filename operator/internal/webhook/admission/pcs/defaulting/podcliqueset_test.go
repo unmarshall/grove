@@ -36,7 +36,7 @@ func TestDefaultPodCliqueSet(t *testing.T) {
 		},
 		Spec: grovecorev1alpha1.PodCliqueSetSpec{
 			UpdateStrategy: &grovecorev1alpha1.PodCliqueSetUpdateStrategy{
-				Type: grovecorev1alpha1.CoherentStrategy,
+				Type: grovecorev1alpha1.RollingRecreateStrategy,
 			},
 			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{{
@@ -433,14 +433,14 @@ func TestDefaultUpdateStrategy(t *testing.T) {
 		wantStrategy grovecorev1alpha1.UpdateStrategyType
 	}{
 		{
-			description:  "nil UpdateStrategy defaults to Coherent",
+			description:  "nil UpdateStrategy defaults to RollingRecreate",
 			input:        nil,
-			wantStrategy: grovecorev1alpha1.CoherentStrategy,
+			wantStrategy: grovecorev1alpha1.RollingRecreateStrategy,
 		},
 		{
-			description:  "empty Type defaults to Coherent",
+			description:  "empty Type defaults to RollingRecreate",
 			input:        &grovecorev1alpha1.PodCliqueSetUpdateStrategy{},
-			wantStrategy: grovecorev1alpha1.CoherentStrategy,
+			wantStrategy: grovecorev1alpha1.RollingRecreateStrategy,
 		},
 		{
 			description:  "existing Type is preserved",

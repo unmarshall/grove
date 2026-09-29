@@ -64,9 +64,11 @@ func drainStandalonePCLQs(entries []grovecorev1alpha1.PodGangEntry, currentHash 
 			if !isOldHashAnchor {
 				continue
 			}
-			take := min(entries[i].PodCliques[pclqName], remaining)
-			entries[i].PodCliques[pclqName] -= take
-			remaining -= take
+			if pclq, ok := entries[i].PodCliques[pclqName]; ok {
+				take := min(pclq, remaining)
+				entries[i].PodCliques[pclqName] -= take
+				remaining -= take
+			}
 		}
 	}
 }
