@@ -37,7 +37,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -580,6 +582,27 @@ func TestBuildPerPodGangCreationTasks(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, tasks)
 	})
+}
+
+// TestCurrentGenerationPodGangNames covers the current-version anchor PodGang set the pod controller may
+// fill: only current-version anchors carrying this clique are included, old-version anchors and anchors
+// without this clique are excluded.
+func TestCurrentGenerationPodGangNames(t *testing.T) {
+	rnr := apicommon.ResourceNameReplica{Name: "pcs", Replica: 0}
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pcs"},
+		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("v2")},
+	}
+	pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliqueSetGenerationHash: "v1", Epoch: "50", PodCliques: map[string]int32{"frontend": 2}},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliqueSetGenerationHash: "v2", Epoch: "200", PodCliques: map[string]int32{"frontend": 2}},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliqueSetGenerationHash: "v2", Epoch: "250", PodCliques: map[string]int32{"other": 1}},
+	}}}
+	ss := &syncSnapshot{pcs: pcs, pgm: pgm, cliqueName: "frontend", pcsReplicaIndex: 0}
+
+	got := currentGenerationPodGangNames(ss)
+
+	assert.Equal(t, sets.New(apicommon.GenerateAnchorPodGangName(rnr, "200")), got)
 }
 
 // anchorEntryWithCliques builds an Anchor PodGangEntry carrying the given standalone PodClique counts.

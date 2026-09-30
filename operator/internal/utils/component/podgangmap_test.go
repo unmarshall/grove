@@ -388,3 +388,20 @@ func TestPodGangMapAtSingleGeneration(t *testing.T) {
 		assert.True(t, IsPodGangMapAtSingleGeneration(nil, hashA))
 	})
 }
+
+// TestEpochByAnchorPodGangName verifies the anchor PodGang name to epoch map excludes non-anchor entries.
+func TestEpochByAnchorPodGangName(t *testing.T) {
+	rnr := apicommon.ResourceNameReplica{Name: "pcs", Replica: 0}
+	entries := []grovecorev1alpha1.PodGangEntry{
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "100"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "200"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleTail, Epoch: "300"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleScaleOut, Epoch: "400"},
+	}
+	got := EpochByAnchorPodGangName(entries, rnr)
+	want := map[string]string{
+		apicommon.GenerateAnchorPodGangName(rnr, "100"): "100",
+		apicommon.GenerateAnchorPodGangName(rnr, "200"): "200",
+	}
+	assert.Equal(t, want, got)
+}

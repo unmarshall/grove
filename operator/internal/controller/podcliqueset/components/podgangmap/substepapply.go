@@ -37,7 +37,7 @@ func (p *subStepPlanner) applySubStep(ss subStep) ([]grovecorev1alpha1.PodGangEn
 		return nil, err
 	}
 
-	drainStandalonePCLQs(entries, currentHash, ss.drainStandalonePCLQCounts)
+	drainStandalonePCLQs(entries, currentHash, ss.drainStandalonePCLQCounts, p.runningPodsByCliqueAndAnchor)
 	drainPCSGIndices(entries, currentHash, ss.drainPCSGReplicaIndices)
 	subsumeIntoAnchor(entries, ss.subsumeAnchorEpoch, ss.subsumeStandalonePCLQCounts)
 
@@ -48,29 +48,78 @@ func (p *subStepPlanner) applySubStep(ss subStep) ([]grovecorev1alpha1.PodGangEn
 	return removeEmptyEntries(entries, currentHash), nil
 }
 
-// drainStandalonePCLQs subtracts each PodClique's take-down count from the old-hash anchor entries, in the
-// order the entries appear. Standalone PodClique pods live only on anchor entries, so only old-hash anchors
-// are touched. A standalone PodClique tracks its pods as a count rather than as identified replica indices,
-// so any old-hash anchor's count can absorb the take-down. The caller sorts entries oldest first so the
-// oldest generation is retired before a newer one.
-func drainStandalonePCLQs(entries []grovecorev1alpha1.PodGangEntry, currentHash string, drainCounts map[string]int32) {
-	for pclqName, remaining := range drainCounts {
+// drainStandalonePCLQs removes each standalone PodClique take-down count from the old-version anchor entries.
+// It runs in two phases per PodClique, and the phase order keeps the MaxUnavailable accounting exact.
+//
+// Phase 1 reclaims missing old-version Pods. A missing old-version Pod is an anchor slot with no running
+// Pod behind it. Reclaiming lowers only the entry count and removes no running Pod, so it costs no
+// availability. All old anchors are reclaimed first, in the order entries appear, because a reclaimed slot
+// moves to the current anchor regardless of which old anchor it came from.
+//
+// Phase 2 takes down running Pods, oldest anchor first, so the oldest generation retires before a newer one.
+//
+// Why reclaim before takedown. The MaxUnavailable gate credits the sub-step for reclaiming missing
+// old-version Pods for free. If the drain instead took down running Pods first and left missing old-version
+// Pods in place, the gate credit would not match what actually happened and the budget could be breached.
+//
+// Example. Two old anchors of one PodClique during back-to-back updates. Drain 2.
+//
+//	A  count 2  running 2
+//	B  count 2  running 1   (1 missing old-version Pod)
+//	Phase 1 reclaims B's missing old-version Pod. B count 2 to 1. remaining 1.
+//	Phase 2 takes down oldest first. A count 2 to 1 (1 running Pod removed). remaining 0.
+//
+// Result. 1 dead on B plus 1 removed on A is 2 unavailable, within a budget of 2. If Phase 2 ran over
+// everything oldest first it would remove 2 running Pods on A and leave B's missing old-version Pod in
+// place, giving 3 unavailable.
+//
+// runningPodsByCliqueAndAnchor gives the running Pod count per anchor epoch, so the split knows which slots
+// are missing old-version Pods. A nil map treats every slot as one, which drains the same total from the
+// same anchors as a plain oldest-first drain. The caller sorts entries oldest first, which both phases
+// rely on.
+func drainStandalonePCLQs(entries []grovecorev1alpha1.PodGangEntry, currentHash string, drainCounts map[string]int32, runningPodsByCliqueAndAnchor map[string]map[string]int32) {
+	for cliqueName, remaining := range drainCounts {
+		runningPodsByAnchor := runningPodsByCliqueAndAnchor[cliqueName]
+		// Phase 1. Reclaim missing old-version Pods. Each reclaim lowers only the entry count, removing no running Pod.
 		for i := range entries {
 			if remaining == 0 {
 				break
 			}
-			// Standalone PodClique pods live only on old-hash anchor entries, so skip everything else.
-			isOldHashAnchor := entries[i].PodCliqueSetGenerationHash != currentHash && entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor
-			if !isOldHashAnchor {
+			if !isOldHashAnchor(entries[i], currentHash) {
 				continue
 			}
-			if pclq, ok := entries[i].PodCliques[pclqName]; ok {
-				take := min(pclq, remaining)
-				entries[i].PodCliques[pclqName] -= take
+			anchorPodCount, ok := entries[i].PodCliques[cliqueName]
+			if !ok {
+				continue
+			}
+			missingOldVersionPods := anchorPodCount - runningPodsByAnchor[entries[i].Epoch]
+			if missingOldVersionPods <= 0 {
+				continue
+			}
+			take := min(missingOldVersionPods, remaining)
+			entries[i].PodCliques[cliqueName] -= take
+			remaining -= take
+		}
+		// Phase 2. Take down running Pods, oldest anchor first. Every take here removes a running Pod.
+		for i := range entries {
+			if remaining == 0 {
+				break
+			}
+			if !isOldHashAnchor(entries[i], currentHash) {
+				continue
+			}
+			if anchorPodCount, ok := entries[i].PodCliques[cliqueName]; ok {
+				take := min(anchorPodCount, remaining)
+				entries[i].PodCliques[cliqueName] -= take
 				remaining -= take
 			}
 		}
 	}
+}
+
+// isOldHashAnchor reports whether the entry is an anchor at a generation other than the current one.
+func isOldHashAnchor(entry grovecorev1alpha1.PodGangEntry, currentHash string) bool {
+	return entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entry.PodCliqueSetGenerationHash != currentHash
 }
 
 // drainPCSGIndices removes each PodCliqueScalingGroup's take-down replica indices from whichever old-hash

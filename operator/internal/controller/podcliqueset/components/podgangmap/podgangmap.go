@@ -47,6 +47,7 @@ const (
 	errCodeGroupPodGangsByReplica  grovecorev1alpha1.ErrorCode = "ERR_GROUP_PODGANGS_BY_REPLICA"
 	errCodeInvalidEpoch            grovecorev1alpha1.ErrorCode = "ERR_INVALID_EPOCH"
 	errCodeExtractPCSGName         grovecorev1alpha1.ErrorCode = "ERR_EXTRACT_PCSG_NAME"
+	errCodeListPods                grovecorev1alpha1.ErrorCode = "ERR_LIST_PODS"
 )
 
 type _resource struct {

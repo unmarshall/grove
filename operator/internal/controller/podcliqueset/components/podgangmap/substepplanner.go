@@ -146,24 +146,34 @@ type subStepPlanner struct {
 	// maxUnavailableByComponent bounds how many of a component a single sub-step may take down, from the
 	// current template.
 	maxUnavailableByComponent map[string]int32
+	// runningPodsByCliqueAndAnchor is the running Pod count of each in-scope standalone PodClique on each
+	// anchor, keyed by clique name then anchor epoch. The drain reads it to reclaim missing old-version Pods before taking
+	// down running Pods. It is nil when no standalone PodClique is in scope.
+	runningPodsByCliqueAndAnchor map[string]map[string]int32
+	// numMissingOldVersionPodsByPCLQ is the count of missing old-version Pods per in-scope standalone
+	// PodClique, derived at construction from the committed entries and runningPodsByCliqueAndAnchor. The
+	// gate reads it to keep the reclaim free.
+	numMissingOldVersionPodsByPCLQ map[string]int32
 	// plan is the step-level decomposition the sub-step methods work against.
 	plan stepPlan
 }
 
 // newSubStepPlanner builds the planner for one PCS replica from the in-scope live replica counts and the
 // current-template maxUnavailable, and computes the step plan the planner works against.
-func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, desiredReplicas map[string]int32) *subStepPlanner {
+func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, desiredReplicas map[string]int32, runningPodsByCliqueAndAnchor map[string]map[string]int32) *subStepPlanner {
 	mvu := syncSnap.mvuTemplate
 	minAvailableByComponent := lo.Assign(mvu.standalonePCLQs, mvu.pcsgs)
 	return &subStepPlanner{
-		clk:                       clk,
-		pcs:                       syncSnap.pcs,
-		pcsReplicaIndex:           pcsReplicaIndex,
-		mvu:                       mvu,
-		entries:                   entries,
-		desiredReplicas:           desiredReplicas,
-		maxUnavailableByComponent: componentutils.CoherentMaxUnavailableByComponent(syncSnap.pcs, lo.Keys(minAvailableByComponent)),
-		plan:                      computeStepPlan(desiredReplicas, mvu),
+		clk:                            clk,
+		pcs:                            syncSnap.pcs,
+		pcsReplicaIndex:                pcsReplicaIndex,
+		mvu:                            mvu,
+		entries:                        entries,
+		desiredReplicas:                desiredReplicas,
+		maxUnavailableByComponent:      componentutils.CoherentMaxUnavailableByComponent(syncSnap.pcs, lo.Keys(minAvailableByComponent)),
+		runningPodsByCliqueAndAnchor:   runningPodsByCliqueAndAnchor,
+		numMissingOldVersionPodsByPCLQ: numMissingOldVersionPodsByStandalonePCLQ(entries, *syncSnap.pcs.Status.CurrentGenerationHash, runningPodsByCliqueAndAnchor),
+		plan:                           computeStepPlan(desiredReplicas, mvu),
 	}
 }
 
@@ -536,6 +546,14 @@ func (p *subStepPlanner) buildNonAnchorSubStep(epoch, anchorEpoch string, remain
 		drainPCSGReplicaIndices:     map[string][]int32{},
 	}
 	for componentName, remaining := range remainingByComponent {
+		// rollBudget is how many old-version slots this sub-step drains for the component. It is the
+		// smallest of three bounds.
+		//   maxUnavailable : never drain more than the component MaxUnavailable in one sub-step.
+		//   remaining      : never drain more than the step still has left to roll.
+		//   headroom       : running-Pod takedown headroom plus free missing old-version reclaims (see headroomByComponent).
+		// The maxUnavailable bound also caps the reclaim. When more Pods have died than MaxUnavailable, the
+		// extra missing old-version Pods are reclaimed over later reconciles rather than all at once. This is safe and self
+		// correcting. It only slows recovery from many simultaneous unrelated deaths.
 		rollBudget := min(p.maxUnavailableByComponent[componentName], remaining)
 		if headroomByComponent != nil {
 			rollBudget = min(rollBudget, headroomByComponent[componentName])

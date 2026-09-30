@@ -170,8 +170,36 @@ func TestDrainStandalonePCLQsSkipsNilPodCliquesAnchor(t *testing.T) {
 		{Epoch: "150", PodCliqueSetGenerationHash: "v2", Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}},
 	}
 
-	drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 1})
+	drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 1}, nil)
 
 	assert.Nil(t, entries[0].PodCliques, "the nil-PodCliques PCSG anchor must be left untouched, not written with a spurious frontend key")
 	assert.Equal(t, int32(1), entries[1].PodCliques["frontend"], "one frontend pod must be drained from the anchor that carries it")
+}
+
+// TestDrainStandalonePCLQsReclaimsMissingFirst covers the two-phase drain: missing old-version Pods are
+// reclaimed before running Pods are taken down, real takedowns then run oldest anchor first, and
+// current-version anchors are skipped.
+func TestDrainStandalonePCLQsReclaimsMissingFirst(t *testing.T) {
+	oldAnchor := func(gen, epoch string, count int32) grovecorev1alpha1.PodGangEntry {
+		return grovecorev1alpha1.PodGangEntry{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliqueSetGenerationHash: gen, Epoch: epoch, PodCliques: map[string]int32{"frontend": count}}
+	}
+	t.Run("reclaims a missing old-version Pod before taking a running Pod down on an older anchor", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{oldAnchor("v1", "40", 2), oldAnchor("v2", "50", 2)}
+		running := map[string]map[string]int32{"frontend": {"40": 2, "50": 1}}
+		drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 2}, running)
+		assert.Equal(t, int32(1), entries[0].PodCliques["frontend"], "one running Pod taken down from the oldest anchor")
+		assert.Equal(t, int32(1), entries[1].PodCliques["frontend"], "the missing old-version slot reclaimed from the newer old anchor")
+	})
+	t.Run("with no missing old-version Pods drains running Pods oldest anchor first", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{oldAnchor("v1", "40", 2), oldAnchor("v2", "50", 2)}
+		running := map[string]map[string]int32{"frontend": {"40": 2, "50": 2}}
+		drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 2}, running)
+		assert.Equal(t, int32(0), entries[0].PodCliques["frontend"], "oldest anchor drained first")
+		assert.Equal(t, int32(2), entries[1].PodCliques["frontend"], "newer old anchor left untouched")
+	})
+	t.Run("a current-version anchor is never drained", func(t *testing.T) {
+		entries := []grovecorev1alpha1.PodGangEntry{oldAnchor("v3", "200", 4)}
+		drainStandalonePCLQs(entries, "v3", map[string]int32{"frontend": 2}, map[string]map[string]int32{"frontend": {"200": 4}})
+		assert.Equal(t, int32(4), entries[0].PodCliques["frontend"], "current-version anchor left untouched")
+	})
 }

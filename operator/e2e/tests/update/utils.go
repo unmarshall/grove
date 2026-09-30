@@ -1768,3 +1768,55 @@ func assertDefaultedMaxUnavailable(tc *testctx.TestContext, cliqueName string, w
 	}
 	tc.T.Fatalf("clique %s not found in PodCliqueSet %s", cliqueName, tc.Workload.Name)
 }
+
+// firstReadyPodForCliqueOnReplica returns the name of a Ready pod of the clique on the replica. During a
+// coherent roll parked by blocked readiness, the Ready pods are the old-revision pods on the old anchor.
+func firstReadyPodForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) (string, error) {
+	livePods, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		return "", err
+	}
+	for i := range livePods {
+		if kubeutils.IsPodReady(&livePods[i]) {
+			return livePods[i].Name, nil
+		}
+	}
+	return "", fmt.Errorf("no Ready %s pod found on replica %d", cliqueName, pcsReplicaIndex)
+}
+
+// firstNotReadyPodForCliqueOnReplica returns the name of a not-Ready pod of the clique on the replica.
+// During a coherent roll parked by blocked readiness, the not-Ready pod is the new-revision pod the current
+// sub-step created on the current-version anchor.
+func firstNotReadyPodForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) (string, error) {
+	livePods, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		return "", err
+	}
+	for i := range livePods {
+		if !kubeutils.IsPodReady(&livePods[i]) {
+			return livePods[i].Name, nil
+		}
+	}
+	return "", fmt.Errorf("no not-Ready %s pod found on replica %d", cliqueName, pcsReplicaIndex)
+}
+
+// waitForReplicaMidCoherentRoll blocks until the replica's PodGangMap carries entries at more than one
+// generation hash. That means a coherent sub-step has committed a current-revision anchor alongside the
+// draining old-revision entries. With the replica's readiness blocked, the roll then parks in this state.
+func waitForReplicaMidCoherentRoll(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) {
+	t.Helper()
+	deadline := time.Now().Add(tc.Timeout)
+	for time.Now().Before(deadline) {
+		if pgm, err := getReplicaPodGangMap(tc, pcsReplicaIndex); err == nil {
+			generations := make(map[string]struct{})
+			for _, entry := range pgm.Spec.Entries {
+				generations[entry.PodCliqueSetGenerationHash] = struct{}{}
+			}
+			if len(generations) >= 2 {
+				return
+			}
+		}
+		time.Sleep(tc.Interval)
+	}
+	t.Fatalf("replica %d PodGangMap did not reach a multi-generation (mid coherent roll) state within %s", pcsReplicaIndex, tc.Timeout)
+}

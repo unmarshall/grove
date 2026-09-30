@@ -24,9 +24,11 @@ import (
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -226,6 +228,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		desiredReplicas           map[string]int32
 		maxUnavailableByComponent map[string]int32
 		drainByComponent          map[string]int32
+		numMissingOldVersionPods  map[string]int32
 		want                      bool
 	}{
 		{
@@ -261,17 +264,35 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 			want:                      true,
 		},
 		{
-			description:               "a component not touched by the sub-step but already over budget holds",
+			description:               "a component the sub-step does not drain is not gated by its own unavailability",
 			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			drainByComponent:          map[string]int32{},
+			want:                      true,
+		},
+		{
+			description:               "a standalone PodClique reclaiming only missing old-version Pods proceeds even when over budget",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 3},
+			numMissingOldVersionPods:  map[string]int32{"frontend": 4},
+			want:                      true,
+		},
+		{
+			description:               "a standalone drain beyond its missing old-version Pods crossing the budget holds",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 5},
+			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
 			want:                      false,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent))
+			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, tc.numMissingOldVersionPods))
 		})
 	}
 }
@@ -328,7 +349,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 		fullyRolledAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 4}}
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{fullyRolledAnchor}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, nil)
-		r := _resource{client: testutils.NewTestClientBuilder().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
+		r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
 
 		entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
 
@@ -340,7 +361,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{anchorV1, anchorV2}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, ptr.To[int32](2))
 		// No PodGang exists at the latest current-hash epoch, so currentBatchScheduled is false.
-		r := _resource{client: testutils.NewTestClientBuilder().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
+		r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
 
 		entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
 
@@ -351,7 +372,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	t.Run("gate passes so the next sub-step is emitted", func(t *testing.T) {
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{anchorV1, anchorV2}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, ptr.To[int32](2))
-		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch("pg-200", "200", true)).Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
+		r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(podGangAtEpoch("pg-200", "200", true)).Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
 
 		entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
 
@@ -364,8 +385,8 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	})
 }
 
-// pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled Pod
-// count on its in-progress UpdateProgress.
+// TestEntryHoldsInScopeContent checks the predicate that gates reconvergence, reporting whether an entry
+// still carries pods or replica indices for any component within the coherent update scope.
 func TestEntryHoldsInScopeContent(t *testing.T) {
 	mvu := &mvuTemplate{
 		standalonePCLQs: map[string]int32{"frontend": 1},
@@ -417,19 +438,197 @@ func TestAdvanceFullyDrainedEntries(t *testing.T) {
 	}
 }
 
-// TestHeadroomByComponent checks the per-component MaxUnavailable headroom used to cap a sub-step's drain,
-// including the clamp to zero when a component is already over budget.
+// TestHeadroomByComponent checks the per-component drain headroom. For a standalone PodClique it is the
+// running-Pod takedown headroom plus the free missing old-version term. For a PodCliqueScalingGroup it is
+// only the running-replica takedown headroom, since a PodCliqueScalingGroup has no missing old-version term.
 func TestHeadroomByComponent(t *testing.T) {
-	standalone := map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)}
-	pcsg := map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)}
-
-	got := headroomByComponent(standalone, pcsg, map[string]int32{"frontend": 10, "decode": 6}, map[string]int32{"frontend": 3, "decode": 2})
-	assert.Equal(t, map[string]int32{"frontend": 1, "decode": 2}, got)
-
-	overBudget := headroomByComponent(map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)}, nil, map[string]int32{"frontend": 10}, map[string]int32{"frontend": 3})
-	assert.Equal(t, map[string]int32{"frontend": 0}, overBudget)
+	testCases := []struct {
+		description               string
+		standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique
+		pcsgByComponent           map[string]grovecorev1alpha1.PodCliqueScalingGroup
+		desiredReplicas           map[string]int32
+		maxUnavailableByComponent map[string]int32
+		numMissingOldVersionPods  map[string]int32
+		want                      map[string]int32
+	}{
+		{
+			description:               "standalone within budget and no missing old-version Pod leaves the remaining budget",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			want:                      map[string]int32{"frontend": 1},
+		},
+		{
+			description:               "standalone fully available takes the full budget",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			want:                      map[string]int32{"frontend": 3},
+		},
+		{
+			description:               "standalone over budget with no missing old-version Pod has zero headroom",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			want:                      map[string]int32{"frontend": 0},
+		},
+		{
+			description:               "standalone over budget with missing old-version Pods has headroom equal to that count",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			numMissingOldVersionPods:  map[string]int32{"frontend": 4},
+			want:                      map[string]int32{"frontend": 4},
+		},
+		{
+			description:               "standalone within budget plus missing old-version Pods adds both",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
+			want:                      map[string]int32{"frontend": 2},
+		},
+		{
+			description:               "PodCliqueScalingGroup within budget leaves the remaining budget",
+			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			want:                      map[string]int32{"decode": 2},
+		},
+		{
+			description:               "PodCliqueScalingGroup over budget has zero headroom and ignores any missing old-version count",
+			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(4)},
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			numMissingOldVersionPods:  map[string]int32{"decode": 5},
+			want:                      map[string]int32{"decode": 0},
+		},
+		{
+			description:               "standalone and PodCliqueScalingGroup headroom computed together",
+			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
+			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
+			desiredReplicas:           map[string]int32{"frontend": 10, "decode": 6},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3, "decode": 2},
+			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
+			want:                      map[string]int32{"frontend": 2, "decode": 2},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, headroomByComponent(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.numMissingOldVersionPods))
+		})
+	}
 }
 
+// TestNumMissingOldVersionPodsByStandalonePCLQ covers the count of missing old-version Pods per standalone
+// PodClique: old-version anchor deficits are counted, current-version anchors and out-of-scope cliques are
+// ignored, running at or above committed yields none, and deficits sum across old anchors.
+func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
+	anchor := func(gen, epoch string, pclqs map[string]int32) grovecorev1alpha1.PodGangEntry {
+		return grovecorev1alpha1.PodGangEntry{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliqueSetGenerationHash: gen, Epoch: epoch, PodCliques: pclqs}
+	}
+	testCases := []struct {
+		description string
+		entries     []grovecorev1alpha1.PodGangEntry
+		running     map[string]map[string]int32
+		want        map[string]int32
+	}{
+		{
+			description: "an old-version anchor with fewer running Pods than committed yields the deficit",
+			entries:     []grovecorev1alpha1.PodGangEntry{anchor(coherentTestOldGen, "50", map[string]int32{"frontend": 3})},
+			running:     map[string]map[string]int32{"frontend": {"50": 2}},
+			want:        map[string]int32{"frontend": 1},
+		},
+		{
+			description: "a current-version anchor is never a missing old-version Pod",
+			entries:     []grovecorev1alpha1.PodGangEntry{anchor(coherentTestCurrentGen, "200", map[string]int32{"frontend": 3})},
+			running:     map[string]map[string]int32{"frontend": {"200": 0}},
+			want:        map[string]int32{},
+		},
+		{
+			description: "an out-of-scope clique on an old-version anchor is ignored",
+			entries:     []grovecorev1alpha1.PodGangEntry{anchor(coherentTestOldGen, "50", map[string]int32{"frontend": 2, "sidecar": 2})},
+			running:     map[string]map[string]int32{"frontend": {"50": 2}},
+			want:        map[string]int32{},
+		},
+		{
+			description: "running equal to committed yields no missing old-version Pod",
+			entries:     []grovecorev1alpha1.PodGangEntry{anchor(coherentTestOldGen, "50", map[string]int32{"frontend": 2})},
+			running:     map[string]map[string]int32{"frontend": {"50": 2}},
+			want:        map[string]int32{},
+		},
+		{
+			description: "more running than committed clamps to zero",
+			entries:     []grovecorev1alpha1.PodGangEntry{anchor(coherentTestOldGen, "50", map[string]int32{"frontend": 2})},
+			running:     map[string]map[string]int32{"frontend": {"50": 3}},
+			want:        map[string]int32{},
+		},
+		{
+			description: "deficits sum across multiple old-version anchors",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchor(coherentTestOldGen, "50", map[string]int32{"frontend": 2}),
+				anchor("v0", "40", map[string]int32{"frontend": 3}),
+			},
+			running: map[string]map[string]int32{"frontend": {"50": 1, "40": 1}},
+			want:    map[string]int32{"frontend": 3},
+		},
+		{
+			description: "a non-anchor entry is ignored",
+			entries:     []grovecorev1alpha1.PodGangEntry{{Role: grovecorev1alpha1.PodGangEntryRoleTail, PodCliqueSetGenerationHash: coherentTestOldGen, Epoch: "60", PodCliques: map[string]int32{"frontend": 5}}},
+			running:     map[string]map[string]int32{"frontend": {}},
+			want:        map[string]int32{},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, numMissingOldVersionPodsByStandalonePCLQ(tc.entries, coherentTestCurrentGen, tc.running))
+		})
+	}
+}
+
+// TestCountRunningStandalonePodsByAnchor covers the per-anchor running Pod count read: Pods are bucketed by
+// their grove.io/podgang label mapped to an anchor epoch, terminating Pods are excluded, and a Pod on a
+// PodGang that is not an anchor of this replica is excluded.
+func TestCountRunningStandalonePodsByAnchor(t *testing.T) {
+	rnr := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
+	pcs := &grovecorev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace}}
+	pclq := grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "frontend-pclq", Namespace: coherentTestNamespace, UID: "frontend-uid"}}
+	entries := []grovecorev1alpha1.PodGangEntry{
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "50"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "200"},
+	}
+	gang50 := apicommon.GenerateAnchorPodGangName(rnr, "50")
+	gang200 := apicommon.GenerateAnchorPodGangName(rnr, "200")
+	pod := func(name, gang string, terminating bool) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       coherentTestNamespace,
+			Labels:          map[string]string{apicommon.LabelPodGang: gang},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "grove.io/v1alpha1", Kind: "PodClique", Name: pclq.Name, UID: pclq.UID, Controller: ptr.To(true)}},
+		}}
+		if terminating {
+			p.DeletionTimestamp = ptr.To(metav1.Now())
+			p.Finalizers = []string{"grove.io/test"}
+		}
+		return p
+	}
+	objs := []client.Object{
+		pod("p1", gang50, false),
+		pod("p2", gang50, false),
+		pod("p3", gang200, false),
+		pod("p4", gang200, true),
+		pod("p5", "unrelated-gang", false),
+	}
+	r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(objs...).Build()}
+
+	got, err := r.countRunningStandalonePodsByAnchor(t.Context(), pcs, 0, entries, map[string]grovecorev1alpha1.PodClique{"frontend": pclq})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 1}}, got)
+}
+
+// pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled
+// Pod count on its in-progress UpdateProgress.
 func pclqWithUpdatedScheduledReplicas(updatedReady int32) grovecorev1alpha1.PodClique {
 	return grovecorev1alpha1.PodClique{
 		Status: grovecorev1alpha1.PodCliqueStatus{
@@ -502,6 +701,3 @@ func newCoherentTestSnapshot(pcsNameReplica apicommon.ResourceNameReplica, liveR
 		existingStandalonePCLQsByReplica: map[int][]grovecorev1alpha1.PodClique{0: {frontendPCLQ}},
 	}
 }
-
-// TestEntryHoldsInScopeContent checks the predicate that gates reconvergence, reporting whether an entry
-// still carries pods or replica indices for any component within the coherent update scope.

@@ -224,3 +224,16 @@ func IsPodGangMapAtSingleGeneration(entries []grovecorev1alpha1.PodGangEntry, pc
 	}
 	return true
 }
+
+// EpochByAnchorPodGangName maps each anchor PodGang name of a PodCliqueSet replica to its epoch. Only anchor
+// entries are included. The PodGang name is derived from the replica identity and the entry epoch, so this
+// inverts that mapping. It lets a caller resolve a Pod grove.io/podgang label back to an epoch.
+func EpochByAnchorPodGangName(entries []grovecorev1alpha1.PodGangEntry, rnr apicommon.ResourceNameReplica) map[string]string {
+	epochByPodGangName := make(map[string]string)
+	for i := range entries {
+		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+			epochByPodGangName[apicommon.GenerateAnchorPodGangName(rnr, entries[i].Epoch)] = entries[i].Epoch
+		}
+	}
+	return epochByPodGangName
+}

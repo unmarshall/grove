@@ -699,6 +699,128 @@ type coherentAnchor struct {
 	pcsgIndices []int32
 }
 
+// Test_CU15_CoherentUpdateRecoversFromOldVersionPodLoss verifies that losing an old-version pod during a
+// coherent update, at a point where the disruption budget is already fully consumed, does not stall the
+// roll and does not break coherence. Replica 0 readiness is blocked so the roll parks mid-sub-step with the
+// new-version pod not Ready, which is zero headroom. Deleting a ready old-version frontend pod then would
+// deadlock a naive gate. The engine instead reclaims the lost slot onto the current-version anchor, so no
+// PodGang runs two revisions, and once readiness is released the update completes.
+func Test_CU15_CoherentUpdateRecoversFromOldVersionPodLoss(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+	tc.Timeout = 3 * time.Minute
+
+	tests.Logger.Info("2. Block replica 0 readiness so the coherent roll parks mid-sub-step at zero headroom")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Path); err != nil {
+		t.Fatalf("failed to apply replica-0 readiness-block KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Name); err != nil {
+			tests.Logger.Warnf("cleanup: delete replica-0 readiness-block KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Trigger a coherent update of the frontend PodClique and wait until it is mid-roll")
+	if err := triggerPodCliqueUpdate(tc, "frontend"); err != nil {
+		t.Fatalf("failed to trigger update of frontend: %v", err)
+	}
+	if err := waitForOrdinalUpdating(tc, 0); err != nil {
+		t.Fatalf("replica 0 did not start updating: %v", err)
+	}
+	waitForReplicaMidCoherentRoll(t, tc, 0)
+
+	tests.Logger.Info("4. With the new-revision pod held not-Ready (headroom 0), delete a ready old-revision frontend pod")
+	oldPod, err := firstReadyPodForCliqueOnReplica(tc, "frontend", 0)
+	if err != nil {
+		t.Fatalf("no ready old-revision frontend pod to delete: %v", err)
+	}
+	if err := deletePodAndWaitForTermination(tc, oldPod); err != nil {
+		t.Fatalf("failed to delete old-revision frontend pod %s: %v", oldPod, err)
+	}
+
+	tests.Logger.Info("5. Coherence must hold: the lost slot is reclaimed onto the current-revision anchor, never refilled on the old one")
+	assertEachPodGangSingleRevision(t, tc, "frontend", 0)
+
+	tests.Logger.Info("6. Release readiness and confirm the update completes, proving the loss did not deadlock the roll")
+	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Name); err != nil {
+		t.Fatalf("failed to delete replica-0 readiness-block KWOK stage: %v", err)
+	}
+	deleteNotReadyPodsOnReplica(t, tc, 0)
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete after the old-revision pod loss: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertPodGangMapSingleGeneration(t, tc)
+	assertGenerationHashConverged(tc)
+	assertEachPodGangSingleRevision(t, tc, "frontend", 0)
+}
+
+// Test_CU16_CoherentUpdateSelfHealsCurrentVersionPodLoss verifies that losing a new-version pod on the
+// current-version anchor mid-roll self-heals through the normal create path and never breaks coherence. A
+// current-anchor deficit is not a missing old-version Pod, so the pod controller simply recreates the pod
+// on the current-version anchor. The update then completes once readiness is released.
+func Test_CU16_CoherentUpdateSelfHealsCurrentVersionPodLoss(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload-coherent and verify pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: coherentWorkloadName,
+		workloadYAML: coherentWorkloadYAML,
+		workerNodes:  10,
+		expectedPods: coherentExpectedPods,
+	})
+	defer cleanup()
+	tc.Timeout = 3 * time.Minute
+
+	tests.Logger.Info("2. Block replica 0 readiness so the coherent roll parks mid-sub-step")
+	if err := kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Path); err != nil {
+		t.Fatalf("failed to apply replica-0 readiness-block KWOK stage: %v", err)
+	}
+	defer func() {
+		if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Name); err != nil {
+			tests.Logger.Warnf("cleanup: delete replica-0 readiness-block KWOK stage: %v", err)
+		}
+	}()
+
+	tests.Logger.Info("3. Trigger a coherent update of the frontend PodClique and wait until it is mid-roll")
+	if err := triggerPodCliqueUpdate(tc, "frontend"); err != nil {
+		t.Fatalf("failed to trigger update of frontend: %v", err)
+	}
+	if err := waitForOrdinalUpdating(tc, 0); err != nil {
+		t.Fatalf("replica 0 did not start updating: %v", err)
+	}
+	waitForReplicaMidCoherentRoll(t, tc, 0)
+
+	tests.Logger.Info("4. Delete the not-Ready new-revision frontend pod on the current-version anchor")
+	newPod, err := firstNotReadyPodForCliqueOnReplica(tc, "frontend", 0)
+	if err != nil {
+		t.Fatalf("no not-ready new-revision frontend pod to delete: %v", err)
+	}
+	if err := deletePodAndWaitForTermination(tc, newPod); err != nil {
+		t.Fatalf("failed to delete new-revision frontend pod %s: %v", newPod, err)
+	}
+
+	tests.Logger.Info("5. Coherence must hold: the pod is recreated on the current-version anchor, so no PodGang runs two revisions")
+	assertEachPodGangSingleRevision(t, tc, "frontend", 0)
+
+	tests.Logger.Info("6. Release readiness and confirm the update completes")
+	if err := kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyBlockedR0Name); err != nil {
+		t.Fatalf("failed to delete replica-0 readiness-block KWOK stage: %v", err)
+	}
+	deleteNotReadyPodsOnReplica(t, tc, 0)
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("coherent update did not complete after the current-revision pod loss: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertPodGangMapSingleGeneration(t, tc)
+	assertGenerationHashConverged(tc)
+	assertEachPodGangSingleRevision(t, tc, "frontend", 0)
+}
+
 // assertCoherentAnchorCompositions fails unless the new-hash anchor entries match want as a multiset, and
 // every new-hash anchor carries newHash. It compares each anchor's standalone pod counts and its indices
 // for pcsgName, ignoring other entries so steady-state scaffolding does not affect the match.

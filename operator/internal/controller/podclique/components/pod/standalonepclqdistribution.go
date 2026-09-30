@@ -113,6 +113,28 @@ func buildDesiredCountByPodGang(ss *syncSnapshot) map[string]int32 {
 	return desiredCountByPodGang
 }
 
+// currentGenerationPodGangNames returns the anchor PodGang names of this replica whose PodGangMap entry is
+// at the PodCliqueSet current generation and carries this standalone PodClique. During a coherent update
+// these are the current-revision anchors this controller may fill. It is empty when the PodGangMap or the
+// current generation hash is not known yet.
+func currentGenerationPodGangNames(ss *syncSnapshot) sets.Set[string] {
+	names := sets.New[string]()
+	if ss.pgm == nil || ss.pcs.Status.CurrentGenerationHash == nil {
+		return names
+	}
+	currentHash := *ss.pcs.Status.CurrentGenerationHash
+	rnr := apicommon.ResourceNameReplica{Name: ss.pcs.Name, Replica: ss.pcsReplicaIndex}
+	for _, entry := range ss.pgm.Spec.Entries {
+		if entry.PodCliqueSetGenerationHash != currentHash {
+			continue
+		}
+		if count, ok := entry.PodCliques[ss.cliqueName]; ok && count > 0 {
+			names.Insert(apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch))
+		}
+	}
+	return names
+}
+
 // podGangPods holds a PodGang's pods split by termination state. nonTerminating pods count towards
 // the live replica count. terminating pods are re-added to delete expectations during the sync.
 type podGangPods struct {
@@ -191,6 +213,16 @@ func sumCounts(countByPodGang map[string]int32) int32 {
 // is pods to delete. PodGangs whose desired and reconciled counts already match are omitted.
 func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPodGang map[string]int32, podsByPodGang map[string]podGangPods) (map[string]int32, error) {
 	countDeltaByPodGang := make(map[string]int32)
+	// During a coherent update the replica under update runs old-generation and current-generation anchor
+	// PodGangs at once. A new-revision Pod must never be created on an old-generation PodGang, since this
+	// controller only builds Pods at the current revision. So creation is suppressed on old-generation
+	// PodGangs and the coherent engine reclaims the lost slot onto the current generation instead. Deletion
+	// still runs, so the drain keeps pacing take-down.
+	suppressOldGenerationCreates := componentutils.IsPCSReplicaUnderCoherentUpdate(ss.pcs, ss.pcsReplicaIndex)
+	var currentGenerationPodGangs sets.Set[string]
+	if suppressOldGenerationCreates {
+		currentGenerationPodGangs = currentGenerationPodGangNames(ss)
+	}
 	// Iterate the union of PodGangs that are desired and PodGangs that have live pods. A PodGang with a
 	// desired count but no live pods yet still needs creation, and a PodGang with live pods but no
 	// desired count (its entry was removed) still needs deletion.
@@ -200,9 +232,15 @@ func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPo
 		if err != nil {
 			return nil, err
 		}
-		if delta := desiredCountByPodGang[podGangName] - reconciledCount; delta != 0 {
-			countDeltaByPodGang[podGangName] = delta
+		delta := desiredCountByPodGang[podGangName] - reconciledCount
+		if delta == 0 {
+			continue
 		}
+		// Suppress a create (positive delta) on an old-generation PodGang for the replica under update.
+		if delta > 0 && suppressOldGenerationCreates && !currentGenerationPodGangs.Has(podGangName) {
+			continue
+		}
+		countDeltaByPodGang[podGangName] = delta
 	}
 	return countDeltaByPodGang, nil
 }

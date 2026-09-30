@@ -700,12 +700,33 @@ Before advancing from sub-step `N.k` to sub-step `N.(k+1)`, or to the next step,
 
 2. **Subsumed-pod scheduling (standalone PCLQs only).** Standalone PCLQ pods are the only kind that get subsumed into a previously-created anchor. PCSG replicas always get their own dedicated tail PodGang and so do not subsume into anything. When sub-step `N.k` subsumes standalone PCLQ pods into an existing anchor, the count of scheduled pods of that PCLQ at the target revision must equal or exceed the cumulative pod count the sub-step targeted for it. As with predicate 1 this gates on placement rather than readiness, because `MaxUnavailable` (predicate 3) bounds availability.
 
-3. **`MaxUnavailable` budget (drain-aware).** Before the next sub-step takes more pods down, verify that draining it will not push any in-scope component past its `MaxUnavailable`. For each component the check adds the sub-step's drain to the count already unavailable and requires the total to stay within budget.
+3. **`MaxUnavailable` budget (drain-aware, missing-old-version-aware).** A sub-step must not take down more running pods than `MaxUnavailable` allows. Only the components the sub-step drains are checked. A component it does not touch cannot lose availability from this drain, so it is left out.
 
-   - For an updated standalone PCLQ `c`, require `(replicas[c] - PCLQ[c].Status.ReadyReplicas) + drain[c] <= maxUnavailable[c]`.
-   - For an updated PCSG `c`, require `(replicas[c] - PCSG[c].Status.AvailableReplicas) + drain[c] <= maxUnavailable[c]`, where `AvailableReplicas` is the count of PCSG replicas whose constituent PCLQs are not in `MinAvailableBreached=True`.
+   When a pod on an old-version PodGang dies, the pod controller does not replace it during a coherent update. The replacement would be a new-revision pod, and a new-revision pod on an old-version PodGang breaks coherence. So the slot stays empty and the engine drains it later. Call that empty slot a **missing old-version Pod**. It has no running pod, so it is already unavailable, and reclaiming it takes nothing further down. `missing[c]` is the count of these for component `c`.
 
-   `drain[c]` is what the sub-step takes down for `c`, which is `minAvailable[c]` for an anchor sub-step and the rolled count for a tail. An anchor sub-step is atomic, so it holds until every component has room for its full `minAvailable[c]`. A tail sub-step instead caps its per-component roll at `min(maxUnavailable[c], remaining[c], headroom[c])`, where `remaining[c]` is the part of the step target for `c` not yet taken down and `headroom[c] = maxUnavailable[c] - (replicas[c] - available[c])` with `available[c]` the ready count (PCLQ) or available count (PCSG) from the checks above. This drains only what headroom allows. If unrelated unavailability (for example a preemption between sub-steps) has already consumed the budget, the sub-step holds until availability recovers. This matches Kubernetes Deployment behavior under `maxUnavailable`.
+   - Standalone PCLQ `c`. The empty slots the drain reclaims are free, and only the rest remove a running pod:
+
+     ```
+     currentlyUnavailable     = replicas[c] - PCLQ[c].Status.ReadyReplicas
+     runningPodTakedown       = max(0, drain[c] - missing[c])
+     unavailableAfterTakedown = currentlyUnavailable + runningPodTakedown
+     ```
+
+     Allow the sub-step when `runningPodTakedown` is 0 (it only reclaims empty slots, which never lowers availability, so it proceeds even when the component is already over budget), or when `unavailableAfterTakedown <= maxUnavailable[c]`.
+
+   - PCSG `c`. A PCSG never has missing old-version Pods. A not-yet-rolled PCSG replica keeps its member PodCliques at the old revision, so a dead member Pod is recreated at the old revision on its own gang. No new-revision Pod lands on an old gang, so no slot needs reclaiming. With `available[c] = PCSG[c].Status.AvailableReplicas` (the PCSG replicas whose PCLQs are not in `MinAvailableBreached=True`), allow the sub-step when:
+
+     ```
+     (replicas[c] - available[c]) + drain[c] <= maxUnavailable[c]
+     ```
+
+   `drain[c]` is what the sub-step takes down for `c`: `minAvailable[c]` for an anchor sub-step, the rolled count for a tail. An anchor sub-step is atomic, so it waits until every component has room for its full `minAvailable[c]`. A tail sub-step rolls `min(maxUnavailable[c], remaining[c], headroom[c])` of `c`, where `remaining[c]` is the part of the step target not yet taken down and:
+
+   ```
+   headroom[c] = max(0, maxUnavailable[c] - currentlyUnavailable) + missing[c]
+   ```
+
+   Adding `missing[c]` gives free budget on top of the running-pod headroom, since reclaiming an empty slot costs no availability. The drain reclaims empty old-version slots first, then takes running pods down oldest generation first, so the running-pod takedown never exceeds the running-pod headroom. If a preemption or other unrelated loss has already used up the running-pod budget, the sub-step still reclaims empty slots, and it stalls only when neither budget nor an empty slot is left to make progress. This matches how a Kubernetes Deployment behaves under `maxUnavailable`.
 
 #### Coherent update flow
 
