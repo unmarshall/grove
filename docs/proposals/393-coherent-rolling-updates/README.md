@@ -162,6 +162,10 @@ The current iteration of Coherent Rolling Updates carries the following known li
 
    *Mitigation:* operators experiencing repeated stalls should inspect `Status.UpdateProgress.CurrentlyUpdating[].Message` and address the underlying capacity/preemption pressure on the cluster. Future work may add a configurable stall timeout that escalates to a user-visible event.
 
+4. **External deletion of a single component in a not-yet-updated PCS replica breaks coherence.** A coherent update rolls one PCS replica at a time. A PCS replica the orchestrator has not yet selected stays entirely at the old revision. Grove never deletes an individual standalone PodClique or an individual PodCliqueScalingGroup replica on its own. In the current implementation of gang termination only a PCS replica gets deleted, not a single PodCliqueScalingGroup replica. If an external actor deletes a standalone PodClique, or a PodCliqueScalingGroup, of a PCS replica that is not under update, Grove recreates the missing component. Grove does not persist any previous revisions of the PodCliqueSet spec. The only revision available is the current, newer one on the PodCliqueSet resource, so Grove recreates the component at that revision. That component then runs a newer revision than the rest of its PCS replica, which is still at the old revision. If the update introduced an incompatibility between the two revisions, coherence within that PCS replica is broken.
+
+   *Mitigation:* do not delete individual components of a PCS replica while a coherent update is in progress. A future iteration will persist a limited number of previous PodCliqueSet spec revisions, so Grove can recreate a deleted component at the revision the rest of its PCS replica is still running.
+
 ## Design Details
 
 ### API Changes
