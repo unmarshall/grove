@@ -17,7 +17,6 @@ package podgangmap
 import (
 	"cmp"
 	"slices"
-	"sort"
 	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -288,9 +287,7 @@ func reconcilePCSGReplicaIndices(entries []grovecorev1alpha1.PodGangEntry, pcs *
 		case diff > 0:
 			appendScaleOutReplicaIndices(entries, pcsgConfigName, lo.RangeFrom[int32](int32(currentCount), diff))
 		case diff < 0:
-			if err := drainReplicaIndicesForScaleIn(entries, pcsgConfigName, -diff); err != nil {
-				return err
-			}
+			removePCSGReplicaIndicesAtOrAbove(entries, pcsgConfigName, pcsg.Spec.Replicas)
 		}
 	}
 	return nil
@@ -322,60 +319,25 @@ func appendScaleOutReplicaIndices(entries []grovecorev1alpha1.PodGangEntry, pcsg
 	}
 }
 
-// drainReplicaIndicesForScaleIn removes count of the given PodCliqueScalingGroup's replica indices,
-// draining in role order ScaleOut, then Tail, then Anchor (highest epoch first, lowest epoch last),
-// and the highest index first within a chosen entry. The webhook guarantees Spec.Replicas stays at or
-// above MinAvailable, so the anchor's MinAvailable indices are never drained.
-func drainReplicaIndicesForScaleIn(entries []grovecorev1alpha1.PodGangEntry, pcsgConfigName string, count int) error {
-	order := make([]int, 0, len(entries))
-	anchorEpochNanosByIndex := make(map[int]int64)
+// removePCSGReplicaIndicesAtOrAbove removes every replica index at or above newReplicaCount for the given
+// PodCliqueScalingGroup from all entries, wherever they sit. It mirrors the PodCliqueScalingGroup
+// reconciler, which on a scale-in deletes the highest-numbered replicas, the indices [newReplicaCount,
+// oldReplicaCount). Removing the same indices keeps the PodGangMap's record of which replica sits in which
+// PodGang in step with the replicas that actually exist, whatever anchor or tail entry a coherent update
+// left them in. An entry left with no index for the PodCliqueScalingGroup has the key removed, and
+// reconcileEntries then drops any entry that is fully empty.
+func removePCSGReplicaIndicesAtOrAbove(entries []grovecorev1alpha1.PodGangEntry, pcsgConfigName string, newReplicaCount int32) {
 	for i := range entries {
-		if len(entries[i].PCSGReplicaIndices[pcsgConfigName]) == 0 {
+		indices, ok := entries[i].PCSGReplicaIndices[pcsgConfigName]
+		if !ok {
 			continue
 		}
-		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-			epochNanos, err := entryEpochNanos(entries[i])
-			if err != nil {
-				return err
-			}
-			anchorEpochNanosByIndex[i] = epochNanos
+		kept := slices.DeleteFunc(indices, func(index int32) bool { return index >= newReplicaCount })
+		if len(kept) == 0 {
+			delete(entries[i].PCSGReplicaIndices, pcsgConfigName)
+			continue
 		}
-		order = append(order, i)
-	}
-	sort.SliceStable(order, func(a, b int) bool {
-		ip, jp := drainPriority(entries[order[a]]), drainPriority(entries[order[b]])
-		if ip != jp {
-			return ip < jp
-		}
-		if entries[order[a]].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
-			return anchorEpochNanosByIndex[order[a]] > anchorEpochNanosByIndex[order[b]] // highest epoch first
-		}
-		return false
-	})
-	remaining := count
-	for _, idx := range order {
-		if remaining == 0 {
-			break
-		}
-		s := entries[idx].PCSGReplicaIndices[pcsgConfigName]
-		slices.Sort(s)
-		take := min(remaining, len(s))
-		entries[idx].PCSGReplicaIndices[pcsgConfigName] = s[:len(s)-take]
-		remaining -= take
-	}
-	return nil
-}
-
-// drainPriority orders entries for a scale-in drain: ScaleOut first, then Tail, then Anchor. Among
-// anchors the caller's sort further orders the highest epoch first.
-func drainPriority(entry grovecorev1alpha1.PodGangEntry) int {
-	switch entry.Role {
-	case grovecorev1alpha1.PodGangEntryRoleScaleOut:
-		return 0
-	case grovecorev1alpha1.PodGangEntryRoleTail:
-		return 1
-	default:
-		return 2
+		entries[i].PCSGReplicaIndices[pcsgConfigName] = kept
 	}
 }
 

@@ -565,6 +565,65 @@ func TestRemoveEmptyEntries(t *testing.T) {
 	}
 }
 
+// TestRemovePCSGReplicaIndicesAtOrAbove verifies a scale-in removes exactly the PodCliqueScalingGroup
+// replica indices at or above the new replica count across the interleaved scale-out, tail and anchor
+// entries a coherent update and a later scale-out leave, including an index that sits in an anchor, keeps
+// the base anchor's MinAvailable indices, and clears a PodCliqueScalingGroup key that is fully drained.
+func TestRemovePCSGReplicaIndicesAtOrAbove(t *testing.T) {
+	const pcsgName = "inference"
+	tests := []struct {
+		name            string
+		entries         []grovecorev1alpha1.PodGangEntry
+		newReplicaCount int32
+		wantIndices     [][]int32
+	}{
+		{
+			name: "removes indices at or above the new count across scale-out, tail and anchor entries",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{pcsgName: {0}}),
+				tailEntry(map[string][]int32{pcsgName: {1, 2}}),
+				anchorEntry(nil, map[string][]int32{pcsgName: {3}}),
+				tailEntry(map[string][]int32{pcsgName: {4, 5}}),
+				scaleOutEntry(map[string][]int32{pcsgName: {6, 7}}),
+				anchorEntry(nil, map[string][]int32{"other": {0}}),
+			},
+			newReplicaCount: 3, // scale 8 -> 3, delete indices {3,4,5,6,7}
+			wantIndices:     [][]int32{{0}, {1, 2}, nil, nil, nil, nil},
+		},
+		{
+			name: "keeps the base anchor MinAvailable indices when scaling to MinAvailable",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{pcsgName: {0, 1}}),
+				tailEntry(map[string][]int32{pcsgName: {2, 3}}),
+			},
+			newReplicaCount: 2,
+			wantIndices:     [][]int32{{0, 1}, nil},
+		},
+		{
+			name: "scale to zero removes every index",
+			entries: []grovecorev1alpha1.PodGangEntry{
+				anchorEntry(nil, map[string][]int32{pcsgName: {0}}),
+				tailEntry(map[string][]int32{pcsgName: {1, 2}}),
+			},
+			newReplicaCount: 0,
+			wantIndices:     [][]int32{nil, nil},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			removePCSGReplicaIndicesAtOrAbove(tc.entries, pcsgName, tc.newReplicaCount)
+			for i, want := range tc.wantIndices {
+				got, ok := tc.entries[i].PCSGReplicaIndices[pcsgName]
+				if want == nil {
+					assert.False(t, ok, "entry %d: expected the pcsg key to be removed", i)
+					continue
+				}
+				assert.Equal(t, want, got, "entry %d", i)
+			}
+		})
+	}
+}
+
 // podGangWithEpochRole builds a PodGang carrying the grove.io/epoch and grove.io/podgang-role labels.
 func podGangWithEpochRole(name, epoch string, role grovecorev1alpha1.PodGangEntryRole) *groveschedulerv1alpha1.PodGang {
 	return testutils.NewPodGangBuilder(name, testNamespace).
