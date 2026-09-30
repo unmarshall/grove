@@ -22,7 +22,9 @@ import (
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/samber/lo"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -58,6 +60,26 @@ func GetExistingPodGangs(ctx context.Context, cl client.Client, pcsObjectMeta me
 	return lo.Filter(podGangs.Items, func(podGang groveschedulerv1alpha1.PodGang, _ int) bool {
 		return metav1.IsControlledBy(&podGang, &pcsObjectMeta)
 	}), nil
+}
+
+// AllPodGangsScheduled reports whether every named PodGang exists and has been scheduled at least once,
+// meaning its Status.LastScheduled is set. A missing PodGang counts as not scheduled, so a batch that has
+// only partially materialized does not pass. Callers derive the expected names from a committed PodGangMap
+// entry (see ExpectedPodGangNamesForEntry) so the count is checked, not just the gangs that happen to exist.
+func AllPodGangsScheduled(ctx context.Context, cl client.Client, namespace string, podGangNames []string) (bool, error) {
+	for _, name := range podGangNames {
+		var pg groveschedulerv1alpha1.PodGang
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &pg); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if pg.Status.LastScheduled == nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // AllPodGangsAtEpochEverScheduled reports whether every PodGang belonging to the given PodCliqueSet

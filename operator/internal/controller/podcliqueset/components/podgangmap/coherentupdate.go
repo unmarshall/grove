@@ -226,20 +226,24 @@ func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlann
 	return true, "", nil
 }
 
-// currentBatchScheduled reports whether every PodGang carrying the most recent current-hash epoch has been
-// scheduled at least once. When no current-hash entry exists yet the first sub-step has nothing to wait on,
-// so it reports true. Readiness is not required to advance because MaxUnavailable, checked separately,
-// bounds availability across both revisions.
+// currentBatchScheduled reports whether every PodGang the most recent current-hash sub-step committed has
+// been scheduled at least once. It derives the expected PodGang names from that committed entry, so a batch
+// that has only partially materialized (some of a tail entry's per-index PodGangs not created yet) does not
+// pass. When no current-hash entry exists yet the first sub-step has nothing to wait on, so it reports true.
+// Readiness is not required to advance because MaxUnavailable, checked separately, bounds availability
+// across both revisions.
 func (r _resource) currentBatchScheduled(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry) (bool, error) {
-	latestEpoch, err := componentutils.LatestEpochForGenerationHash(entries, *pcs.Status.CurrentGenerationHash)
+	latestEntry, err := componentutils.LatestEntryForGenerationHash(entries, *pcs.Status.CurrentGenerationHash)
 	if err != nil {
 		return false, groveerr.WrapError(err, errCodeInvalidEpoch, component.OperationSync,
-			fmt.Sprintf("failed to determine the latest current-hash epoch for PodCliqueSet %v replica %d", client.ObjectKeyFromObject(pcs), pcsReplicaIndex))
+			fmt.Sprintf("failed to determine the latest current-hash entry for PodCliqueSet %v replica %d", client.ObjectKeyFromObject(pcs), pcsReplicaIndex))
 	}
-	if latestEpoch == nil {
+	if latestEntry == nil {
 		return true, nil
 	}
-	return componentutils.AllPodGangsAtEpochEverScheduled(ctx, r.client, client.ObjectKeyFromObject(pcs), int32(pcsReplicaIndex), *latestEpoch)
+	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
+	expectedPodGangNames := componentutils.ExpectedPodGangNamesForEntry(rnr, *latestEntry)
+	return componentutils.AllPodGangsScheduled(ctx, r.client, pcs.Namespace, expectedPodGangNames)
 }
 
 // subsumedPodsScheduled reports whether every in-scope standalone PodClique has at least as many new-hash

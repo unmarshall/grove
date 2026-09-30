@@ -213,6 +213,46 @@ func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsG
 	return &latestEpoch, nil
 }
 
+// LatestEntryForGenerationHash returns the entry with the largest epoch among entries carrying
+// pcsGenerationHash, or nil when none carries it. Epochs are monotonic unix-nano decimals, so the largest
+// is the most recently committed sub-step. It errors when an entry has a non-numeric epoch.
+func LatestEntryForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) (*grovecorev1alpha1.PodGangEntry, error) {
+	var (
+		latest        *grovecorev1alpha1.PodGangEntry
+		maxEpochValue int64
+	)
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			continue
+		}
+		epochValue, err := strconv.ParseInt(entries[i].Epoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", entries[i].Epoch, err)
+		}
+		if latest == nil || epochValue > maxEpochValue {
+			latest, maxEpochValue = &entries[i], epochValue
+		}
+	}
+	return latest, nil
+}
+
+// ExpectedPodGangNamesForEntry returns the PodGang names a committed entry materializes into. An anchor
+// entry yields one anchor PodGang. A tail or scale-out entry yields one PodGang per PodCliqueScalingGroup
+// replica index it carries. It mirrors buildPodGangInfosFromEntry in the PodGang component, reusing the
+// same name generators, so the two stay in step.
+func ExpectedPodGangNamesForEntry(rnr apicommon.ResourceNameReplica, entry grovecorev1alpha1.PodGangEntry) []string {
+	if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+		return []string{apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)}
+	}
+	var names []string
+	for pcsgName, replicaIndices := range entry.PCSGReplicaIndices {
+		for _, replicaIndex := range replicaIndices {
+			names = append(names, apicommon.GenerateNonAnchorPodGangName(rnr, entry.Epoch, pcsgName, replicaIndex))
+		}
+	}
+	return names
+}
+
 // IsPodGangMapAtSingleGeneration reports whether every entry carries pcsGenerationHash, so the PodGangMap
 // has reconverged to a single generation with no older-generation entries left to drain. An empty entry
 // set is vacuously single-generation.

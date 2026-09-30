@@ -305,7 +305,12 @@ func TestCurrentBatchScheduled(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
 	}
-	currentHashAnchor := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}
+	rnr := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
+	anchorEntry := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}
+	tailEntry := grovecorev1alpha1.PodGangEntry{Epoch: "200", PodCliqueSetGenerationHash: coherentTestCurrentGen, Role: grovecorev1alpha1.PodGangEntryRoleTail, PCSGReplicaIndices: map[string][]int32{"inference": {0, 1}}}
+	anchorPodGang := apicommon.GenerateAnchorPodGangName(rnr, "200")
+	tailPodGang0 := apicommon.GenerateNonAnchorPodGangName(rnr, "200", "inference", 0)
+	tailPodGang1 := apicommon.GenerateNonAnchorPodGangName(rnr, "200", "inference", 1)
 
 	t.Run("no current-hash entry yet so nothing to wait on", func(t *testing.T) {
 		entries := []grovecorev1alpha1.PodGangEntry{{Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen, Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PodCliques: map[string]int32{"frontend": 2}}}
@@ -317,19 +322,39 @@ func TestCurrentBatchScheduled(t *testing.T) {
 		assert.True(t, ready)
 	})
 
-	t.Run("latest current-hash batch is scheduled", func(t *testing.T) {
-		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch("pg-200", "200", true)).Build()}
+	t.Run("anchor batch is scheduled", func(t *testing.T) {
+		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch(anchorPodGang, "200", true)).Build()}
 
-		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{anchorEntry})
 
 		require.NoError(t, err)
 		assert.True(t, ready)
 	})
 
-	t.Run("latest current-hash batch is not scheduled", func(t *testing.T) {
-		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch("pg-200", "200", false)).Build()}
+	t.Run("anchor batch is not scheduled", func(t *testing.T) {
+		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch(anchorPodGang, "200", false)).Build()}
 
-		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{currentHashAnchor})
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{anchorEntry})
+
+		require.NoError(t, err)
+		assert.False(t, ready)
+	})
+
+	t.Run("tail batch fully materialized and scheduled", func(t *testing.T) {
+		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch(tailPodGang0, "200", true), podGangAtEpoch(tailPodGang1, "200", true)).Build()}
+
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{tailEntry})
+
+		require.NoError(t, err)
+		assert.True(t, ready)
+	})
+
+	t.Run("tail batch only partially materialized holds", func(t *testing.T) {
+		// The entry commits indices 0 and 1, but only index 0's PodGang exists. The gate must not pass on the
+		// gang that happens to exist, since the executor has already taken down the old pods for index 1.
+		r := _resource{client: testutils.NewTestClientBuilder().WithObjects(podGangAtEpoch(tailPodGang0, "200", true)).Build()}
+
+		ready, err := r.currentBatchScheduled(t.Context(), pcs, 0, []grovecorev1alpha1.PodGangEntry{tailEntry})
 
 		require.NoError(t, err)
 		assert.False(t, ready)
@@ -372,7 +397,7 @@ func TestBuildCoherentUpdateEntries(t *testing.T) {
 	t.Run("gate passes so the next sub-step is emitted", func(t *testing.T) {
 		pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: []grovecorev1alpha1.PodGangEntry{anchorV1, anchorV2}}}
 		snap := newCoherentTestSnapshot(pcsNameReplica, 4, 2, ptr.To[int32](2))
-		r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(podGangAtEpoch("pg-200", "200", true)).Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
+		r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(podGangAtEpoch(apicommon.GenerateAnchorPodGangName(pcsNameReplica, "200"), "200", true)).Build(), clk: clocktesting.NewFakeClock(metav1.Now().Time)}
 
 		entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
 

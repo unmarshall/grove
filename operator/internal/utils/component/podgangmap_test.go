@@ -117,42 +117,6 @@ func TestPodGangMapByPCSReplicaIndex(t *testing.T) {
 	}
 }
 
-func pgmNames(pgms []grovecorev1alpha1.PodGangMap) []string {
-	names := make([]string, 0, len(pgms))
-	for i := range pgms {
-		names = append(names, pgms[i].Name)
-	}
-	return names
-}
-
-func indicesOf(byIndex map[int]*grovecorev1alpha1.PodGangMap) []int {
-	idx := make([]int, 0, len(byIndex))
-	for i := range byIndex {
-		idx = append(idx, i)
-	}
-	return idx
-}
-
-func pgmWithoutReplicaIndexLabel(pcsName, namespace string) grovecorev1alpha1.PodGangMap {
-	return grovecorev1alpha1.PodGangMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pcsName + "-0",
-			Namespace: namespace,
-			Labels:    map[string]string{apicommon.LabelPartOfKey: pcsName},
-		},
-	}
-}
-
-func pgmWithReplicaIndexLabel(pcsName, namespace, value string) grovecorev1alpha1.PodGangMap {
-	return grovecorev1alpha1.PodGangMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pcsName + "-x",
-			Namespace: namespace,
-			Labels:    map[string]string{apicommon.LabelPodCliqueSetReplicaIndex: value},
-		},
-	}
-}
-
 func TestDependsOnForEpoch(t *testing.T) {
 	const (
 		pcsName       = "pcs"
@@ -365,6 +329,43 @@ func TestLatestEpochForGenerationHash(t *testing.T) {
 	})
 }
 
+// TestLatestEntryForGenerationHash verifies the latest-entry lookup returns the highest-epoch entry at the
+// queried generation hash, ignoring other hashes, and errors on a non-numeric epoch.
+func TestLatestEntryForGenerationHash(t *testing.T) {
+	const (
+		hashA = "hash-a"
+		hashB = "hash-b"
+	)
+	entries := []grovecorev1alpha1.PodGangEntry{
+		testutils.NewPodGangEntryBuilder(hashA, "1000").Build(),
+		testutils.NewPodGangEntryBuilder(hashA, "3000").Build(),
+		testutils.NewPodGangEntryBuilder(hashB, "2000").Build(),
+	}
+	t.Run("returns the largest-epoch entry for the queried generation hash", func(t *testing.T) {
+		latest, err := LatestEntryForGenerationHash(entries, hashA)
+		require.NoError(t, err)
+		require.NotNil(t, latest)
+		assert.Equal(t, "3000", latest.Epoch)
+		assert.Equal(t, hashA, latest.PodCliqueSetGenerationHash)
+	})
+	t.Run("ignores entries of other generation hashes", func(t *testing.T) {
+		latest, err := LatestEntryForGenerationHash(entries, hashB)
+		require.NoError(t, err)
+		require.NotNil(t, latest)
+		assert.Equal(t, "2000", latest.Epoch)
+	})
+	t.Run("returns nil when no entry carries the generation hash", func(t *testing.T) {
+		latest, err := LatestEntryForGenerationHash(entries, "hash-absent")
+		require.NoError(t, err)
+		assert.Nil(t, latest)
+	})
+	t.Run("errors on a non-numeric epoch for the queried hash", func(t *testing.T) {
+		badEntries := []grovecorev1alpha1.PodGangEntry{testutils.NewPodGangEntryBuilder(hashA, "not-a-number").Build()}
+		_, err := LatestEntryForGenerationHash(badEntries, hashA)
+		require.Error(t, err)
+	})
+}
+
 func TestPodGangMapAtSingleGeneration(t *testing.T) {
 	const (
 		hashA = "hash-a"
@@ -404,4 +405,58 @@ func TestEpochByAnchorPodGangName(t *testing.T) {
 		apicommon.GenerateAnchorPodGangName(rnr, "200"): "200",
 	}
 	assert.Equal(t, want, got)
+}
+
+// TestExpectedPodGangNamesForEntry checks the PodGang names a committed entry materializes into: one
+// anchor PodGang for an anchor entry (its PCSG indices ride inside that anchor), and one PodGang per PCSG
+// replica index for a tail entry.
+func TestExpectedPodGangNamesForEntry(t *testing.T) {
+	rnr := apicommon.ResourceNameReplica{Name: "pcs", Replica: 0}
+	t.Run("anchor entry yields a single anchor PodGang", func(t *testing.T) {
+		entry := grovecorev1alpha1.PodGangEntry{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "200", PodCliques: map[string]int32{"frontend": 2}, PCSGReplicaIndices: map[string][]int32{"inference": {0}}}
+		assert.Equal(t, []string{apicommon.GenerateAnchorPodGangName(rnr, "200")}, ExpectedPodGangNamesForEntry(rnr, entry))
+	})
+	t.Run("tail entry yields one PodGang per PCSG replica index", func(t *testing.T) {
+		entry := grovecorev1alpha1.PodGangEntry{Role: grovecorev1alpha1.PodGangEntryRoleTail, Epoch: "200", PCSGReplicaIndices: map[string][]int32{"inference": {1, 2}}}
+		assert.ElementsMatch(t, []string{
+			apicommon.GenerateNonAnchorPodGangName(rnr, "200", "inference", 1),
+			apicommon.GenerateNonAnchorPodGangName(rnr, "200", "inference", 2),
+		}, ExpectedPodGangNamesForEntry(rnr, entry))
+	})
+}
+
+func pgmNames(pgms []grovecorev1alpha1.PodGangMap) []string {
+	names := make([]string, 0, len(pgms))
+	for i := range pgms {
+		names = append(names, pgms[i].Name)
+	}
+	return names
+}
+
+func indicesOf(byIndex map[int]*grovecorev1alpha1.PodGangMap) []int {
+	idx := make([]int, 0, len(byIndex))
+	for i := range byIndex {
+		idx = append(idx, i)
+	}
+	return idx
+}
+
+func pgmWithoutReplicaIndexLabel(pcsName, namespace string) grovecorev1alpha1.PodGangMap {
+	return grovecorev1alpha1.PodGangMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pcsName + "-0",
+			Namespace: namespace,
+			Labels:    map[string]string{apicommon.LabelPartOfKey: pcsName},
+		},
+	}
+}
+
+func pgmWithReplicaIndexLabel(pcsName, namespace, value string) grovecorev1alpha1.PodGangMap {
+	return grovecorev1alpha1.PodGangMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pcsName + "-x",
+			Namespace: namespace,
+			Labels:    map[string]string{apicommon.LabelPodCliqueSetReplicaIndex: value},
+		},
+	}
 }
