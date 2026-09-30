@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Test_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent verifies steady-state PodGangMap scale
+// Test_PCUS1_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent verifies steady-state PodGangMap scale
 // reconciliation over the interleaved layout a coherent update leaves behind. This is not a coherent
 // update test. The coherent update is only the setup that spreads the inference PodCliqueScalingGroup's
 // replica indices across several anchor and tail entries. On a bootstrap layout the PodGangMap and the
@@ -44,7 +44,7 @@ import (
 // indices 0 and 1. A role-ordered drain would instead remove the tail indices 1 and 3 and the ScaleOut
 // index 4 first and keep anchor index 2, leaving the map recording {0,2} while replicas {0,1} actually
 // exist. The test asserts the map ends at exactly {0,1} and that a further coherent update still converges.
-func Test_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent(t *testing.T) {
+func Test_PCUS1_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent(t *testing.T) {
 	tests.Logger.Info("1. Deploy workload-coherent and verify 6 pods")
 	tc, cleanup, _ := setupTest(t, testConfig{
 		workloadName: coherentWorkloadName,
