@@ -292,7 +292,13 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, tc.numMissingOldVersionPods))
+			// The budget gate reads the available count, the number of Pods that are Ready and not
+			// terminating. Each case's PodClique ReadyReplicas stands in for that available count.
+			availableByComponent := make(map[string]int32, len(tc.standalonePCLQByComponent))
+			for name, pclq := range tc.standalonePCLQByComponent {
+				availableByComponent[name] = pclq.Status.ReadyReplicas
+			}
+			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, availableByComponent, tc.numMissingOldVersionPods))
 		})
 	}
 }
@@ -540,7 +546,11 @@ func TestHeadroomByComponent(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, headroomByComponent(tc.standalonePCLQByComponent, tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.numMissingOldVersionPods))
+			availableByComponent := make(map[string]int32, len(tc.standalonePCLQByComponent))
+			for name, pclq := range tc.standalonePCLQByComponent {
+				availableByComponent[name] = pclq.Status.ReadyReplicas
+			}
+			assert.Equal(t, tc.want, headroomByComponent(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, availableByComponent, tc.numMissingOldVersionPods))
 		})
 	}
 }
@@ -611,10 +621,12 @@ func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
 	}
 }
 
-// TestCountRunningStandalonePodsByAnchor covers the per-anchor running Pod count read: Pods are bucketed by
-// their grove.io/podgang label mapped to an anchor epoch, terminating Pods are excluded, and a Pod on a
-// PodGang that is not an anchor of this replica is excluded.
-func TestCountRunningStandalonePodsByAnchor(t *testing.T) {
+// TestGatherStandalonePodCounts covers the single-pass Pod count read. runningByCliqueAndAnchor buckets
+// non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, and excludes terminating
+// Pods and Pods on a PodGang that is not an anchor of this replica. availableByComponent counts Pods that
+// are Ready and not terminating across all of the PodClique's Pods, so it excludes a not-ready Pod and a
+// Ready-but-terminating Pod, and includes a Ready Pod that is not on an anchor.
+func TestGatherStandalonePodCounts(t *testing.T) {
 	rnr := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
 	pcs := &grovecorev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace}}
 	pclq := grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "frontend-pclq", Namespace: coherentTestNamespace, UID: "frontend-uid"}}
@@ -624,7 +636,7 @@ func TestCountRunningStandalonePodsByAnchor(t *testing.T) {
 	}
 	gang50 := apicommon.GenerateAnchorPodGangName(rnr, "50")
 	gang200 := apicommon.GenerateAnchorPodGangName(rnr, "200")
-	pod := func(name, gang string, terminating bool) *corev1.Pod {
+	pod := func(name, gang string, terminating, ready bool) *corev1.Pod {
 		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       coherentTestNamespace,
@@ -635,21 +647,25 @@ func TestCountRunningStandalonePodsByAnchor(t *testing.T) {
 			p.DeletionTimestamp = ptr.To(metav1.Now())
 			p.Finalizers = []string{"grove.io/test"}
 		}
+		if ready {
+			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		}
 		return p
 	}
 	objs := []client.Object{
-		pod("p1", gang50, false),
-		pod("p2", gang50, false),
-		pod("p3", gang200, false),
-		pod("p4", gang200, true),
-		pod("p5", "unrelated-gang", false),
+		pod("p1", gang50, false, true),
+		pod("p2", gang50, false, false),
+		pod("p3", gang200, false, true),
+		pod("p4", gang200, true, true),
+		pod("p5", "unrelated-gang", false, true),
 	}
 	r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(objs...).Build()}
 
-	got, err := r.countRunningStandalonePodsByAnchor(t.Context(), pcs, 0, entries, map[string]grovecorev1alpha1.PodClique{"frontend": pclq})
+	got, err := r.gatherStandalonePodCounts(t.Context(), pcs, 0, entries, map[string]grovecorev1alpha1.PodClique{"frontend": pclq})
 
 	require.NoError(t, err)
-	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 1}}, got)
+	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 1}}, got.runningByCliqueAndAnchor)
+	assert.Equal(t, map[string]int32{"frontend": 3}, got.availableByComponent)
 }
 
 // pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled

@@ -42,15 +42,16 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 
 	desiredReplicas := syncSnap.computeDesiredReplicas(standalonePCLQByComponent, pcsgByComponent)
 
-	// runningPodsByCliqueAndAnchor drives missing old-version Pod detection. A missing old-version Pod is a
-	// slot an old-version anchor still commits but has no running Pod behind it, left by a Pod that died and
-	// was not refilled (the pod controller does not refill an old-version PodGang mid-update). The planner
-	// derives its counts from these, and the engine reclaims those slots as free drain.
-	runningPodsByCliqueAndAnchor, err := r.countRunningStandalonePodsByAnchor(ctx, syncSnap.pcs, pcsReplicaIndex, pgm.Spec.Entries, standalonePCLQByComponent)
+	// standalonePCLQPodCounts is derived from one live Pod list of each in-scope standalone PodClique. Its
+	// running-by-anchor counts drive missing old-version Pod detection: a missing old-version Pod is a slot an
+	// old-version anchor still commits but has no running Pod behind it, left by a Pod that died and was not
+	// refilled (the pod controller does not refill an old-version PodGang mid-update). Its
+	// available-by-component counts feed the MaxUnavailable budget gate.
+	standalonePCLQPodCounts, err := r.gatherStandalonePodCounts(ctx, syncSnap.pcs, pcsReplicaIndex, pgm.Spec.Entries, standalonePCLQByComponent)
 	if err != nil {
 		return nil, err
 	}
-	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, desiredReplicas, runningPodsByCliqueAndAnchor)
+	planner := newSubStepPlanner(syncSnap, pcsReplicaIndex, pgm.Spec.Entries, r.clk, desiredReplicas, standalonePCLQPodCounts.runningByCliqueAndAnchor)
 
 	planPos, err := planner.ascertainPlanPosition()
 	if err != nil {
@@ -58,7 +59,7 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 	}
 	syncSnap.logger.V(1).Info("Computed coherent step plan and position", "pcsReplicaIndex", pcsReplicaIndex, "plan", planner.plan.String(), "position", planPos.String())
 
-	headroom := headroomByComponent(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent, planner.numMissingOldVersionPodsByPCLQ)
+	headroom := headroomByComponent(pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent, standalonePCLQPodCounts.availableByComponent, planner.numMissingOldVersionPodsByPCLQ)
 	ss, err := planner.next(planPos, headroom)
 	if err != nil {
 		return nil, err
@@ -72,7 +73,7 @@ func (r _resource) buildCoherentUpdateEntries(ctx context.Context, syncSnap *syn
 
 	// Hold the advance when the gate is not met, so the current sub-step keeps converging before the next
 	// one takes more Pods down.
-	canEmit, holdReason, err := r.canEmitNextSubStep(ctx, planner, planPos, ss, standalonePCLQByComponent, pcsgByComponent)
+	canEmit, holdReason, err := r.canEmitNextSubStep(ctx, planner, planPos, ss, standalonePCLQByComponent, pcsgByComponent, standalonePCLQPodCounts.availableByComponent)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +207,7 @@ func (s *syncSnapshot) inScopePCSGsByComponent(pcsReplicaIndex int) (map[string]
 // its MaxUnavailable budget, and finally that the sub-step still has something to drain after headroom
 // capping. The first check that fails holds the advance, and its name is returned as the hold reason for
 // tracing.
-func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, planPos planPosition, ss *subStep, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (canEmit bool, holdReason string, err error) {
+func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlanner, planPos planPosition, ss *subStep, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, availableByComponent map[string]int32) (canEmit bool, holdReason string, err error) {
 	currentBatchScheduled, err := r.currentBatchScheduled(ctx, planner.pcs, planner.pcsReplicaIndex, planner.entries)
 	if err != nil {
 		return false, "", err
@@ -217,7 +218,7 @@ func (r _resource) canEmitNextSubStep(ctx context.Context, planner *subStepPlann
 	if !subsumedPodsScheduled(standalonePCLQByComponent, planPos) {
 		return false, "subsumedPodsScheduled=false", nil
 	}
-	if !maxUnavailableBudgetSatisfied(standalonePCLQByComponent, pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent, ss.drainCountByComponent(), planner.numMissingOldVersionPodsByPCLQ) {
+	if !maxUnavailableBudgetSatisfied(pcsgByComponent, planner.desiredReplicas, planner.maxUnavailableByComponent, ss.drainCountByComponent(), availableByComponent, planner.numMissingOldVersionPodsByPCLQ) {
 		return false, "maxUnavailableBudgetSatisfied=false", nil
 	}
 	if ss.drainsNothing() {
@@ -275,8 +276,11 @@ func subsumedPodsScheduled(standalonePCLQByComponent map[string]grovecorev1alpha
 // For a standalone PodClique:
 //
 //	runningPodTakedown       = max(0, drain - numMissingOldVersionPods)
-//	unavailableAfterTakedown = (desired - ready) + runningPodTakedown
+//	unavailableAfterTakedown = (desired - available) + runningPodTakedown
 //	hold if runningPodTakedown > 0 and unavailableAfterTakedown > maxUnavailable
+//
+// Available is the count of Pods that are Ready and not terminating. It is not the PodClique's ReadyReplicas,
+// which keeps counting a Pod as ready after the Pod is deleted until its containers stop.
 //
 // A pure reclaim (runningPodTakedown is 0) is always allowed, even when the component is already over budget,
 // because it refills a dead slot on the current-version anchor and lowers no availability.
@@ -288,10 +292,10 @@ func subsumedPodsScheduled(standalonePCLQByComponent map[string]grovecorev1alpha
 // A PodCliqueScalingGroup has no missing old-version count. A not-yet-rolled PCSG replica keeps its member
 // PodCliques at the old revision, so a dead member Pod is recreated at the old revision on its own gang. No
 // new-revision Pod ever lands on an old gang, so there is nothing to reclaim.
-func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent, drainByComponent, numMissingOldVersionPodsByPCLQ map[string]int32) bool {
-	for componentName, pclq := range standalonePCLQByComponent {
+func maxUnavailableBudgetSatisfied(pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent, drainByComponent, availableByComponent, numMissingOldVersionPodsByPCLQ map[string]int32) bool {
+	for componentName := range availableByComponent {
 		runningPodTakedown := max(0, drainByComponent[componentName]-numMissingOldVersionPodsByPCLQ[componentName])
-		currentlyUnavailable := desiredReplicas[componentName] - pclq.Status.ReadyReplicas
+		currentlyUnavailable := desiredReplicas[componentName] - availableByComponent[componentName]
 		unavailableAfterTakedown := currentlyUnavailable + runningPodTakedown
 		if runningPodTakedown > 0 && unavailableAfterTakedown > maxUnavailableByComponent[componentName] {
 			return false
@@ -316,17 +320,19 @@ func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecor
 //
 // For a standalone PodClique:
 //
-//	runningPodTakedownHeadroom = max(0, maxUnavailable - (desired - ready))
+//	runningPodTakedownHeadroom = max(0, maxUnavailable - (desired - available))
 //	headroom                   = runningPodTakedownHeadroom + numMissingOldVersionPods
 //
+// Available is the count of Pods that are Ready and not terminating, not the PodClique's ReadyReplicas.
+//
 // Worked deadlock case, showing why the missing old-version term is needed. maxUnavailable 1, desired 10,
-// ready 9 because 1 Pod died on an old-version anchor, so numMissingOldVersionPods is 1. Without the term:
+// available 9 because 1 Pod died on an old-version anchor, so numMissingOldVersionPods is 1. Without the term:
 //
 //	runningPodTakedownHeadroom = max(0, 1 - (10 - 9)) = 0
 //	headroom                   = 0
 //
 // Headroom 0 drains nothing. The dead Pod is on an old-version anchor the pod controller will not refill,
-// so ready never climbs back, headroom stays 0, and the roll never advances. With the term headroom is
+// so available never climbs back, headroom stays 0, and the roll never advances. With the term headroom is
 // 0 + 1 = 1, so the sub-step reclaims the missing old-version Pod, the slot is refilled on the
 // current-version anchor, and the roll proceeds.
 //
@@ -334,10 +340,10 @@ func maxUnavailableBudgetSatisfied(standalonePCLQByComponent map[string]grovecor
 // PodCliques at the old revision, so a dead member Pod is recreated at the old revision on its own gang. No
 // new-revision Pod ever lands on an old gang, so there is nothing to reclaim. Its headroom is just the
 // running-replica takedown headroom.
-func headroomByComponent(standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent, numMissingOldVersionPodsByPCLQ map[string]int32) map[string]int32 {
-	headroom := make(map[string]int32, len(standalonePCLQByComponent)+len(pcsgByComponent))
-	for componentName, pclq := range standalonePCLQByComponent {
-		currentlyUnavailable := desiredReplicas[componentName] - pclq.Status.ReadyReplicas
+func headroomByComponent(pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup, desiredReplicas, maxUnavailableByComponent, availableByComponent, numMissingOldVersionPodsByPCLQ map[string]int32) map[string]int32 {
+	headroom := make(map[string]int32, len(availableByComponent)+len(pcsgByComponent))
+	for componentName := range availableByComponent {
+		currentlyUnavailable := desiredReplicas[componentName] - availableByComponent[componentName]
 		runningPodTakedownHeadroom := max(0, maxUnavailableByComponent[componentName]-currentlyUnavailable)
 		headroom[componentName] = runningPodTakedownHeadroom + numMissingOldVersionPodsByPCLQ[componentName]
 	}
@@ -348,38 +354,60 @@ func headroomByComponent(standalonePCLQByComponent map[string]grovecorev1alpha1.
 	return headroom
 }
 
-// countRunningStandalonePodsByAnchor returns the running Pod count on each anchor PodGang for every in-scope
-// standalone PodClique of the replica under update, keyed by clique name then anchor epoch. Running means not
-// terminating. It lists each PodClique Pods and buckets them by the grove.io/podgang label, resolved to an
-// anchor epoch via EpochByAnchorPodGangName.
+// standalonePodCounts holds the per-PodClique counts the coherent update engine derives from one live Pod
+// list of each in-scope standalone PodClique of the replica under update.
+type standalonePodCounts struct {
+	// runningByCliqueAndAnchor is the running (not terminating) Pod count on each anchor PodGang, keyed by
+	// clique name then anchor epoch. It drives missing old-version Pod detection.
+	runningByCliqueAndAnchor map[string]map[string]int32
+	// availableByComponent is the number of Pods that are Ready and not terminating, keyed by clique name. It
+	// is the availability figure the MaxUnavailable budget gate uses, distinct from the PodClique's
+	// ReadyReplicas, which keeps counting a Pod as ready after the Pod is deleted until its containers stop.
+	availableByComponent map[string]int32
+}
+
+// gatherStandalonePodCounts lists the Pods of every in-scope standalone PodClique of the replica under
+// update once and returns two counts derived from that single list.
 //
-// If the cache is stale it can only show a dead Pod as still running. That lowers the missing old-version
+// runningByCliqueAndAnchor buckets running (not terminating) Pods by the grove.io/podgang label resolved to
+// an anchor epoch via EpochByAnchorPodGangName. availableByComponent counts Pods that are Ready and not
+// terminating, across all of the PodClique's Pods regardless of PodGang.
+//
+// If the cache is stale it can only show a dead Pod as still running, which lowers the missing old-version
 // count, never raises it, so a drain never exceeds budget. This holds because old anchors are delete-only
 // during the update, so their Pod set only shrinks and a create can never be missed.
-func (r _resource) countRunningStandalonePodsByAnchor(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique) (map[string]map[string]int32, error) {
+func (r _resource) gatherStandalonePodCounts(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique) (standalonePodCounts, error) {
 	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
 	epochByAnchorPodGangName := componentutils.EpochByAnchorPodGangName(entries, rnr)
 
-	runningPodsByCliqueAndAnchor := make(map[string]map[string]int32, len(standalonePCLQByComponent))
+	counts := standalonePodCounts{
+		runningByCliqueAndAnchor: make(map[string]map[string]int32, len(standalonePCLQByComponent)),
+		availableByComponent:     make(map[string]int32, len(standalonePCLQByComponent)),
+	}
 	for cliqueName, pclq := range standalonePCLQByComponent {
 		pods, err := componentutils.GetPCLQPods(ctx, r.client, pcs.Name, &pclq)
 		if err != nil {
-			return nil, groveerr.WrapError(err, errCodeListPods, component.OperationSync,
+			return standalonePodCounts{}, groveerr.WrapError(err, errCodeListPods, component.OperationSync,
 				fmt.Sprintf("could not list Pods for standalone PodClique %q under coherent update", cliqueName))
 		}
 		runningPodsByAnchor := make(map[string]int32)
+		var available int32
 		for _, pod := range pods {
 			if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
 				continue
+			}
+			if k8sutils.IsPodReady(pod) {
+				available++
 			}
 			// A Pod not on an anchor of this replica resolves to no epoch and is skipped.
 			if epoch, onAnchor := epochByAnchorPodGangName[pod.Labels[apicommon.LabelPodGang]]; onAnchor {
 				runningPodsByAnchor[epoch]++
 			}
 		}
-		runningPodsByCliqueAndAnchor[cliqueName] = runningPodsByAnchor
+		counts.runningByCliqueAndAnchor[cliqueName] = runningPodsByAnchor
+		counts.availableByComponent[cliqueName] = available
 	}
-	return runningPodsByCliqueAndAnchor, nil
+	return counts, nil
 }
 
 // numMissingOldVersionPodsByStandalonePCLQ returns the count of missing old-version Pods per in-scope
