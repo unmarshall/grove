@@ -160,7 +160,7 @@ The current iteration of Coherent Rolling Updates carries the following known li
 
 3. **Preemption between sub-steps throttles or stalls the rollout.** Predicate 3 of the [Per-sub-step gate](#per-sub-step-gate) keeps each component's unavailable count, including the incoming sub-step's drain, within `maxUnavailable[c]`. If preemption or unrelated pod loss consumes part of the budget, a tail sub-step drains only the remaining headroom and the roll progresses more slowly. If it consumes the whole budget, or an anchor sub-step cannot fit its full `minAvailable[c]`, the orchestrator holds until availability recovers. This matches Kubernetes Deployment behavior under `maxUnavailable` and is the right safety behavior, but it can leave a coherent update parked indefinitely if preemption persists.
 
-   *Mitigation:* operators experiencing repeated stalls should inspect `Status.UpdateProgress.CurrentlyUpdating[].ErrorMessage` and address the underlying capacity/preemption pressure on the cluster. Future work may add a configurable stall timeout that escalates to a user-visible event.
+   *Mitigation:* operators experiencing repeated stalls should inspect `Status.UpdateProgress.CurrentlyUpdating[].Message` and address the underlying capacity/preemption pressure on the cluster. Future work may add a configurable stall timeout that escalates to a user-visible event.
 
 ## Design Details
 
@@ -694,7 +694,7 @@ The update is done. Frontend totals 2, prefill totals 2, and decode totals 2. Du
 
 ##### Per-sub-step gate
 
-Before advancing from sub-step `N.k` to sub-step `N.(k+1)`, or to the next step, all three predicates below must hold. The orchestrator evaluates them on every reconcile while the update is in flight; failure of any predicate stalls advancement and surfaces the reason on `Status.UpdateProgress.CurrentlyUpdating[].ErrorMessage`.
+Before advancing from sub-step `N.k` to sub-step `N.(k+1)`, or to the next step, all three predicates below must hold. The orchestrator evaluates them on every reconcile while the update is in flight; failure of any predicate stalls advancement and surfaces the reason on `Status.UpdateProgress.CurrentlyUpdating[].Message`.
 
 1. **PodGangs created in sub-step `N.k` are `Scheduled=True`.** A sticky condition driven by the `MinReplicas` scheduled count and tracked through `Status.LastScheduled` (see [PodGang.MinReplicas lifecycle and conditions](#podgangminreplicas-lifecycle-and-conditions)). Advancement gates on scheduling rather than readiness. Both revisions' replicas count toward `MaxUnavailable`, so predicate 3 (not readiness) bounds availability, and waiting for `Ready` would serialise the roll unnecessarily. A sub-step that only subsumes standalone PCLQ pods into a previously-created anchor does not create a new PodGang, so this predicate has nothing to check in that case.
 
