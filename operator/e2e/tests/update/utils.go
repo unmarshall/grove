@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/ai-dynamo/grove/operator/api/common"
@@ -31,13 +32,17 @@ import (
 	"github.com/ai-dynamo/grove/operator/e2e/grove/workload"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/k8sclient"
 	"github.com/ai-dynamo/grove/operator/e2e/k8s/pods"
+	"github.com/ai-dynamo/grove/operator/e2e/setup"
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	"github.com/ai-dynamo/grove/operator/e2e/tests"
 	"github.com/ai-dynamo/grove/operator/e2e/waiter"
+	kubeutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1431,11 +1436,132 @@ func notReadyPodForPCSG(tc *testctx.TestContext, pcsgConfigName string) func(*co
 
 // KWOK Stage fixtures used to shape pod lifecycle for rolling update tests.
 const (
-	kwokStageReadyDelayedPath = "../../yaml/kwok/pod-ready-delayed.yaml"
-	kwokStageReadyDelayedName = "pod-ready-delayed"
-	kwokStageCrashloopPath    = "../../yaml/kwok/pod-crashloop.yaml"
-	kwokStageCrashloopName    = "pod-crashloop"
+	kwokStageReadyDelayedPath   = "../../yaml/kwok/pod-ready-delayed.yaml"
+	kwokStageReadyDelayedName   = "pod-ready-delayed"
+	kwokStageReadyBlockedR0Path = "../../yaml/kwok/pod-ready-blocked-r0-standalone.yaml"
+	kwokStageReadyBlockedR0Name = "pod-ready-blocked-r0-standalone"
+	kwokStageCrashloopR1Path    = "../../yaml/kwok/pod-crashloop-r1-standalone.yaml"
+	kwokStageCrashloopR1Name    = "pod-crashloop-r1-standalone"
+	kwokStageCrashloopPath      = "../../yaml/kwok/pod-crashloop.yaml"
+	kwokStageCrashloopName      = "pod-crashloop"
 )
+
+// livePodsForCliqueOnReplica returns the live pods of the given clique that belong to the given PCS
+// replica index.
+func livePodsForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) ([]corev1.Pod, error) {
+	podList, err := tc.ListPods()
+	if err != nil {
+		return nil, err
+	}
+	wantReplica := strconv.Itoa(pcsReplicaIndex)
+	var matched []corev1.Pod
+	for i := range podList.Items {
+		pod := podList.Items[i]
+		pclq, ok := pod.Labels[common.LabelPodClique]
+		if !ok || !strings.HasSuffix(pclq, "-"+cliqueName) {
+			continue
+		}
+		if pod.Labels[common.LabelPodCliqueSetReplicaIndex] != wantReplica {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		matched = append(matched, pod)
+	}
+	return matched, nil
+}
+
+// deleteNotReadyPodsOnReplica deletes every not-ready pod of the given PCS replica index, leaving healthy
+// pods in place. This covers a held Pending pod and a crash-looping Running-but-NotReady pod. Removing a
+// KWOK shaping stage does not release a pod already shaped by it, so deleting the not-ready pods lets fresh
+// ones come up Ready under the default stage while the replica's healthy pods are untouched.
+func deleteNotReadyPodsOnReplica(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) {
+	t.Helper()
+	podList, err := tc.ListPods()
+	if err != nil {
+		t.Fatalf("failed to list pods: %v", err)
+	}
+	wantReplica := strconv.Itoa(pcsReplicaIndex)
+	for i := range podList.Items {
+		pod := podList.Items[i]
+		if pod.Labels[common.LabelPodCliqueSetReplicaIndex] != wantReplica || pod.DeletionTimestamp != nil || kubeutils.IsPodReady(&pod) {
+			continue
+		}
+		if err := tc.Client.Delete(tc.Ctx, &pod); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to delete not-ready pod %s during replica %d recovery: %v", pod.Name, pcsReplicaIndex, err)
+		}
+	}
+}
+
+// getReplicaPodGangMap fetches the PodGangMap object of the given PCS replica.
+func getReplicaPodGangMap(tc *testctx.TestContext, pcsReplicaIndex int) (*grovev1alpha1.PodGangMap, error) {
+	pgmName := common.GeneratePodGangMapName(common.ResourceNameReplica{Name: tc.Workload.Name, Replica: pcsReplicaIndex})
+	var pgm grovev1alpha1.PodGangMap
+	if err := tc.Client.Get(tc.Ctx, types.NamespacedName{Namespace: tc.Namespace, Name: pgmName}, &pgm); err != nil {
+		return nil, err
+	}
+	return &pgm, nil
+}
+
+// gangTerminateReplicaAndWaitForPodGangMapRebuild breaches MinAvailable on the given PodClique of the
+// given PCS replica and waits until the replica's PodGangMap is deleted and rebuilt. It deletes every live
+// pod of that PodClique on the replica, dropping it below MinAvailable. With a crash-loop stage active for
+// the replica the recreated pods stay not-ready past terminationDelay, so the component stays below MinAvailable long enough for the PCS-level gang termination to fire once (its
+// re-fire guard prevents churn) and rebuild the replica. It polls until the replica's PodGangMap carries a
+// new UID, which is how gang termination resets a fully torn-down replica.
+//
+// Gang termination is suppressed while a replica is itself under coherent update (its MinAvailableBreached
+// goes Unknown). The caller keeps another replica's update parked in flight so the orchestrator never
+// advances to this replica, and the poll fails fast if it ever does, rather than waiting out the deadline.
+func gangTerminateReplicaAndWaitForPodGangMapRebuild(t *testing.T, tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) {
+	t.Helper()
+	pgmBefore, err := getReplicaPodGangMap(tc, pcsReplicaIndex)
+	if err != nil {
+		t.Fatalf("failed to read PodGangMap for replica %d: %v", pcsReplicaIndex, err)
+	}
+	oldUID := pgmBefore.UID
+
+	victims, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		t.Fatalf("failed to list %s pods on replica %d: %v", cliqueName, pcsReplicaIndex, err)
+	}
+	if len(victims) == 0 {
+		t.Fatalf("no %s pods found on replica %d to breach MinAvailable", cliqueName, pcsReplicaIndex)
+	}
+	for i := range victims {
+		if err := tc.Client.Delete(tc.Ctx, &victims[i]); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to delete pod %s to breach MinAvailable: %v", victims[i].Name, err)
+		}
+	}
+
+	pollErr := wait.PollUntilContextTimeout(tc.Ctx, 2*time.Second, 90*time.Second, true, func(context.Context) (bool, error) {
+		// Gang termination is suppressed while a replica is itself under coherent update: its
+		// MinAvailableBreached goes Unknown ("Update is in progress"). If the orchestrator has advanced to
+		// the replica being gang terminated, the rebuild can never happen, so fail fast with a clear message
+		// instead of polling to the deadline. The readiness-hold on the rolling replica keeps the
+		// orchestrator parked there, so in a healthy run this guard never trips.
+		pcs, err := getPCS(tc, tc.Workload.Name)
+		if err != nil {
+			return false, err
+		}
+		if up := pcs.Status.UpdateProgress; up != nil && len(up.CurrentlyUpdating) > 0 &&
+			int(up.CurrentlyUpdating[0].ReplicaIndex) == pcsReplicaIndex {
+			return false, fmt.Errorf("orchestrator advanced to replica %d under gang termination; its MinAvailableBreached is suppressed while it updates, so the PodGangMap cannot be rebuilt", pcsReplicaIndex)
+		}
+		pgm, err := getReplicaPodGangMap(tc, pcsReplicaIndex)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil // briefly absent between delete and recreate
+			}
+			return false, err
+		}
+		return pgm.UID != oldUID, nil
+	})
+	if pollErr != nil {
+		t.Fatalf("PodGangMap for replica %d was not rebuilt after gang termination: %v", pcsReplicaIndex, pollErr)
+	}
+}
 
 // standaloneCliqueFQN returns the PodClique name for a standalone clique in PCS replica 0.
 func standaloneCliqueFQN(tc *testctx.TestContext, cliqueName string) string {
@@ -1444,7 +1570,12 @@ func standaloneCliqueFQN(tc *testctx.TestContext, cliqueName string) string {
 
 // pcsgFQN returns the PodCliqueScalingGroup name for a config in PCS replica 0.
 func pcsgFQN(tc *testctx.TestContext, pcsgConfigName string) string {
-	return common.GeneratePodCliqueScalingGroupName(common.ResourceNameReplica{Name: tc.Workload.Name, Replica: 0}, pcsgConfigName)
+	return pcsgFQNForReplica(tc, pcsgConfigName, 0)
+}
+
+// pcsgFQNForReplica returns the fully qualified PodCliqueScalingGroup name for the given PCS replica.
+func pcsgFQNForReplica(tc *testctx.TestContext, pcsgConfigName string, pcsReplicaIndex int) string {
+	return common.GeneratePodCliqueScalingGroupName(common.ResourceNameReplica{Name: tc.Workload.Name, Replica: pcsReplicaIndex}, pcsgConfigName)
 }
 
 // updateInProgressConditionMet builds a predicate satisfied when the UpdateInProgress condition read
@@ -1503,6 +1634,39 @@ func waitForPCSGUpdateCondition(tc *testctx.TestContext, pcsgConfigName string, 
 		return fmt.Errorf("PodCliqueScalingGroup %s UpdateInProgress did not reach status=%s reason=%s: %w", name, wantStatus, wantReason, err)
 	}
 	return nil
+}
+
+// restartOperator simulates a Grove operator crash by deleting its pod in the operator namespace and
+// waiting for the Deployment to bring up a fresh Ready replica. It lets a test assert the operator resumes
+// in-flight work from persisted state after a restart.
+func restartOperator(tc *testctx.TestContext) error {
+	pm := pods.NewPodManager(tc.Client, tests.Logger)
+	before, err := pm.List(tc.Ctx, setup.OperatorNamespace, "")
+	if err != nil {
+		return fmt.Errorf("failed to list operator pods in %s: %w", setup.OperatorNamespace, err)
+	}
+	oldPodUIDs := make(map[types.UID]struct{}, len(before.Items))
+	for i := range before.Items {
+		oldPodUIDs[before.Items[i].UID] = struct{}{}
+		if err := tc.Client.Delete(tc.Ctx, &before.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete operator pod %s: %w", before.Items[i].Name, err)
+		}
+	}
+	// Wait until exactly one operator pod, none of the deleted ones, is Ready.
+	return wait.PollUntilContextTimeout(tc.Ctx, tc.Interval, tc.Timeout, true, func(ctx context.Context) (bool, error) {
+		current, err := pm.List(ctx, setup.OperatorNamespace, "")
+		if err != nil {
+			return false, nil
+		}
+		if len(current.Items) != 1 {
+			return false, nil
+		}
+		pod := &current.Items[0]
+		if _, isOld := oldPodUIDs[pod.UID]; isOld {
+			return false, nil
+		}
+		return kubeutils.IsPodReady(pod), nil
+	})
 }
 
 // assertUpdateInProgressCleared fails the test unless the PodCliqueSet UpdateInProgress condition has
@@ -1603,4 +1767,56 @@ func assertDefaultedMaxUnavailable(tc *testctx.TestContext, cliqueName string, w
 		}
 	}
 	tc.T.Fatalf("clique %s not found in PodCliqueSet %s", cliqueName, tc.Workload.Name)
+}
+
+// firstReadyPodForCliqueOnReplica returns the name of a Ready pod of the clique on the replica. During a
+// coherent roll parked by blocked readiness, the Ready pods are the old-revision pods on the old anchor.
+func firstReadyPodForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) (string, error) {
+	livePods, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		return "", err
+	}
+	for i := range livePods {
+		if kubeutils.IsPodReady(&livePods[i]) {
+			return livePods[i].Name, nil
+		}
+	}
+	return "", fmt.Errorf("no Ready %s pod found on replica %d", cliqueName, pcsReplicaIndex)
+}
+
+// firstNotReadyPodForCliqueOnReplica returns the name of a not-Ready pod of the clique on the replica.
+// During a coherent roll parked by blocked readiness, the not-Ready pod is the new-revision pod the current
+// sub-step created on the current-version anchor.
+func firstNotReadyPodForCliqueOnReplica(tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) (string, error) {
+	livePods, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		return "", err
+	}
+	for i := range livePods {
+		if !kubeutils.IsPodReady(&livePods[i]) {
+			return livePods[i].Name, nil
+		}
+	}
+	return "", fmt.Errorf("no not-Ready %s pod found on replica %d", cliqueName, pcsReplicaIndex)
+}
+
+// waitForReplicaMidCoherentRoll blocks until the replica's PodGangMap carries entries at more than one
+// generation hash. That means a coherent sub-step has committed a current-revision anchor alongside the
+// draining old-revision entries. With the replica's readiness blocked, the roll then parks in this state.
+func waitForReplicaMidCoherentRoll(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex int) {
+	t.Helper()
+	deadline := time.Now().Add(tc.Timeout)
+	for time.Now().Before(deadline) {
+		if pgm, err := getReplicaPodGangMap(tc, pcsReplicaIndex); err == nil {
+			generations := make(map[string]struct{})
+			for _, entry := range pgm.Spec.Entries {
+				generations[entry.PodCliqueSetGenerationHash] = struct{}{}
+			}
+			if len(generations) >= 2 {
+				return
+			}
+		}
+		time.Sleep(tc.Interval)
+	}
+	t.Fatalf("replica %d PodGangMap did not reach a multi-generation (mid coherent roll) state within %s", pcsReplicaIndex, tc.Timeout)
 }

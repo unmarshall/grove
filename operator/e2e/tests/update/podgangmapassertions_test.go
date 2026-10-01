@@ -51,6 +51,18 @@ func getPodGangMapEntries(t *testing.T, tc *testctx.TestContext, pcsReplicaIndex
 	return pgm.Spec.Entries
 }
 
+// assertPodGangMapSingleGeneration fails the test unless every entry of the PCS replica 0 PodGangMap is at
+// the PodCliqueSet's current generation hash, proving the coherent update reconverged the map and left no
+// stale intermediate entry behind.
+func assertPodGangMapSingleGeneration(t *testing.T, tc *testctx.TestContext) {
+	t.Helper()
+	currentHash := getPCSGenerationHash(t, tc)
+	for _, entry := range getPodGangMapEntries(t, tc, 0) {
+		assert.Equalf(t, currentHash, entry.PodCliqueSetGenerationHash,
+			"PodGang entry (role %s, epoch %s) is at a stale generation hash", entry.Role, entry.Epoch)
+	}
+}
+
 // entryByRole returns the single entry with the given role, failing if there is not exactly one.
 func entryByRole(t *testing.T, entries []grovev1alpha1.PodGangEntry, role grovev1alpha1.PodGangEntryRole) grovev1alpha1.PodGangEntry {
 	t.Helper()
@@ -176,4 +188,28 @@ func assertReplicaPodGangMap(t *testing.T, entries []grovev1alpha1.PodGangEntry,
 	scaleOut := entryByRole(t, entries, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOut, want.pcsgName, want.scaleOutIndices)
 	assertPodGangEntryDependsOn(t, scaleOut, []string{anchor.Epoch})
+}
+
+// assertEachPodGangSingleRevision fails the test if any PodGang carries pods of more than one pod template
+// hash for the given clique on the given replica. A coherent update must never place a new-revision pod on
+// an old-version PodGang, so every PodGang holds a single revision.
+func assertEachPodGangSingleRevision(t *testing.T, tc *testctx.TestContext, cliqueName string, pcsReplicaIndex int) {
+	t.Helper()
+	livePods, err := livePodsForCliqueOnReplica(tc, cliqueName, pcsReplicaIndex)
+	if err != nil {
+		t.Fatalf("failed to list %s pods on replica %d: %v", cliqueName, pcsReplicaIndex, err)
+	}
+	revisionByPodGang := make(map[string]string)
+	for i := range livePods {
+		podGang := livePods[i].Labels[apicommon.LabelPodGang]
+		if podGang == "" {
+			continue
+		}
+		revision := livePods[i].Labels[apicommon.LabelPodTemplateHash]
+		if existing, ok := revisionByPodGang[podGang]; ok {
+			assert.Equalf(t, existing, revision, "PodGang %s carries pods of two revisions (%s and %s), coherence broken", podGang, existing, revision)
+			continue
+		}
+		revisionByPodGang[podGang] = revision
+	}
 }

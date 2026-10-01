@@ -128,19 +128,51 @@ func podGangEntryForPCSGReplica(pgm *grovecorev1alpha1.PodGangMap, pcsgName stri
 	return nil, fmt.Errorf("no PodGangMap entry owns replica index %d of PodCliqueScalingGroup %q and no ScaleOut entry exists in PodGangMap %s", pcsgReplicaIndex, pcsgName, pgm.Name)
 }
 
-// AnchorPodGangEpoch returns the epoch of the AnchorIndex 0 anchor entry of the PodGangMap. Standalone
-// PodCliques always belong to this entry. It returns an error when no such anchor entry exists, a
-// contract violation that must be re-queued.
-// NOTE: When coherent-updates update strategy (GREP-393) is introduced then post coherent update it is possible
-// that there are more than one anchor entry. This function will have to be adapted to support that.
-func AnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
-	for i := range pgm.Spec.Entries {
-		entry := &pgm.Spec.Entries[i]
-		if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor && entry.AnchorIndex != nil && *entry.AnchorIndex == 0 {
-			return entry.Epoch, nil
+// BaseAnchorPodGangEpoch returns the epoch of the base anchor of the PodGangMap. The base anchor is the
+// PodGang that standalone Pods key off for their guaranteed MinAvailable. See BaseAnchorEpoch.
+func BaseAnchorPodGangEpoch(pgm *grovecorev1alpha1.PodGangMap) (string, error) {
+	epoch, found, err := BaseAnchorEpoch(pgm.Spec.Entries, nil)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no anchor entry exists in PodGangMap %s", pgm.Name)
+	}
+	return epoch, nil
+}
+
+// BaseAnchorEpoch returns the epoch of the base anchor, considering only entries at pcsGenerationHash
+// when it is non-nil, or all entries when it is nil. It returns found false when no such anchor exists,
+// and an error when an anchor epoch is not numeric.
+//
+// The base anchor is the lowest-epoch anchor of the generation in question, the first one created. It
+// holds a PodCliqueSet replica's guaranteed MinAvailable for its standalone PodCliques. Steady-state
+// standalone scale-in drains from the highest-epoch anchor downward, so the base anchor is drained last
+// and always retains the final MinAvailable pods. Its standalone PodGroups keep MinReplicas at the
+// template MinAvailable, while every other anchor clamps MinReplicas to its per-anchor count.
+func BaseAnchorEpoch(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash *string) (string, bool, error) {
+	var (
+		lowestEpoch      string
+		found            bool
+		lowestEpochNanos int64
+	)
+	for i := range entries {
+		entry := entries[i]
+		if entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+			continue
+		}
+		if pcsGenerationHash != nil && entry.PodCliqueSetGenerationHash != *pcsGenerationHash {
+			continue
+		}
+		epochNanos, err := strconv.ParseInt(entry.Epoch, 10, 64)
+		if err != nil {
+			return "", false, fmt.Errorf("anchor entry has a non-numeric epoch %q: %w", entry.Epoch, err)
+		}
+		if !found || epochNanos < lowestEpochNanos {
+			found, lowestEpochNanos, lowestEpoch = true, epochNanos, entry.Epoch
 		}
 	}
-	return "", fmt.Errorf("no AnchorIndex 0 anchor entry exists in PodGangMap %s", pgm.Name)
+	return lowestEpoch, found, nil
 }
 
 // IndexPodGangEntriesByEpoch returns a map of the PodGangMap entries keyed by their epoch. Epoch is
@@ -151,4 +183,97 @@ func IndexPodGangEntriesByEpoch(entries []grovecorev1alpha1.PodGangEntry) map[st
 		byEpoch[entry.Epoch] = entry
 	}
 	return byEpoch
+}
+
+// LatestEpochForGenerationHash returns the largest epoch among entries carrying pcsGenerationHash, or
+// nil when no entry carries it. Filtering by hash makes it safe across generations, the coherent flow
+// queries it with the current generation hash while older or mid-flight generations coexist as drain
+// targets. Epochs are monotonic unix-nano decimals, so the largest is the newest.
+func LatestEpochForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) (*string, error) {
+	var (
+		latestEpoch   string
+		maxEpochValue int64
+		found         bool
+	)
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			continue
+		}
+		epochValue, err := strconv.ParseInt(entries[i].Epoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", entries[i].Epoch, err)
+		}
+		if !found || epochValue > maxEpochValue {
+			latestEpoch, maxEpochValue, found = entries[i].Epoch, epochValue, true
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	return &latestEpoch, nil
+}
+
+// LatestEntryForGenerationHash returns the entry with the largest epoch among entries carrying
+// pcsGenerationHash, or nil when none carries it. Epochs are monotonic unix-nano decimals, so the largest
+// is the most recently committed sub-step. It errors when an entry has a non-numeric epoch.
+func LatestEntryForGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) (*grovecorev1alpha1.PodGangEntry, error) {
+	var (
+		latest        *grovecorev1alpha1.PodGangEntry
+		maxEpochValue int64
+	)
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			continue
+		}
+		epochValue, err := strconv.ParseInt(entries[i].Epoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("PodGangMap entry with epoch %q has a non-numeric epoch: %w", entries[i].Epoch, err)
+		}
+		if latest == nil || epochValue > maxEpochValue {
+			latest, maxEpochValue = &entries[i], epochValue
+		}
+	}
+	return latest, nil
+}
+
+// ExpectedPodGangNamesForEntry returns the PodGang names a committed entry materializes into. An anchor
+// entry yields one anchor PodGang. A tail or scale-out entry yields one PodGang per PodCliqueScalingGroup
+// replica index it carries. It mirrors buildPodGangInfosFromEntry in the PodGang component, reusing the
+// same name generators, so the two stay in step.
+func ExpectedPodGangNamesForEntry(rnr apicommon.ResourceNameReplica, entry grovecorev1alpha1.PodGangEntry) []string {
+	if entry.Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+		return []string{apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)}
+	}
+	var names []string
+	for pcsgName, replicaIndices := range entry.PCSGReplicaIndices {
+		for _, replicaIndex := range replicaIndices {
+			names = append(names, apicommon.GenerateNonAnchorPodGangName(rnr, entry.Epoch, pcsgName, replicaIndex))
+		}
+	}
+	return names
+}
+
+// IsPodGangMapAtSingleGeneration reports whether every entry carries pcsGenerationHash, so the PodGangMap
+// has reconverged to a single generation with no older-generation entries left to drain. An empty entry
+// set is vacuously single-generation.
+func IsPodGangMapAtSingleGeneration(entries []grovecorev1alpha1.PodGangEntry, pcsGenerationHash string) bool {
+	for i := range entries {
+		if entries[i].PodCliqueSetGenerationHash != pcsGenerationHash {
+			return false
+		}
+	}
+	return true
+}
+
+// EpochByAnchorPodGangName maps each anchor PodGang name of a PodCliqueSet replica to its epoch. Only anchor
+// entries are included. The PodGang name is derived from the replica identity and the entry epoch, so this
+// inverts that mapping. It lets a caller resolve a Pod grove.io/podgang label back to an epoch.
+func EpochByAnchorPodGangName(entries []grovecorev1alpha1.PodGangEntry, rnr apicommon.ResourceNameReplica) map[string]string {
+	epochByPodGangName := make(map[string]string)
+	for i := range entries {
+		if entries[i].Role == grovecorev1alpha1.PodGangEntryRoleAnchor {
+			epochByPodGangName[apicommon.GenerateAnchorPodGangName(rnr, entries[i].Epoch)] = entries[i].Epoch
+		}
+	}
+	return epochByPodGangName
 }

@@ -369,3 +369,83 @@ func TestAllPodGangsAtEpochEverScheduled(t *testing.T) {
 		})
 	}
 }
+
+func TestAllPodGangsAtEpochEverReady(t *testing.T) {
+	const (
+		pcsName   = "test-pcs"
+		namespace = "default"
+		epoch     = "1000"
+	)
+	pcsObjectKey := client.ObjectKey{Namespace: namespace, Name: pcsName}
+
+	podGangAtEpoch := func(name string, ready bool) *groveschedulerv1alpha1.PodGang {
+		builder := testutils.NewPodGangBuilder(name, namespace).
+			WithLabels(map[string]string{
+				apicommon.LabelPartOfKey:                pcsName,
+				apicommon.LabelPodCliqueSetReplicaIndex: "0",
+				apicommon.LabelEpoch:                    epoch,
+			})
+		if ready {
+			builder = builder.WithLastReady()
+		}
+		return builder.Build()
+	}
+
+	tests := []struct {
+		name     string
+		podGangs []*groveschedulerv1alpha1.PodGang
+		expected bool
+	}{
+		{"epoch with no PodGangs is not ready", nil, false},
+		{"epoch is ready when all its PodGangs are ready", []*groveschedulerv1alpha1.PodGang{podGangAtEpoch("pg-0", true), podGangAtEpoch("pg-1", true)}, true},
+		{"epoch is not ready when any of its PodGangs is not ready", []*groveschedulerv1alpha1.PodGang{podGangAtEpoch("pg-0", true), podGangAtEpoch("pg-1", false)}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := testutils.NewTestClientBuilder()
+			for _, pg := range tc.podGangs {
+				builder = builder.WithObjects(pg)
+			}
+			cl := builder.Build()
+
+			actual, err := AllPodGangsAtEpochEverReady(t.Context(), cl, pcsObjectKey, 0, epoch)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+// TestAllPodGangsScheduled verifies the by-name gate: every named PodGang must exist and have
+// LastScheduled set. A named PodGang that does not exist yet, or exists but is unscheduled, holds.
+func TestAllPodGangsScheduled(t *testing.T) {
+	const namespace = "default"
+	podGang := func(name string, scheduled bool) *groveschedulerv1alpha1.PodGang {
+		builder := testutils.NewPodGangBuilder(name, namespace)
+		if scheduled {
+			builder = builder.WithLastScheduled()
+		}
+		return builder.Build()
+	}
+	testCases := []struct {
+		name     string
+		objects  []*groveschedulerv1alpha1.PodGang
+		podGangs []string
+		expected bool
+	}{
+		{"all named PodGangs exist and are scheduled", []*groveschedulerv1alpha1.PodGang{podGang("pg-0", true), podGang("pg-1", true)}, []string{"pg-0", "pg-1"}, true},
+		{"a named PodGang that does not exist yet holds", []*groveschedulerv1alpha1.PodGang{podGang("pg-0", true)}, []string{"pg-0", "pg-1"}, false},
+		{"a named PodGang that exists but is unscheduled holds", []*groveschedulerv1alpha1.PodGang{podGang("pg-0", true), podGang("pg-1", false)}, []string{"pg-0", "pg-1"}, false},
+		{"an empty name set is vacuously scheduled", nil, nil, true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := testutils.NewTestClientBuilder()
+			for _, pg := range tc.objects {
+				builder = builder.WithObjects(pg)
+			}
+			actual, err := AllPodGangsScheduled(t.Context(), builder.Build(), namespace, tc.podGangs)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}

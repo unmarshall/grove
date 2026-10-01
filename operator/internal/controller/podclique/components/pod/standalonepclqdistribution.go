@@ -22,10 +22,11 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
-	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/podclique/expectations"
+	pclqexp "github.com/ai-dynamo/grove/operator/internal/controller/podclique/expectations"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/index"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/go-logr/logr"
@@ -41,6 +42,18 @@ import (
 // PodGangs the PodGangMap assigns them to. It first repairs any non-terminating pod missing the
 // grove.io/podgang label, then reconciles per PodGang against the PodGangMap counts.
 func (r _resource) reconcileStandalonePCLQDistribution(ctx context.Context, logger logr.Logger, ss *syncSnapshot) error {
+	// During a coherent update the new-generation anchor must be filled with new-revision pods. The
+	// PodGangMap opens that anchor as soon as the sub-step commits, which can precede this controller
+	// observing the PCS controller's PodClique template update. Creating now would build the anchor's pod
+	// from the stale (old) PodClique and land an old-revision pod that never self-heals, since distribution
+	// is count-driven. Wait until this PodClique's own template hash catches up to the expected hash. This
+	// is scoped to the replica under update, so a replica frozen on its old revision is unaffected.
+	if componentutils.IsPCSReplicaUnderCoherentUpdate(ss.pcs, ss.pcsReplicaIndex) &&
+		ss.pclq.Labels[apicommon.LabelPodTemplateHash] != ss.expectedPodTemplateHash {
+		return groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
+			fmt.Sprintf("PodClique %v template not yet propagated for its coherent update, re-queueing", client.ObjectKeyFromObject(ss.pclq)))
+	}
+
 	desiredCountByPodGang := buildDesiredCountByPodGang(ss)
 	// An empty desired count means the PodGangMap carries no anchor entry for this PodClique. When the
 	// PodClique still wants replicas this is a transient state, the PodGangMap has not authored or
@@ -98,6 +111,28 @@ func buildDesiredCountByPodGang(ss *syncSnapshot) map[string]int32 {
 		desiredCountByPodGang[apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)] = count
 	}
 	return desiredCountByPodGang
+}
+
+// currentGenerationPodGangNames returns the anchor PodGang names of this replica whose PodGangMap entry is
+// at the PodCliqueSet current generation and carries this standalone PodClique. During a coherent update
+// these are the current-revision anchors this controller may fill. It is empty when the PodGangMap or the
+// current generation hash is not known yet.
+func currentGenerationPodGangNames(ss *syncSnapshot) sets.Set[string] {
+	names := sets.New[string]()
+	if ss.pgm == nil || ss.pcs.Status.CurrentGenerationHash == nil {
+		return names
+	}
+	currentHash := *ss.pcs.Status.CurrentGenerationHash
+	rnr := apicommon.ResourceNameReplica{Name: ss.pcs.Name, Replica: ss.pcsReplicaIndex}
+	for _, entry := range ss.pgm.Spec.Entries {
+		if entry.PodCliqueSetGenerationHash != currentHash {
+			continue
+		}
+		if count, ok := entry.PodCliques[ss.cliqueName]; ok && count > 0 {
+			names.Insert(apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch))
+		}
+	}
+	return names
 }
 
 // podGangPods holds a PodGang's pods split by termination state. nonTerminating pods count towards
@@ -178,6 +213,16 @@ func sumCounts(countByPodGang map[string]int32) int32 {
 // is pods to delete. PodGangs whose desired and reconciled counts already match are omitted.
 func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPodGang map[string]int32, podsByPodGang map[string]podGangPods) (map[string]int32, error) {
 	countDeltaByPodGang := make(map[string]int32)
+	// During a coherent update the replica under update runs old-generation and current-generation anchor
+	// PodGangs at once. A new-revision Pod must never be created on an old-generation PodGang, since this
+	// controller only builds Pods at the current revision. So creation is suppressed on old-generation
+	// PodGangs and the coherent engine reclaims the lost slot onto the current generation instead. Deletion
+	// still runs, so the drain keeps pacing take-down.
+	suppressOldGenerationCreates := componentutils.IsPCSReplicaUnderCoherentUpdate(ss.pcs, ss.pcsReplicaIndex)
+	var currentGenerationPodGangs sets.Set[string]
+	if suppressOldGenerationCreates {
+		currentGenerationPodGangs = currentGenerationPodGangNames(ss)
+	}
 	// Iterate the union of PodGangs that are desired and PodGangs that have live pods. A PodGang with a
 	// desired count but no live pods yet still needs creation, and a PodGang with live pods but no
 	// desired count (its entry was removed) still needs deletion.
@@ -187,9 +232,15 @@ func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPo
 		if err != nil {
 			return nil, err
 		}
-		if delta := desiredCountByPodGang[podGangName] - reconciledCount; delta != 0 {
-			countDeltaByPodGang[podGangName] = delta
+		delta := desiredCountByPodGang[podGangName] - reconciledCount
+		if delta == 0 {
+			continue
 		}
+		// Suppress a create (positive delta) on an old-generation PodGang for the replica under update.
+		if delta > 0 && suppressOldGenerationCreates && !currentGenerationPodGangs.Has(podGangName) {
+			continue
+		}
+		countDeltaByPodGang[podGangName] = delta
 	}
 	return countDeltaByPodGang, nil
 }
@@ -202,7 +253,7 @@ func (r _resource) computeCountDeltaByPodGang(ss *syncSnapshot, desiredCountByPo
 // keeps it in the delete expectations, so it is also subtracted. The two contributions cancel, so a
 // terminating pod has no net effect on the count and is not subtracted twice.
 func (r _resource) reconcileLivePodCountWithExpectations(pclqObjMeta metav1.ObjectMeta, podGangName string, group podGangPods) (int32, error) {
-	key, err := componentutils.PodGangScopedExpectationsStoreKey(pclqObjMeta, podGangName)
+	key, err := pclqexp.PodGangScopedExpectationsStoreKey(pclqObjMeta, podGangName)
 	if err != nil {
 		return 0, err
 	}
@@ -270,7 +321,7 @@ func (r _resource) buildPerPodGangCreationTasks(logger logr.Logger, ss *syncSnap
 	tasks := make([]utils.Task, 0, totalToCreate)
 	taskIndex := 0
 	for _, podGangName := range orderedPodGangNames {
-		expectationsKey, err := componentutils.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, podGangName)
+		expectationsKey, err := pclqexp.PodGangScopedExpectationsStoreKey(ss.pclq.ObjectMeta, podGangName)
 		if err != nil {
 			return nil, err
 		}

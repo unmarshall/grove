@@ -255,6 +255,7 @@ func TestSyncAdvancesGenerationHashForAllReplicas(t *testing.T) {
 	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
 		WithReplicas(2).
 		WithStandaloneCliqueReplicas("clq-a", 1).
+		WithUpdateStrategy(&grovecorev1alpha1.PodCliqueSetUpdateStrategy{Type: grovecorev1alpha1.RollingRecreateStrategy}).
 		WithPodCliqueSetGenerationHash(ptr.To("new-hash")).
 		WithUpdateProgress(&grovecorev1alpha1.PodCliqueSetUpdateProgress{
 			CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 0}},

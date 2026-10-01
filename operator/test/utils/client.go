@@ -20,8 +20,10 @@ import (
 	groveclientscheme "github.com/ai-dynamo/grove/operator/internal/client"
 
 	"github.com/samber/lo"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -161,6 +163,19 @@ func (b *TestClientBuilder) WithStatusSubresource(objs ...client.Object) *TestCl
 func (b *TestClientBuilder) WithIndex(obj client.Object, field string, extractValue client.IndexerFunc) *TestClientBuilder {
 	b.delegatingClientBuilder.WithIndex(obj, field, extractValue)
 	return b
+}
+
+// WithPodControllerUIDIndex registers the Pod field index that component.GetPCLQPods queries by controller
+// UID, so a fake client List with that field selector returns matching Pods instead of erroring. It mirrors
+// the index the manager registers in production.
+func (b *TestClientBuilder) WithPodControllerUIDIndex() *TestClientBuilder {
+	return b.WithIndex(&corev1.Pod{}, ".metadata.controller.uid", func(obj client.Object) []string {
+		controllerRef := metav1.GetControllerOfNoCopy(obj)
+		if controllerRef == nil {
+			return nil
+		}
+		return []string{string(controllerRef.UID)}
+	})
 }
 
 // RecordErrorForObjects records an error for a specific client.Client method and object keys.

@@ -131,7 +131,7 @@ func mutateReplicas(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pcs
 		updatedPCLQs += countPCSGReplicaUpdatedPCLQs(currentPCSGenerationHash, expectedPCLQPodTemplateHashes, pclqs)
 	}
 	totalPCLQs = pcsg.Spec.Replicas * cliqueNamesPerReplica
-	logger.Info("Mutating PodCliqueScalingGroup replicas",
+	logger.V(1).Info("Mutating PodCliqueScalingGroup replicas",
 		"pcsg", client.ObjectKeyFromObject(pcsg),
 		"scheduledReplicas", scheduledReplicas, "availableReplicas", availableReplicas, "updatedReplicas", updatedReplicas,
 		"updatedPCLQs", updatedPCLQs, "totalPCLQs", totalPCLQs)
@@ -267,6 +267,18 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 		}
 	}
 
+	// A PodCliqueScalingGroup intentionally scaled to zero has no replicas to keep available, so it is not
+	// in breach. A non-zero replica count below MinAvailable, or a loss of replicas below MinAvailable at
+	// an unchanged replica count, is still a breach.
+	if pcsg.Spec.Replicas == 0 {
+		return metav1.Condition{
+			Type:    constants.ConditionTypeMinAvailableBreached,
+			Status:  metav1.ConditionFalse,
+			Reason:  constants.ConditionReasonSufficientAvailablePCSGReplicas,
+			Message: "PodCliqueScalingGroup is scaled to zero, so MinAvailable is not breached",
+		}
+	}
+
 	// The apiserver defaults Spec.MinAvailable to 1 (+kubebuilder:default), but objects
 	// persisted under an older CRD schema can still read back nil until their next write —
 	// dereferencing unguarded would crash-loop the operator off a single legacy object.
@@ -388,11 +400,11 @@ func mutateSelector(pcs *grovecorev1alpha1.PodCliqueSet, pcsg *grovecorev1alpha1
 func mutateCurrentPodCliqueSetGenerationHash(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, existingPCLQs []grovecorev1alpha1.PodClique) {
 	pclqFQNsPendingUpdate := componentutils.GetPCLQsInPCSGPendingUpdate(pcs, pcsg, existingPCLQs)
 	if len(pclqFQNsPendingUpdate) > 0 {
-		logger.Info("Found PodCliques associated to PodCliqueScalingGroup pending update", "pclqFQNsPendingUpdate", pclqFQNsPendingUpdate)
+		logger.V(1).Info("Found PodCliques associated to PodCliqueScalingGroup pending update", "pclqFQNsPendingUpdate", pclqFQNsPendingUpdate)
 		return
 	}
 	if componentutils.IsPCSGUpdateInProgress(pcsg) {
-		logger.Info("PodCliqueScalingGroup is currently updating, cannot set PodCliqueSet CurrentGenerationHash yet")
+		logger.V(1).Info("PodCliqueScalingGroup is currently updating, cannot set PodCliqueSet CurrentGenerationHash yet")
 		return
 	}
 	if pcs.Status.CurrentGenerationHash == nil {

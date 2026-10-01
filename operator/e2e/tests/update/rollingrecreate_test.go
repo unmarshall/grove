@@ -1356,3 +1356,40 @@ func Test_RU26_CorrectiveUpdateReplacesUnschedulablePods(t *testing.T) {
 		})
 	}
 }
+
+// Test_RU27_RollingRecreateWithComponentScaledToZero verifies that a RollingRecreate update completes when
+// the updated PodClique is scaled to zero. It has no pods to roll, so the update advances its resource to
+// the new revision and completes, and a later scale-out launches new-revision pods. This exercises the
+// zero-replica completion path on the RollingRecreate strategy.
+func Test_RU27_RollingRecreateWithComponentScaledToZero(t *testing.T) {
+	tests.Logger.Info("1. Deploy workload1 (RollingRecreate) and verify 10 pods")
+	tc, cleanup, _ := setupTest(t, testConfig{
+		workloadName: "workload1",
+		workloadYAML: "../../yaml/workload1.yaml",
+		workerNodes:  12,
+		expectedPods: 10,
+	})
+	defer cleanup()
+
+	tests.Logger.Info("2. Scale the standalone pc-a to 0")
+	tc.ScalePodCliqueAndWait("workload1-0-pc-a", 0, 8, 0)
+
+	tests.Logger.Info("3. Trigger a RollingRecreate update of pc-a while it has no pods")
+	if err := triggerPodCliqueUpdate(tc, "pc-a"); err != nil {
+		t.Fatalf("failed to trigger update of pc-a: %v", err)
+	}
+
+	tests.Logger.Info("4. The update completes and converges even though pc-a has no pods to roll")
+	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
+		t.Fatalf("rolling update did not complete: %v", err)
+	}
+	assertUpdateInProgressCleared(tc)
+	assertGenerationHashConverged(tc)
+
+	tests.Logger.Info("5. Scale pc-a back to 2 and verify new-revision pods launch")
+	tc.ScalePodCliqueAndWait("workload1-0-pc-a", 2, 10, 0)
+	assertGenerationHashConverged(tc)
+	if err := tc.WaitForPods(10); err != nil {
+		t.Fatalf("pods did not become Ready after scaling pc-a back up: %v", err)
+	}
+}

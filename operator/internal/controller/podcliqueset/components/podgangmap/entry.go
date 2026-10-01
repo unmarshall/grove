@@ -21,18 +21,28 @@ import (
 	"strconv"
 
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 )
 
 // newPodGangEntry constructs a fresh PodGangEntry setting epoch, PodCliqueSet generation hash and
-// dependsOn. The caller sets Role, and AnchorIndex on an anchor entry, after this returns. An entry
-// carries no name or labels. The PodGang materializer derives the name and stamps the epoch and role
-// labels.
+// dependsOn. The caller sets Role after this returns. An entry carries no name or labels. The PodGang
+// materializer derives the name and stamps the epoch and role labels.
 func newPodGangEntry(epoch, pcsGenerationHash string, dependsOn []string) grovecorev1alpha1.PodGangEntry {
 	return grovecorev1alpha1.PodGangEntry{
 		Epoch:                      epoch,
 		PodCliqueSetGenerationHash: pcsGenerationHash,
 		DependsOn:                  dependsOn,
 	}
+}
+
+// entryEpochNanos parses the entry epoch as unix nanos. It returns an error when the epoch is not
+// numeric, a contract violation since Grove is the sole writer of epochs.
+func entryEpochNanos(entry grovecorev1alpha1.PodGangEntry) (int64, error) {
+	epochNanos, err := strconv.ParseInt(entry.Epoch, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("PodGangMap %s entry has a non-numeric epoch %q: %w", entry.Role, entry.Epoch, err)
+	}
+	return epochNanos, nil
 }
 
 // sortEntriesByEpoch sorts entries in place by epoch ascending. Epoch is a unix-nano string compared
@@ -93,7 +103,7 @@ func advanceEntriesGenerationHash(entries []grovecorev1alpha1.PodGangEntry, pcsC
 // entries, so a PodGangMap deliberately holds entries for more than one generation hash at once.
 // Advancing all entries to the current hash would erase that distinction.
 func shouldAdvanceEntriesGenerationHash(pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry) bool {
-	if pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovecorev1alpha1.CoherentStrategy {
+	if componentutils.IsCoherentStrategy(pcs) {
 		return false
 	}
 	currentHash := *pcs.Status.CurrentGenerationHash
