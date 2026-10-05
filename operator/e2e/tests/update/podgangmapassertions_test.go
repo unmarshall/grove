@@ -63,8 +63,8 @@ func assertPodGangMapSingleGeneration(t *testing.T, tc *testctx.TestContext) {
 	}
 }
 
-// entryByRole returns the single entry with the given role, failing if there is not exactly one.
-func entryByRole(t *testing.T, entries []grovev1alpha1.PodGangEntry, role grovev1alpha1.PodGangEntryRole) grovev1alpha1.PodGangEntry {
+// requireSingleEntryByRole returns the single entry with the given role, failing if there is not exactly one.
+func requireSingleEntryByRole(t *testing.T, entries []grovev1alpha1.PodGangEntry, role grovev1alpha1.PodGangEntryRole) grovev1alpha1.PodGangEntry {
 	t.Helper()
 	var found []grovev1alpha1.PodGangEntry
 	for i := range entries {
@@ -174,18 +174,18 @@ func assertReplicaPodGangMap(t *testing.T, entries []grovev1alpha1.PodGangEntry,
 	}
 	assertEntryRoles(t, entries, wantRoles...)
 
-	anchor := entryByRole(t, entries, grovev1alpha1.PodGangEntryRoleAnchor)
+	anchor := requireSingleEntryByRole(t, entries, grovev1alpha1.PodGangEntryRoleAnchor)
 	assertStandalonePCLQPodCounts(t, anchor, want.standalonePodCounts)
 	assertPodGangEntryPCSGIndices(t, anchor, want.pcsgName, want.anchorIndices)
 	assertPodGangEntryDependsOn(t, anchor, nil)
 
 	if want.tailIndices != nil {
-		tail := entryByRole(t, entries, grovev1alpha1.PodGangEntryRoleTail)
+		tail := requireSingleEntryByRole(t, entries, grovev1alpha1.PodGangEntryRoleTail)
 		assertPodGangEntryPCSGIndices(t, tail, want.pcsgName, want.tailIndices)
 		assertPodGangEntryDependsOn(t, tail, []string{anchor.Epoch})
 	}
 
-	scaleOut := entryByRole(t, entries, grovev1alpha1.PodGangEntryRoleScaleOut)
+	scaleOut := requireSingleEntryByRole(t, entries, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOut, want.pcsgName, want.scaleOutIndices)
 	assertPodGangEntryDependsOn(t, scaleOut, []string{anchor.Epoch})
 }
