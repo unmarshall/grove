@@ -96,12 +96,13 @@ func Test_PCUS1_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent(t *testing.T
 	assert.Equal(t, []int32{0, 1}, allPCSGIndices(entries, "inference"), "the PodGangMap must record the same replicas the PCSG reconciler kept")
 
 	tests.Logger.Info("9. A further coherent update still converges over the reconciled layout")
+	prevHash := getPCSGenerationHash(t, tc)
 	if err := triggerPodCliqueUpdate(tc, "frontend"); err != nil {
 		t.Fatalf("failed to trigger the second update of frontend: %v", err)
 	}
-	// Wait until the second update is observed in progress before waiting for completion, otherwise the
-	// first update's UpdateEndedAt is still set and the completion wait returns on the stale state.
-	if err := waitForOrdinalUpdating(tc, 0); err != nil {
+	// Wait until the second update is observed before waiting for completion, otherwise the first
+	// update's UpdateEndedAt is still set and the completion wait returns on the stale state (issue #863).
+	if err := waitForGenerationHashChange(tc, prevHash); err != nil {
 		t.Fatalf("the second coherent update did not start: %v", err)
 	}
 	if err := waitForRollingUpdateComplete(tc, 1); err != nil {
@@ -109,7 +110,19 @@ func Test_PCUS1_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent(t *testing.T
 	}
 	assertUpdateInProgressCleared(tc)
 	assertGenerationHashConverged(tc)
+	// The second coherent update changes only the standalone frontend, so it opens a fresh anchor holding
+	// both frontend replicas and no PodCliqueScalingGroup indices, while the pre-existing inference-bearing
+	// anchor keeps index 0 (shedding its frontend pods to the new anchor) and the tail keeps index 1. The
+	// map must reconverge to a single generation with the inference index set still exactly {0,1}.
+	newHash = getPCSGenerationHash(t, tc)
+	assertPodGangMapSingleGeneration(t, tc)
 	entries = getPodGangMapEntries(t, tc, 0)
+	assertCoherentAnchorCompositions(t, entries, newHash, "inference", []coherentAnchor{
+		{standalone: map[string]int32{"frontend": 0}, pcsgIndices: []int32{0}},
+		{standalone: map[string]int32{"frontend": 2}, pcsgIndices: nil},
+	})
+	assert.Equal(t, []int32{1}, newHashTailPCSGIndices(entries, newHash, "inference"), "the tail must keep inference index 1")
+	assert.Empty(t, pcsgIndicesForRole(entries, grovev1alpha1.PodGangEntryRoleScaleOut, "inference"), "the scale-out entry must carry no inference indices after scaling back in")
 	assert.Equal(t, []int32{0, 1}, allPCSGIndices(entries, "inference"), "the second update must preserve the reconciled inference replicas")
 }
 

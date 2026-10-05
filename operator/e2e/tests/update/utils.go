@@ -521,6 +521,34 @@ func waitForRollingUpdate(tc *testctx.TestContext, expectedReplicas int32) <-cha
 	return errCh
 }
 
+// waitForGenerationHashChange waits until the PodCliqueSet's Status.CurrentGenerationHash differs from
+// previousHash, signaling that the operator has observed a newly triggered update. It is a stable signal
+// for "a new update started", unlike the transient CurrentlyUpdating state which a poll can miss when a
+// roll completes within one interval. Uses tc.Workload.Name as the PCS name and tc.Timeout for the timeout.
+func waitForGenerationHashChange(tc *testctx.TestContext, previousHash string) error {
+	pcsName := tc.Workload.Name
+
+	pollCount := 0
+	fetchPCS := waiter.FetchByName(pcsName, k8sclient.Getter[*grovev1alpha1.PodCliqueSet](tc.Client, tc.Namespace))
+	predicate := waiter.Predicate[*grovev1alpha1.PodCliqueSet](func(pcs *grovev1alpha1.PodCliqueSet) bool {
+		pollCount++
+		if pcs == nil || pcs.Status.CurrentGenerationHash == nil {
+			// A transient cache miss returns a nil object. Keep polling.
+			return false
+		}
+		if *pcs.Status.CurrentGenerationHash != previousHash {
+			tests.Logger.Debugf("[waitForGenerationHashChange] new generation hash %s observed after %d polls",
+				*pcs.Status.CurrentGenerationHash, pollCount)
+			return true
+		}
+		return false
+	})
+	w := waiter.New[*grovev1alpha1.PodCliqueSet]().
+		WithTimeout(tc.Timeout).
+		WithInterval(tc.Interval)
+	return w.WaitUntil(tc.Ctx, fetchPCS, predicate)
+}
+
 // waitForOrdinalUpdating waits for a specific ordinal to start being updated during rolling update.
 // Uses tc.Workload.Name as the PCS name and tc.Timeout for the timeout (use a modified tc if a different timeout is needed).
 func waitForOrdinalUpdating(tc *testctx.TestContext, ordinal int32) error {
