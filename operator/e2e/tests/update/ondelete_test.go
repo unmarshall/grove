@@ -720,12 +720,12 @@ func Test_OD10_ScaleOutAfterOnDeleteUpdateNoTail(t *testing.T) {
 	before := getPodGangMapEntries(t, tc, 0)
 	assertEntryRoles(t, before, grovev1alpha1.PodGangEntryRoleAnchor, grovev1alpha1.PodGangEntryRoleScaleOut)
 
-	anchorEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
+	anchorEntry := requireSingleEntryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
 	assertStandalonePCLQPodCounts(t, anchorEntry, map[string]int32{"pc-a": 2})
 	assertPodGangEntryPCSGIndices(t, anchorEntry, "sg-x", []int32{0, 1})
 	assertPodGangEntryDependsOn(t, anchorEntry, nil)
 
-	scaleOutEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
+	scaleOutEntry := requireSingleEntryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", nil)
 	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
 
@@ -751,7 +751,7 @@ func Test_OD10_ScaleOutAfterOnDeleteUpdateNoTail(t *testing.T) {
 	tc.ScalePCSGAcrossAllReplicasAndWait(tc.Workload.Name, "sg-x", 1, 3, 14, 0)
 
 	afterScaleOut := getPodGangMapEntries(t, tc, 0)
-	scaleOutEntry = entryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
+	scaleOutEntry = requireSingleEntryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", []int32{2})
 	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
 
@@ -794,16 +794,16 @@ func Test_OD11_ScaleOutAfterOnDeleteUpdateWithTail(t *testing.T) {
 		grovev1alpha1.PodGangEntryRoleTail,
 		grovev1alpha1.PodGangEntryRoleScaleOut)
 
-	anchorEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
+	anchorEntry := requireSingleEntryByRole(t, before, grovev1alpha1.PodGangEntryRoleAnchor)
 	assertStandalonePCLQPodCounts(t, anchorEntry, map[string]int32{"pc-a": 2})
 	assertPodGangEntryPCSGIndices(t, anchorEntry, "sg-x", []int32{0})
 	assertPodGangEntryDependsOn(t, anchorEntry, nil)
 
-	tailEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleTail)
+	tailEntry := requireSingleEntryByRole(t, before, grovev1alpha1.PodGangEntryRoleTail)
 	assertPodGangEntryPCSGIndices(t, tailEntry, "sg-x", []int32{1})
 	assertPodGangEntryDependsOn(t, tailEntry, []string{anchorEntry.Epoch})
 
-	scaleOutEntry := entryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
+	scaleOutEntry := requireSingleEntryByRole(t, before, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", nil)
 	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
 
@@ -827,7 +827,7 @@ func Test_OD11_ScaleOutAfterOnDeleteUpdateWithTail(t *testing.T) {
 	tc.ScalePCSGAcrossAllReplicasAndWait(tc.Workload.Name, "sg-x", 1, 3, 14, 0)
 
 	afterScaleOut := getPodGangMapEntries(t, tc, 0)
-	scaleOutEntry = entryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
+	scaleOutEntry = requireSingleEntryByRole(t, afterScaleOut, grovev1alpha1.PodGangEntryRoleScaleOut)
 	assertPodGangEntryPCSGIndices(t, scaleOutEntry, "sg-x", []int32{2})
 	assertPodGangEntryDependsOn(t, scaleOutEntry, []string{anchorEntry.Epoch})
 

@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	tests "github.com/ai-dynamo/grove/operator/e2e/tests"
+	"github.com/ai-dynamo/grove/operator/e2e/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -122,7 +122,8 @@ func Test_PCUS1_ScaleInAfterCoherentUpdateKeepsPodGangMapConsistent(t *testing.T
 		{standalone: map[string]int32{"frontend": 2}, pcsgIndices: nil},
 	})
 	assert.Equal(t, []int32{1}, newHashTailPCSGIndices(entries, newHash, "inference"), "the tail must keep inference index 1")
-	assert.Empty(t, pcsgIndicesForRole(entries, grovev1alpha1.PodGangEntryRoleScaleOut, "inference"), "the scale-out entry must carry no inference indices after scaling back in")
+	scaleOutEntry := requireSingleEntryByRole(t, entries, grovev1alpha1.PodGangEntryRoleScaleOut)
+	assert.Empty(t, scaleOutEntry.PCSGReplicaIndices, "the scale-out entry must carry no inference indices after scaling back in")
 	assert.Equal(t, []int32{0, 1}, allPCSGIndices(entries, "inference"), "the second update must preserve the reconciled inference replicas")
 }
 
