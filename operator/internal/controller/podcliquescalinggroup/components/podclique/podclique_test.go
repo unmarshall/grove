@@ -972,19 +972,17 @@ func TestComputePendingUpdateWork(t *testing.T) {
 		description         string
 		replicas            int32
 		reps                []testReplica
-		wantOldReady        []int
-		wantOldPending      []int
-		wantOldUnavailable  []int
+		wantOldInfos        []componentutils.PCSGReplicaDisruptionInfo
 		wantExisting        int
 		wantNewNotReady     int
 		wantNumUpdatedReady int
 	}{
-		{"all replicas old and ready", 3, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldReadyReplica(2)}, []int{0, 1, 2}, nil, nil, 3, 0, 0},
-		{"mixed updated, old ready and old pending", 3, []testReplica{updatedReadyReplica(0), oldReadyReplica(1), oldPendingReplica(2)}, []int{1}, []int{2}, nil, 3, 0, 1},
-		{"terminating replica is skipped", 2, []testReplica{updatedReadyReplica(0), terminatingReplica(1)}, nil, nil, nil, 1, 0, 1},
-		{"old unavailable replica", 1, []testReplica{oldUnavailableReplica(0)}, nil, nil, []int{0}, 1, 0, 0},
-		{"all replicas updated and ready", 2, []testReplica{updatedReadyReplica(0), updatedReadyReplica(1)}, nil, nil, nil, 2, 0, 2},
-		{"new configuration replica not yet ready", 1, []testReplica{updatedNotReadyReplica(0)}, nil, nil, nil, 1, 1, 0},
+		{"all replicas old and ready", 3, []testReplica{oldReadyReplica(0), oldReadyReplica(1), oldReadyReplica(2)}, []componentutils.PCSGReplicaDisruptionInfo{{Index: 0, State: componentutils.PCSGReplicaStateReady}, {Index: 1, State: componentutils.PCSGReplicaStateReady}, {Index: 2, State: componentutils.PCSGReplicaStateReady}}, 3, 0, 0},
+		{"mixed updated, old ready and old pending", 3, []testReplica{updatedReadyReplica(0), oldReadyReplica(1), oldPendingReplica(2)}, []componentutils.PCSGReplicaDisruptionInfo{{Index: 1, State: componentutils.PCSGReplicaStateReady}, {Index: 2, State: componentutils.PCSGReplicaStatePending}}, 3, 0, 1},
+		{"terminating replica is skipped", 2, []testReplica{updatedReadyReplica(0), terminatingReplica(1)}, nil, 1, 0, 1},
+		{"old unavailable replica", 1, []testReplica{oldUnavailableReplica(0)}, []componentutils.PCSGReplicaDisruptionInfo{{Index: 0, State: componentutils.PCSGReplicaStateUnavailable}}, 1, 0, 0},
+		{"all replicas updated and ready", 2, []testReplica{updatedReadyReplica(0), updatedReadyReplica(1)}, nil, 2, 0, 2},
+		{"new configuration replica not yet ready", 1, []testReplica{updatedNotReadyReplica(0)}, nil, 1, 1, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
@@ -992,9 +990,7 @@ func TestComputePendingUpdateWork(t *testing.T) {
 			r := _resource{expectationsStore: expect.NewExpectationsStore()}
 			uw, err := r.computePendingUpdateWork(sc)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantOldReady, uw.oldReadyReplicaIndices, "oldReadyReplicaIndices")
-			assert.Equal(t, tt.wantOldPending, uw.oldPendingReplicaIndices, "oldPendingReplicaIndices")
-			assert.Equal(t, tt.wantOldUnavailable, uw.oldUnavailableReplicaIndices, "oldUnavailableReplicaIndices")
+			assert.Equal(t, tt.wantOldInfos, uw.oldReplicaDisruptionInfos, "oldReplicaDisruptionInfos")
 			assert.Equal(t, tt.wantExisting, uw.existingReplicas, "existingReplicas")
 			assert.Equal(t, tt.wantNewNotReady, uw.newNotReadyReplicas, "newNotReadyReplicas")
 			assert.Equal(t, tt.wantNumUpdatedReady, uw.numUpdatedReadyReplicas, "numUpdatedReadyReplicas")
@@ -1015,7 +1011,7 @@ func TestComputePendingUpdateWorkSkipsReplicaWithDeleteExpectation(t *testing.T)
 
 	uw, err := r.computePendingUpdateWork(sc)
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2}, uw.oldReadyReplicaIndices, "replica 0 with a pending delete expectation must not be a disruption candidate")
+	assert.Equal(t, []componentutils.PCSGReplicaDisruptionInfo{{Index: 1, State: componentutils.PCSGReplicaStateReady}, {Index: 2, State: componentutils.PCSGReplicaStateReady}}, uw.oldReplicaDisruptionInfos, "replica 0 with a pending delete expectation must not be a disruption candidate")
 	assert.Equal(t, 2, uw.existingReplicas, "replica 0 with a pending delete expectation must not be counted as an existing replica")
 }
 

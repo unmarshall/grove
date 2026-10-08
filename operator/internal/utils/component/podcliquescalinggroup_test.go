@@ -251,3 +251,105 @@ func TestGroupPCSGsByPCSReplicaIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestComputePCSGReplicaState(t *testing.T) {
+	tests := []struct {
+		name    string
+		members []grovecorev1alpha1.PodClique
+		want    PCSGReplicaState
+	}{
+		{
+			name:    "ready when the only member meets MinAvailable scheduled and ready",
+			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 2)},
+			want:    PCSGReplicaStateReady,
+		},
+		{
+			name:    "pending when the only member is below MinAvailable scheduled",
+			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 1, 1)},
+			want:    PCSGReplicaStatePending,
+		},
+		{
+			name:    "unavailable when the only member is scheduled but below MinAvailable ready",
+			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 1)},
+			want:    PCSGReplicaStateUnavailable,
+		},
+		{
+			name: "pending when any member is below MinAvailable scheduled",
+			members: []grovecorev1alpha1.PodClique{
+				pclqWithMinAvailableAndStatus(2, 2, 2),
+				pclqWithMinAvailableAndStatus(2, 1, 1),
+			},
+			want: PCSGReplicaStatePending,
+		},
+		{
+			name: "unavailable when a scheduled member is below MinAvailable ready and none is pending",
+			members: []grovecorev1alpha1.PodClique{
+				pclqWithMinAvailableAndStatus(2, 2, 2),
+				pclqWithMinAvailableAndStatus(2, 2, 1),
+			},
+			want: PCSGReplicaStateUnavailable,
+		},
+		{
+			name: "ready when every member meets MinAvailable",
+			members: []grovecorev1alpha1.PodClique{
+				pclqWithMinAvailableAndStatus(1, 3, 1),
+				pclqWithMinAvailableAndStatus(2, 2, 2),
+			},
+			want: PCSGReplicaStateReady,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ComputePCSGReplicaState(tc.members))
+		})
+	}
+}
+
+func TestOrderPCSGReplicaIndicesForDisruption(t *testing.T) {
+	tests := []struct {
+		name  string
+		infos []PCSGReplicaDisruptionInfo
+		want  []int
+	}{
+		{
+			name:  "empty input yields no indices",
+			infos: []PCSGReplicaDisruptionInfo{},
+			want:  []int{},
+		},
+		{
+			name: "same state orders by ascending index",
+			infos: []PCSGReplicaDisruptionInfo{
+				{Index: 2, State: PCSGReplicaStateReady},
+				{Index: 0, State: PCSGReplicaStateReady},
+				{Index: 1, State: PCSGReplicaStateReady},
+			},
+			want: []int{0, 1, 2},
+		},
+		{
+			name: "worst-off first across states with ascending index within each state",
+			infos: []PCSGReplicaDisruptionInfo{
+				{Index: 5, State: PCSGReplicaStateReady},
+				{Index: 2, State: PCSGReplicaStatePending},
+				{Index: 4, State: PCSGReplicaStateUnavailable},
+				{Index: 1, State: PCSGReplicaStateReady},
+				{Index: 3, State: PCSGReplicaStatePending},
+				{Index: 0, State: PCSGReplicaStateUnavailable},
+			},
+			want: []int{2, 3, 0, 4, 1, 5},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, OrderPCSGReplicaIndicesForDisruption(tc.infos))
+		})
+	}
+}
+
+// pclqWithMinAvailableAndStatus builds a minimal PodClique carrying only the MinAvailable spec and the
+// scheduled and ready status counts that ComputePCSGReplicaState reads.
+func pclqWithMinAvailableAndStatus(minAvailable, scheduled, ready int32) grovecorev1alpha1.PodClique {
+	return grovecorev1alpha1.PodClique{
+		Spec:   grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(minAvailable)},
+		Status: grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: scheduled, ReadyReplicas: ready},
+	}
+}

@@ -195,3 +195,61 @@ func GetPodCliqueFQNsForPCSG(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) []st
 	}
 	return pclqFQNsInPCSG
 }
+
+// PCSGReplicaState is the health of a PodCliqueScalingGroup replica derived from its member PodCliques.
+type PCSGReplicaState int
+
+const (
+	// PCSGReplicaStatePending marks a replica with a member PodClique below MinAvailable scheduled replicas.
+	PCSGReplicaStatePending PCSGReplicaState = iota
+	// PCSGReplicaStateUnavailable marks a scheduled replica with a member PodClique below MinAvailable ready replicas.
+	PCSGReplicaStateUnavailable
+	// PCSGReplicaStateReady marks a replica whose every member PodClique has at least MinAvailable ready replicas.
+	PCSGReplicaStateReady
+)
+
+// PCSGReplicaDisruptionInfo is the per-replica input to disruption ordering. It currently carries only the
+// replica index and its health state. It is a struct rather than a bare state map so further ordering
+// signals can be added later without changing the ordering function signature, for example a deletion
+// cost to steer selection among equally healthy replicas. Callers populate only the fields they have and
+// the ordering uses whatever is present.
+type PCSGReplicaDisruptionInfo struct {
+	// Index is the replica index.
+	Index int
+	// State is the replica health, the primary ordering key.
+	State PCSGReplicaState
+}
+
+// ComputePCSGReplicaState classifies one PodCliqueScalingGroup replica from its member PodCliques. A replica is
+// pending when any member is below MinAvailable scheduled, unavailable when any member is below
+// MinAvailable ready, otherwise ready.
+func ComputePCSGReplicaState(memberPCLQs []grovecorev1alpha1.PodClique) PCSGReplicaState {
+	for _, pclq := range memberPCLQs {
+		if pclq.Status.ScheduledReplicas < *pclq.Spec.MinAvailable {
+			return PCSGReplicaStatePending
+		}
+		if pclq.Status.ReadyReplicas < *pclq.Spec.MinAvailable {
+			return PCSGReplicaStateUnavailable
+		}
+	}
+	return PCSGReplicaStateReady
+}
+
+// OrderPCSGReplicaIndicesForDisruption returns the replica indices ordered by disruption preference, worst-off
+// health first (pending, then unavailable, then ready), and ascending by index within the same health
+// state so the order is deterministic. As PCSGReplicaDisruptionInfo grows new ordering signals, this function
+// applies them within a health state, keeping health the primary key.
+func OrderPCSGReplicaIndicesForDisruption(infos []PCSGReplicaDisruptionInfo) []int {
+	ordered := slices.Clone(infos)
+	slices.SortFunc(ordered, func(a, b PCSGReplicaDisruptionInfo) int {
+		if a.State != b.State {
+			return int(a.State) - int(b.State)
+		}
+		return a.Index - b.Index
+	})
+	indices := make([]int, len(ordered))
+	for i := range ordered {
+		indices[i] = ordered[i].Index
+	}
+	return indices
+}
