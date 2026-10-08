@@ -375,14 +375,32 @@ func (p *subStepPlanner) headroomByComponent() map[string]int32 {
 	return headroom
 }
 
+// cliqueAndEpochKey identifies one standalone PodClique on one anchor PodGang epoch.
+type cliqueAndEpochKey struct {
+	clique string
+	epoch  string
+}
+
+// anchorLivePods holds the live (non-terminating) Pod counts of one standalone PodClique on one anchor
+// PodGang, as observed from the Pod list.
+type anchorLivePods struct {
+	// running is the count of non-terminating Pods backing this anchor's slots.
+	running int32
+	// notReady is how many of those running Pods are not Ready.
+	notReady int32
+}
+
 // standalonePCLQPodCounts holds the per-PodClique counts the coherent update engine derives from one live
 // Pod list of each in-scope standalone PodClique of the replica under update.
 type standalonePCLQPodCounts struct {
-	// runningByCliqueAndAnchor is the running (not terminating) Pod count on each anchor PodGang, keyed by
-	// clique name then anchor epoch. It drives missing old-version Pod detection and the Phase-1 reclaim.
-	runningByCliqueAndAnchor map[string]map[string]int32
-	// nonTerminatingByPCLQ is the count of non-terminating Pods per clique. It is the existing figure the
-	// count-anchored MaxUnavailable budget uses.
+	// livePodCountsByAnchor holds the live (running and not-Ready) Pod counts of each standalone PodClique on
+	// each anchor PodGang, keyed by clique name and anchor epoch. Phase 1 of the drain reads running to find
+	// missing old-version slots, and Phase 2a reads notReady to take unavailable Pods down before Ready ones.
+	livePodCountsByAnchor map[cliqueAndEpochKey]anchorLivePods
+	// nonTerminatingByPCLQ is the count of non-terminating Pods of each in-scope standalone PodClique, keyed
+	// by clique name. It holds an entry for every in-scope standalone PodClique and only those, so its key
+	// set is the in-scope set that numMissingOldVersionPodsByStandalonePCLQ filters on. It is the existing
+	// figure the count-anchored MaxUnavailable budget uses.
 	nonTerminatingByPCLQ map[string]int32
 	// newNotReadyByPCLQ is the count of non-terminating, not-Ready Pods on current-hash anchors per clique.
 	// It is the in-flight-replacement figure the count-anchored budget subtracts.
@@ -392,8 +410,9 @@ type standalonePCLQPodCounts struct {
 // gatherStandalonePodCounts lists the Pods of every in-scope standalone PodClique of the replica under
 // update once and returns the counts the coherent engine derives from that single list.
 //
-// runningByCliqueAndAnchor buckets running (not terminating) Pods by the grove.io/podgang label resolved to
-// an anchor epoch via EpochByAnchorPodGangName, for missing old-version detection and the Phase-1 reclaim.
+// livePodCountsByAnchor buckets running (not terminating) Pods by the grove.io/podgang label resolved to an
+// anchor epoch via EpochByAnchorPodGangName, recording the running count and how many are not Ready, for
+// missing old-version detection, the Phase-1 reclaim, and the not-Ready-first drain.
 // nonTerminatingByPCLQ is the total non-terminating Pod count per clique, the budget existing figure.
 // newNotReadyByPCLQ counts non-terminating, not-Ready Pods sitting on a current-hash anchor, the budget
 // in-flight-replacement figure. An unscheduled new Pod not yet on its anchor is not counted, which is safe
@@ -409,9 +428,9 @@ func (r _resource) gatherStandalonePodCounts(ctx context.Context, pcs *grovecore
 	currentHashAnchorEpochs := currentHashAnchorEpochSet(entries, *pcs.Status.CurrentGenerationHash)
 
 	counts := standalonePCLQPodCounts{
-		runningByCliqueAndAnchor: make(map[string]map[string]int32, len(standalonePCLQByComponent)),
-		nonTerminatingByPCLQ:     make(map[string]int32, len(standalonePCLQByComponent)),
-		newNotReadyByPCLQ:        make(map[string]int32, len(standalonePCLQByComponent)),
+		livePodCountsByAnchor: make(map[cliqueAndEpochKey]anchorLivePods),
+		nonTerminatingByPCLQ:  make(map[string]int32, len(standalonePCLQByComponent)),
+		newNotReadyByPCLQ:     make(map[string]int32, len(standalonePCLQByComponent)),
 	}
 	for cliqueName, pclq := range standalonePCLQByComponent {
 		pods, err := componentutils.GetPCLQPods(ctx, r.client, pcs.Name, &pclq)
@@ -419,7 +438,6 @@ func (r _resource) gatherStandalonePodCounts(ctx context.Context, pcs *grovecore
 			return standalonePCLQPodCounts{}, groveerr.WrapError(err, errCodeListPods, component.OperationSync,
 				fmt.Sprintf("could not list Pods for standalone PodClique %q under coherent update", cliqueName))
 		}
-		runningPodsByAnchor := make(map[string]int32)
 		var nonTerminating, newNotReady int32
 		for _, pod := range pods {
 			if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
@@ -427,15 +445,24 @@ func (r _resource) gatherStandalonePodCounts(ctx context.Context, pcs *grovecore
 			}
 			nonTerminating++
 			podReady := k8sutils.IsPodReady(pod)
-			// A Pod not on an anchor of this replica resolves to no epoch and is skipped.
-			if epoch, onAnchor := epochByAnchorPodGangName[pod.Labels[apicommon.LabelPodGang]]; onAnchor {
-				runningPodsByAnchor[epoch]++
-				if !podReady && currentHashAnchorEpochs.Has(epoch) {
+			// A Pod whose PodGang is not one of this replica's current anchor entries resolves to no epoch and
+			// is skipped. This happens briefly for a Pod left on an anchor the plan already pruned, before the
+			// PodClique reconciler issues its deletion.
+			epoch, onKnownAnchor := epochByAnchorPodGangName[pod.Labels[apicommon.LabelPodGang]]
+			if !onKnownAnchor {
+				continue
+			}
+			key := cliqueAndEpochKey{clique: cliqueName, epoch: epoch}
+			livePods := counts.livePodCountsByAnchor[key]
+			livePods.running++
+			if !podReady {
+				livePods.notReady++
+				if currentHashAnchorEpochs.Has(epoch) {
 					newNotReady++
 				}
 			}
+			counts.livePodCountsByAnchor[key] = livePods
 		}
-		counts.runningByCliqueAndAnchor[cliqueName] = runningPodsByAnchor
 		counts.nonTerminatingByPCLQ[cliqueName] = nonTerminating
 		counts.newNotReadyByPCLQ[cliqueName] = newNotReady
 	}
@@ -542,20 +569,20 @@ func allPodCliquesTerminating(members []grovecorev1alpha1.PodClique) bool {
 //
 // Example. An old-version anchor assigns 3 Pods to a clique but only 2 are running because 1 died. That
 // anchor contributes 1 missing old-version Pod. The counts are summed over all old-version anchors.
-func numMissingOldVersionPodsByStandalonePCLQ(entries []grovecorev1alpha1.PodGangEntry, currentHash string, runningPodsByCliqueAndAnchor map[string]map[string]int32) map[string]int32 {
+func numMissingOldVersionPodsByStandalonePCLQ(entries []grovecorev1alpha1.PodGangEntry, currentHash string, counts standalonePCLQPodCounts) map[string]int32 {
 	missingOldVersionPodsByClique := make(map[string]int32)
 	for i := range entries {
 		entry := entries[i]
 		if entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor || entry.PodCliqueSetGenerationHash == currentHash {
 			continue
 		}
-		for cliqueName, anchorPodCount := range entry.PodCliques {
-			runningPodsByAnchor, inScope := runningPodsByCliqueAndAnchor[cliqueName]
-			if !inScope {
+		for cliqueName, committedPodCount := range entry.PodCliques {
+			// Only in-scope standalone PodCliques are counted. Presence in nonTerminatingByPCLQ marks scope.
+			if _, inScope := counts.nonTerminatingByPCLQ[cliqueName]; !inScope {
 				continue
 			}
-			if runningPods := runningPodsByAnchor[entry.Epoch]; anchorPodCount > runningPods {
-				missingOldVersionPodsByClique[cliqueName] += anchorPodCount - runningPods
+			if running := counts.livePodCountsByAnchor[cliqueAndEpochKey{clique: cliqueName, epoch: entry.Epoch}].running; committedPodCount > running {
+				missingOldVersionPodsByClique[cliqueName] += committedPodCount - running
 			}
 		}
 	}

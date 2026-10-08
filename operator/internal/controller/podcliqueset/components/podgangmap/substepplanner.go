@@ -152,11 +152,12 @@ type subStepPlanner struct {
 	// by PCSG component name. The count-anchored budget and the drain ordering both read it.
 	pcsgReplicaInfos map[string][]pcsgReplicaInfo
 	// pclqPodCounts are the standalone Pod counts gathered once from the live Pod list this reconcile. Its
-	// runningByCliqueAndAnchor drives the Phase-1 reclaim and missing old-version detection, and its
-	// nonTerminatingByPCLQ and newNotReadyByPCLQ feed the count-anchored MaxUnavailable budget.
+	// livePodCountsByAnchor drives the Phase-1 reclaim, missing old-version detection, and the
+	// not-Ready-first drain, and its nonTerminatingByPCLQ and newNotReadyByPCLQ feed the count-anchored
+	// MaxUnavailable budget.
 	pclqPodCounts standalonePCLQPodCounts
 	// numMissingOldVersionPodsByPCLQ is the count of missing old-version Pods per in-scope standalone
-	// PodClique, derived at construction from the committed entries and pclqPodCounts.runningByCliqueAndAnchor.
+	// PodClique, derived at construction from the committed entries and pclqPodCounts.
 	// The gate reads it to keep the reclaim free.
 	numMissingOldVersionPodsByPCLQ map[string]int32
 	// plan is the step-level decomposition the sub-step methods work against.
@@ -179,7 +180,7 @@ func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []gr
 		standalonePCLQByComponent:      standalonePCLQByComponent,
 		pcsgReplicaInfos:               pcsgReplicaInfos,
 		pclqPodCounts:                  pclqPodCounts,
-		numMissingOldVersionPodsByPCLQ: numMissingOldVersionPodsByStandalonePCLQ(entries, *syncSnap.pcs.Status.CurrentGenerationHash, pclqPodCounts.runningByCliqueAndAnchor),
+		numMissingOldVersionPodsByPCLQ: numMissingOldVersionPodsByStandalonePCLQ(entries, *syncSnap.pcs.Status.CurrentGenerationHash, pclqPodCounts),
 		plan:                           computeStepPlan(desiredReplicas, mvu),
 	}
 }

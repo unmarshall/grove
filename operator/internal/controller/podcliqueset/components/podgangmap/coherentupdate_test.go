@@ -686,16 +686,27 @@ func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			assert.Equal(t, tc.want, numMissingOldVersionPodsByStandalonePCLQ(tc.entries, coherentTestCurrentGen, tc.running))
+			counts := standalonePCLQPodCounts{
+				livePodCountsByAnchor: map[cliqueAndEpochKey]anchorLivePods{},
+				nonTerminatingByPCLQ:  map[string]int32{},
+			}
+			for clique, runningByEpoch := range tc.running {
+				counts.nonTerminatingByPCLQ[clique] = 0 // presence marks the clique in scope
+				for epoch, running := range runningByEpoch {
+					counts.livePodCountsByAnchor[cliqueAndEpochKey{clique: clique, epoch: epoch}] = anchorLivePods{running: running}
+				}
+			}
+			assert.Equal(t, tc.want, numMissingOldVersionPodsByStandalonePCLQ(tc.entries, coherentTestCurrentGen, counts))
 		})
 	}
 }
 
-// TestGatherStandalonePodCounts covers the single-pass Pod count read. runningByCliqueAndAnchor buckets
-// non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, and excludes terminating
-// Pods and Pods on a PodGang that is not an anchor of this replica. nonTerminatingByPCLQ counts all
-// non-terminating Pods. newNotReadyByPCLQ counts non-terminating, not-Ready Pods on a current-hash anchor,
-// so it excludes a not-Ready Pod on an old anchor and a not-Ready Pod off any anchor.
+// TestGatherStandalonePodCounts covers the single-pass Pod count read. livePodCountsByAnchor buckets
+// non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, recording the running and
+// not-Ready counts, and excludes terminating Pods and Pods on a PodGang that is not an anchor of this
+// replica. nonTerminatingByPCLQ counts all non-terminating Pods. newNotReadyByPCLQ counts non-terminating,
+// not-Ready Pods on a current-hash anchor, so it excludes a not-Ready Pod on an old anchor and a not-Ready
+// Pod off any anchor.
 func TestGatherStandalonePodCounts(t *testing.T) {
 	rnr := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
 	pcs := &grovecorev1alpha1.PodCliqueSet{
@@ -738,7 +749,10 @@ func TestGatherStandalonePodCounts(t *testing.T) {
 	got, err := r.gatherStandalonePodCounts(t.Context(), pcs, 0, entries, map[string]grovecorev1alpha1.PodClique{"frontend": pclq})
 
 	require.NoError(t, err)
-	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 2}}, got.runningByCliqueAndAnchor)
+	assert.Equal(t, map[cliqueAndEpochKey]anchorLivePods{
+		{clique: "frontend", epoch: "50"}:  {running: 2, notReady: 1},
+		{clique: "frontend", epoch: "200"}: {running: 2, notReady: 1},
+	}, got.livePodCountsByAnchor)
 	assert.Equal(t, map[string]int32{"frontend": 5}, got.nonTerminatingByPCLQ)
 	assert.Equal(t, map[string]int32{"frontend": 1}, got.newNotReadyByPCLQ)
 }
