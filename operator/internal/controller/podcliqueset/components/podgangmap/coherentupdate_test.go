@@ -292,13 +292,13 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			// The budget gate reads the available count, the number of Pods that are Ready and not
-			// terminating. Each case's PodClique ReadyReplicas stands in for that available count.
-			availableByComponent := make(map[string]int32, len(tc.standalonePCLQByComponent))
+			// The budget gate reads the ready count, the number of Pods that are Ready and not
+			// terminating. Each case's PodClique ReadyReplicas stands in for that ready count.
+			readyCountsByPCLQ := make(map[string]int32, len(tc.standalonePCLQByComponent))
 			for name, pclq := range tc.standalonePCLQByComponent {
-				availableByComponent[name] = pclq.Status.ReadyReplicas
+				readyCountsByPCLQ[name] = pclq.Status.ReadyReplicas
 			}
-			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, availableByComponent, tc.numMissingOldVersionPods))
+			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, readyCountsByPCLQ, tc.numMissingOldVersionPods))
 		})
 	}
 }
@@ -546,11 +546,11 @@ func TestHeadroomByComponent(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			availableByComponent := make(map[string]int32, len(tc.standalonePCLQByComponent))
+			readyCountsByPCLQ := make(map[string]int32, len(tc.standalonePCLQByComponent))
 			for name, pclq := range tc.standalonePCLQByComponent {
-				availableByComponent[name] = pclq.Status.ReadyReplicas
+				readyCountsByPCLQ[name] = pclq.Status.ReadyReplicas
 			}
-			assert.Equal(t, tc.want, headroomByComponent(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, availableByComponent, tc.numMissingOldVersionPods))
+			assert.Equal(t, tc.want, headroomByComponent(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, readyCountsByPCLQ, tc.numMissingOldVersionPods))
 		})
 	}
 }
@@ -623,7 +623,7 @@ func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
 
 // TestGatherStandalonePodCounts covers the single-pass Pod count read. runningByCliqueAndAnchor buckets
 // non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, and excludes terminating
-// Pods and Pods on a PodGang that is not an anchor of this replica. availableByComponent counts Pods that
+// Pods and Pods on a PodGang that is not an anchor of this replica. readyCountsByPCLQ counts Pods that
 // are Ready and not terminating across all of the PodClique's Pods, so it excludes a not-ready Pod and a
 // Ready-but-terminating Pod, and includes a Ready Pod that is not on an anchor.
 func TestGatherStandalonePodCounts(t *testing.T) {
@@ -665,7 +665,7 @@ func TestGatherStandalonePodCounts(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 1}}, got.runningByCliqueAndAnchor)
-	assert.Equal(t, map[string]int32{"frontend": 3}, got.availableByComponent)
+	assert.Equal(t, map[string]int32{"frontend": 3}, got.readyCountsByPCLQ)
 }
 
 // pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled
