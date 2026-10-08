@@ -704,7 +704,8 @@ func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
 // TestGatherStandalonePodCounts covers the single-pass Pod count read. livePodCountsByAnchor buckets
 // non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, recording the running and
 // not-Ready counts, and excludes terminating Pods and Pods on a PodGang that is not an anchor of this
-// replica. nonTerminatingByPCLQ counts all non-terminating Pods. newNotReadyByPCLQ counts non-terminating,
+// replica. nonTerminatingByPCLQ counts non-terminating Pods on a known anchor of this replica, so it
+// excludes a Pod off any anchor. newNotReadyByPCLQ counts non-terminating,
 // not-Ready Pods on a current-hash anchor, so it excludes a not-Ready Pod on an old anchor and a not-Ready
 // Pod off any anchor.
 func TestGatherStandalonePodCounts(t *testing.T) {
@@ -753,7 +754,7 @@ func TestGatherStandalonePodCounts(t *testing.T) {
 		{clique: "frontend", epoch: "50"}:  {running: 2, notReady: 1},
 		{clique: "frontend", epoch: "200"}: {running: 2, notReady: 1},
 	}, got.livePodCountsByAnchor)
-	assert.Equal(t, map[string]int32{"frontend": 5}, got.nonTerminatingByPCLQ)
+	assert.Equal(t, map[string]int32{"frontend": 4}, got.nonTerminatingByPCLQ)
 	assert.Equal(t, map[string]int32{"frontend": 1}, got.newNotReadyByPCLQ)
 }
 

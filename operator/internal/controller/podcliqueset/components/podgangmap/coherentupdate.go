@@ -397,10 +397,11 @@ type standalonePCLQPodCounts struct {
 	// each anchor PodGang, keyed by clique name and anchor epoch. Phase 1 of the drain reads running to find
 	// missing old-version slots, and Phase 2a reads notReady to take unavailable Pods down before Ready ones.
 	livePodCountsByAnchor map[cliqueAndEpochKey]anchorLivePods
-	// nonTerminatingByPCLQ is the count of non-terminating Pods of each in-scope standalone PodClique, keyed
-	// by clique name. It holds an entry for every in-scope standalone PodClique and only those, so its key
-	// set is the in-scope set that numMissingOldVersionPodsByStandalonePCLQ filters on. It is the existing
-	// figure the count-anchored MaxUnavailable budget uses.
+	// nonTerminatingByPCLQ is the count of non-terminating Pods of each in-scope standalone PodClique on a
+	// known anchor of this replica, keyed by clique name. It holds an entry for every in-scope standalone
+	// PodClique and only those, so its key set is the in-scope set that
+	// numMissingOldVersionPodsByStandalonePCLQ filters on. It is the existing figure the count-anchored
+	// MaxUnavailable budget uses, so a Pod on a pruned or unrelated anchor must not inflate it.
 	nonTerminatingByPCLQ map[string]int32
 	// newNotReadyByPCLQ is the count of non-terminating, not-Ready Pods on current-hash anchors per clique.
 	// It is the in-flight-replacement figure the count-anchored budget subtracts.
@@ -413,7 +414,8 @@ type standalonePCLQPodCounts struct {
 // livePodCountsByAnchor buckets running (not terminating) Pods by the grove.io/podgang label resolved to an
 // anchor epoch via EpochByAnchorPodGangName, recording the running count and how many are not Ready, for
 // missing old-version detection, the Phase-1 reclaim, and the not-Ready-first drain.
-// nonTerminatingByPCLQ is the total non-terminating Pod count per clique, the budget existing figure.
+// nonTerminatingByPCLQ is the non-terminating Pod count per clique on a known anchor, the budget existing
+// figure.
 // newNotReadyByPCLQ counts non-terminating, not-Ready Pods sitting on a current-hash anchor, the budget
 // in-flight-replacement figure. An unscheduled new Pod not yet on its anchor is not counted, which is safe
 // because canEmitNextSubStep gates on currentBatchScheduled before the budget, so an unscheduled batch holds
@@ -443,15 +445,16 @@ func (r _resource) gatherStandalonePodCounts(ctx context.Context, pcs *grovecore
 			if k8sutils.IsResourceTerminating(pod.ObjectMeta) {
 				continue
 			}
-			nonTerminating++
 			podReady := k8sutils.IsPodReady(pod)
-			// A Pod whose PodGang is not one of this replica's current anchor entries resolves to no epoch and
-			// is skipped. This happens briefly for a Pod left on an anchor the plan already pruned, before the
-			// PodClique reconciler issues its deletion.
+			// A Pod whose PodGang is not one of this replica's current anchor entries resolves to no epoch and is
+			// skipped, and is not counted as existing capacity. This happens briefly for a Pod left on an anchor
+			// the plan already pruned, before the PodClique reconciler issues its deletion. Counting it would
+			// inflate the budget with capacity that is leaving and that the drain cannot select.
 			epoch, onKnownAnchor := epochByAnchorPodGangName[pod.Labels[apicommon.LabelPodGang]]
 			if !onKnownAnchor {
 				continue
 			}
+			nonTerminating++
 			key := cliqueAndEpochKey{clique: cliqueName, epoch: epoch}
 			livePods := counts.livePodCountsByAnchor[key]
 			livePods.running++
