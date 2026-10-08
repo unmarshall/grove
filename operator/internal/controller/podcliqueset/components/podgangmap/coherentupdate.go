@@ -525,7 +525,7 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 			}
 			infos = append(infos, pcsgReplicaInfo{
 				index:         replicaIndex,
-				state:         componentutils.ComputePCSGReplicaState(members),
+				state:         componentutils.ComputePCSGReplicaState(members, len(pcsg.Spec.CliqueNames)),
 				atCurrentHash: committedIndices.Has(replicaIndex),
 			})
 		}

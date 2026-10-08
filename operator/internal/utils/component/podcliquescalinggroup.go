@@ -22,6 +22,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/samber/lo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -220,11 +221,20 @@ type PCSGReplicaDisruptionInfo struct {
 	State PCSGReplicaState
 }
 
-// ComputePCSGReplicaState classifies one PodCliqueScalingGroup replica from its member PodCliques. A replica is
-// pending when any member is below MinAvailable scheduled, unavailable when any member is below
-// MinAvailable ready, otherwise ready.
-func ComputePCSGReplicaState(memberPCLQs []grovecorev1alpha1.PodClique) PCSGReplicaState {
-	for _, pclq := range memberPCLQs {
+// ComputePCSGReplicaState classifies one PodCliqueScalingGroup replica from its member PodCliques and the
+// number of member PodCliques the replica should have. A replica is pending when a member PodClique is
+// absent or below MinAvailable scheduled, unavailable when a member is below MinAvailable ready, otherwise
+// ready. A missing member is treated as below MinAvailable scheduled, so an incomplete replica is never
+// classified ready and never counts as serving capacity. Terminating member PodCliques are ignored, so a
+// replica mid-replacement reads as incomplete.
+func ComputePCSGReplicaState(memberPCLQs []grovecorev1alpha1.PodClique, expectedMemberCount int) PCSGReplicaState {
+	nonTerminating := lo.Filter(memberPCLQs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
+		return !k8sutils.IsResourceTerminating(pclq.ObjectMeta)
+	})
+	if len(nonTerminating) < expectedMemberCount {
+		return PCSGReplicaStatePending
+	}
+	for _, pclq := range nonTerminating {
 		if pclq.Status.ScheduledReplicas < *pclq.Spec.MinAvailable {
 			return PCSGReplicaStatePending
 		}

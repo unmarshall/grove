@@ -254,24 +254,28 @@ func TestGroupPCSGsByPCSReplicaIndex(t *testing.T) {
 
 func TestComputePCSGReplicaState(t *testing.T) {
 	tests := []struct {
-		name    string
-		members []grovecorev1alpha1.PodClique
-		want    PCSGReplicaState
+		name            string
+		members         []grovecorev1alpha1.PodClique
+		expectedMembers int
+		want            PCSGReplicaState
 	}{
 		{
-			name:    "ready when the only member meets MinAvailable scheduled and ready",
-			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 2)},
-			want:    PCSGReplicaStateReady,
+			name:            "ready when the only member meets MinAvailable scheduled and ready",
+			members:         []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 2)},
+			expectedMembers: 1,
+			want:            PCSGReplicaStateReady,
 		},
 		{
-			name:    "pending when the only member is below MinAvailable scheduled",
-			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 1, 1)},
-			want:    PCSGReplicaStatePending,
+			name:            "pending when the only member is below MinAvailable scheduled",
+			members:         []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 1, 1)},
+			expectedMembers: 1,
+			want:            PCSGReplicaStatePending,
 		},
 		{
-			name:    "unavailable when the only member is scheduled but below MinAvailable ready",
-			members: []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 1)},
-			want:    PCSGReplicaStateUnavailable,
+			name:            "unavailable when the only member is scheduled but below MinAvailable ready",
+			members:         []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 1)},
+			expectedMembers: 1,
+			want:            PCSGReplicaStateUnavailable,
 		},
 		{
 			name: "pending when any member is below MinAvailable scheduled",
@@ -279,7 +283,8 @@ func TestComputePCSGReplicaState(t *testing.T) {
 				pclqWithMinAvailableAndStatus(2, 2, 2),
 				pclqWithMinAvailableAndStatus(2, 1, 1),
 			},
-			want: PCSGReplicaStatePending,
+			expectedMembers: 2,
+			want:            PCSGReplicaStatePending,
 		},
 		{
 			name: "unavailable when a scheduled member is below MinAvailable ready and none is pending",
@@ -287,7 +292,8 @@ func TestComputePCSGReplicaState(t *testing.T) {
 				pclqWithMinAvailableAndStatus(2, 2, 2),
 				pclqWithMinAvailableAndStatus(2, 2, 1),
 			},
-			want: PCSGReplicaStateUnavailable,
+			expectedMembers: 2,
+			want:            PCSGReplicaStateUnavailable,
 		},
 		{
 			name: "ready when every member meets MinAvailable",
@@ -295,12 +301,28 @@ func TestComputePCSGReplicaState(t *testing.T) {
 				pclqWithMinAvailableAndStatus(1, 3, 1),
 				pclqWithMinAvailableAndStatus(2, 2, 2),
 			},
-			want: PCSGReplicaStateReady,
+			expectedMembers: 2,
+			want:            PCSGReplicaStateReady,
+		},
+		{
+			name:            "pending when a member is absent even though every present member is ready",
+			members:         []grovecorev1alpha1.PodClique{pclqWithMinAvailableAndStatus(2, 2, 2)},
+			expectedMembers: 2,
+			want:            PCSGReplicaStatePending,
+		},
+		{
+			name: "pending when a terminating member leaves fewer than expected non-terminating members",
+			members: []grovecorev1alpha1.PodClique{
+				pclqWithMinAvailableAndStatus(2, 2, 2),
+				terminatingPCLQ(pclqWithMinAvailableAndStatus(2, 2, 2)),
+			},
+			expectedMembers: 2,
+			want:            PCSGReplicaStatePending,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, ComputePCSGReplicaState(tc.members))
+			assert.Equal(t, tc.want, ComputePCSGReplicaState(tc.members, tc.expectedMembers))
 		})
 	}
 }
@@ -352,4 +374,11 @@ func pclqWithMinAvailableAndStatus(minAvailable, scheduled, ready int32) groveco
 		Spec:   grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(minAvailable)},
 		Status: grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: scheduled, ReadyReplicas: ready},
 	}
+}
+
+// terminatingPCLQ marks a PodClique as terminating by setting a deletion timestamp and a finalizer.
+func terminatingPCLQ(pclq grovecorev1alpha1.PodClique) grovecorev1alpha1.PodClique {
+	pclq.DeletionTimestamp = ptr.To(metav1.Now())
+	pclq.Finalizers = []string{"grove.io/test"}
+	return pclq
 }

@@ -178,7 +178,7 @@ func (r _resource) computePendingUpdateWork(ss *syncSnapshot) (*updateWork, erro
 		if err != nil {
 			return nil, err
 		}
-		state := componentutils.ComputePCSGReplicaState(memberPCLQs)
+		state := componentutils.ComputePCSGReplicaState(memberPCLQs, len(ss.pcsg.Spec.CliqueNames))
 		if !labeled {
 			// Old configuration: a replacement candidate, recorded with its state for worst-off-first ordering.
 			uw.oldReplicaDisruptionInfos = append(uw.oldReplicaDisruptionInfos, componentutils.PCSGReplicaDisruptionInfo{
@@ -245,7 +245,7 @@ func isReplicaUpdatedAndReady(sc *syncSnapshot, replicaIndex int, members []grov
 	if err != nil || !labeled {
 		return false
 	}
-	return isReplicaUpdated(sc, replicaIndex, members) && componentutils.ComputePCSGReplicaState(members) == componentutils.PCSGReplicaStateReady
+	return isReplicaUpdated(sc, replicaIndex, members) && componentutils.ComputePCSGReplicaState(members, len(sc.pcsg.Spec.CliqueNames)) == componentutils.PCSGReplicaStateReady
 }
 
 // allPodCliquesTerminating reports whether every member PodClique of a replica is terminating.
