@@ -767,7 +767,7 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
 	}
-	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 4}}
 	// A current-hash entry commits replica index 0 of sga, so it is at the current hash.
 	entries := []grovecorev1alpha1.PodGangEntry{
 		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "100", PodCliqueSetGenerationHash: "new", PCSGReplicaIndices: map[string][]int32{"sga": {0}}},
@@ -787,6 +787,32 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
 		{index: 1, state: componentutils.PCSGReplicaStateUnavailable, atCurrentHash: false},
 		{index: 2, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
+	}, got["sga"])
+}
+
+// TestGatherPCSGReplicaInfosSkipsStrayReplicaIndices verifies a PodCliqueScalingGroup child whose replica
+// index is outside [0, Spec.Replicas), a stray left by a scale-down, is excluded from the gather. A healthy
+// stray must be excluded too, so the drain can neither count it nor commit it into a current-hash entry the
+// PCSG controller would never recreate.
+func TestGatherPCSGReplicaInfosSkipsStrayReplicaIndices(t *testing.T) {
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
+	}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2}}
+	objs := []client.Object{
+		pcsgMemberPCLQ("sga-0-m", 0, 1, 1, false), // in range, Ready
+		pcsgMemberPCLQ("sga-1-m", 1, 1, 1, false), // in range, Ready
+		pcsgMemberPCLQ("sga-2-m", 2, 1, 1, false), // out of range (index >= Spec.Replicas), scale-down stray, skipped
+	}
+	r := _resource{client: testutils.NewTestClientBuilder().WithObjects(objs...).Build()}
+
+	got, err := r.gatherPCSGReplicaInfos(t.Context(), pcs, nil, map[string]grovecorev1alpha1.PodCliqueScalingGroup{"sga": pcsg})
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []pcsgReplicaInfo{
+		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
+		{index: 1, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
 	}, got["sga"])
 }
 

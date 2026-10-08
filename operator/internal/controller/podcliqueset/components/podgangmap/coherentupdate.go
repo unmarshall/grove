@@ -523,6 +523,12 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 				return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
 					fmt.Sprintf("invalid PodCliqueScalingGroup replica index %q for %q under coherent update", replicaIndexStr, componentName))
 			}
+			// A replica index outside [0, Spec.Replicas) is a stray left by a scale-down. Including it would let
+			// the drain select and commit an index the PCSG controller never recreates, stalling the update, and
+			// would inflate the replica count the budget reads. The status path prunes the same strays.
+			if replicaIndex < 0 || replicaIndex >= int(pcsg.Spec.Replicas) {
+				continue
+			}
 			infos = append(infos, pcsgReplicaInfo{
 				index:         replicaIndex,
 				state:         componentutils.ComputePCSGReplicaState(members, len(pcsg.Spec.CliqueNames)),
