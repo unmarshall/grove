@@ -39,6 +39,9 @@ const (
 	coherentTestNamespace  = "default"
 	coherentTestCurrentGen = "v2"
 	coherentTestOldGen     = "v1"
+	// coherentTestPCSGObjName is the fully qualified name of the PodCliqueScalingGroup object the
+	// gatherPCSGReplicaInfos test builds member PodCliques for.
+	coherentTestPCSGObjName = "pcs-0-sga"
 )
 
 // TestInScopeStandalonePCLQsByComponent checks that the standalone PodCliques of a replica are indexed by
@@ -305,7 +308,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		},
 		{
 			description:               "a single-replica PodCliqueScalingGroup whose only replica is unavailable can start its replacement",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", []componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateUnavailable}, nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith([]componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateUnavailable}, nil),
 			desiredReplicas:           map[string]int32{"decode": 1},
 			maxUnavailableByComponent: map[string]int32{"decode": 1},
 			drainByComponent:          map[string]int32{"decode": 1},
@@ -313,7 +316,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		},
 		{
 			description:               "more unavailable PodCliqueScalingGroup replicas than MaxUnavailable still lets the budgeted drain proceed",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", []componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateReady, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable}, nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith([]componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateReady, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable}, nil),
 			desiredReplicas:           map[string]int32{"decode": 5},
 			maxUnavailableByComponent: map[string]int32{"decode": 1},
 			drainByComponent:          map[string]int32{"decode": 1},
@@ -321,7 +324,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		},
 		{
 			description:               "a PodCliqueScalingGroup drain that exactly reaches the budget proceeds",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			drainByComponent:          map[string]int32{"decode": 2},
@@ -329,7 +332,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		},
 		{
 			description:               "a PodCliqueScalingGroup drain beyond the budget holds",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			drainByComponent:          map[string]int32{"decode": 3},
@@ -337,7 +340,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		},
 		{
 			description:               "in-flight PodCliqueScalingGroup replacements consume the budget so a further drain holds",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 4), repeatPCSGState(componentutils.PCSGReplicaStateUnavailable, 2)),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 4), repeatPCSGState(componentutils.PCSGReplicaStateUnavailable, 2)),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			drainByComponent:          map[string]int32{"decode": 1},
@@ -582,14 +585,14 @@ func TestHeadroomByComponent(t *testing.T) {
 		},
 		{
 			description:               "PodCliqueScalingGroup within budget leaves the remaining budget",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			want:                      map[string]int32{"decode": 2},
 		},
 		{
 			description:               "PodCliqueScalingGroup short of desired has zero headroom",
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 3), nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 3), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			want:                      map[string]int32{"decode": 0},
@@ -598,7 +601,7 @@ func TestHeadroomByComponent(t *testing.T) {
 			description:               "standalone and PodCliqueScalingGroup headroom computed together",
 			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
 			newNotReadyByPCLQ:         map[string]int32{"frontend": 2},
-			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			pcsgReplicaInfos:          pcsgReplicaInfosWith(repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"frontend": 10, "decode": 6},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3, "decode": 2},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
@@ -749,17 +752,16 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
 	}
-	const pcsgName = "pcs-0-sga"
-	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: pcsgName, Namespace: coherentTestNamespace}}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}}
 	// A current-hash entry commits replica index 0 of sga, so it is at the current hash.
 	entries := []grovecorev1alpha1.PodGangEntry{
 		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "100", PodCliqueSetGenerationHash: "new", PCSGReplicaIndices: map[string][]int32{"sga": {0}}},
 	}
 	objs := []client.Object{
-		pcsgMemberPCLQ("sga-0-m", pcsgName, 0, 1, 1, 1, false), // committed to current hash, Ready
-		pcsgMemberPCLQ("sga-1-m", pcsgName, 1, 1, 1, 0, false), // old, Unavailable (ready below MinAvailable)
-		pcsgMemberPCLQ("sga-2-m", pcsgName, 2, 1, 0, 0, false), // old, Pending (scheduled below MinAvailable)
-		pcsgMemberPCLQ("sga-3-m", pcsgName, 3, 1, 1, 1, true),  // all members terminating, skipped
+		pcsgMemberPCLQ("sga-0-m", 0, 1, 1, false), // committed to current hash, Ready
+		pcsgMemberPCLQ("sga-1-m", 1, 1, 0, false), // old, Unavailable (ready below MinAvailable)
+		pcsgMemberPCLQ("sga-2-m", 2, 0, 0, false), // old, Pending (scheduled below MinAvailable)
+		pcsgMemberPCLQ("sga-3-m", 3, 1, 1, true),  // all members terminating, skipped
 	}
 	r := _resource{client: testutils.NewTestClientBuilder().WithObjects(objs...).Build()}
 
@@ -777,18 +779,18 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 
 // pcsgMemberPCLQ builds a PodCliqueScalingGroup member PodClique at the given replica index with the owner
 // reference, labels, MinAvailable, and scheduled and ready status counts that gatherPCSGReplicaInfos reads.
-func pcsgMemberPCLQ(name, pcsgName string, replicaIndex, minAvailable, scheduled, ready int32, terminating bool) *grovecorev1alpha1.PodClique {
+func pcsgMemberPCLQ(name string, replicaIndex, scheduled, ready int32, terminating bool) *grovecorev1alpha1.PodClique {
 	pclq := &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: coherentTestNamespace,
 			Labels: map[string]string{
-				apicommon.LabelPodCliqueScalingGroup:             pcsgName,
+				apicommon.LabelPodCliqueScalingGroup:             coherentTestPCSGObjName,
 				apicommon.LabelPodCliqueScalingGroupReplicaIndex: strconv.Itoa(int(replicaIndex)),
 			},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "grove.io/v1alpha1", Kind: constants.KindPodCliqueScalingGroup, Name: pcsgName, Controller: ptr.To(true)}},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "grove.io/v1alpha1", Kind: constants.KindPodCliqueScalingGroup, Name: coherentTestPCSGObjName, Controller: ptr.To(true)}},
 		},
-		Spec:   grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(minAvailable)},
+		Spec:   grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))},
 		Status: grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: scheduled, ReadyReplicas: ready},
 	}
 	if terminating {
@@ -808,10 +810,10 @@ func pclqWithUpdatedScheduledReplicas(updatedReady int32) grovecorev1alpha1.PodC
 	}
 }
 
-// pcsgReplicaInfosWith builds a single-component pcsgReplicaInfos map. oldStates are the states of
-// not-yet-rolled replica indices and currentHashStates the states of already-rolled (current-hash) indices,
-// assigned ascending indices.
-func pcsgReplicaInfosWith(componentName string, oldStates, currentHashStates []componentutils.PCSGReplicaState) map[string]map[int]pcsgReplicaInfo {
+// pcsgReplicaInfosWith builds a single-component pcsgReplicaInfos map for the "decode" PodCliqueScalingGroup.
+// oldStates are the states of not-yet-rolled replica indices and currentHashStates the states of
+// already-rolled (current-hash) indices, assigned ascending indices.
+func pcsgReplicaInfosWith(oldStates, currentHashStates []componentutils.PCSGReplicaState) map[string]map[int]pcsgReplicaInfo {
 	infoByReplicaIndex := make(map[int]pcsgReplicaInfo, len(oldStates)+len(currentHashStates))
 	replicaIndex := 0
 	for _, state := range oldStates {
@@ -822,7 +824,7 @@ func pcsgReplicaInfosWith(componentName string, oldStates, currentHashStates []c
 		infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: state, atCurrentHash: true}
 		replicaIndex++
 	}
-	return map[string]map[int]pcsgReplicaInfo{componentName: infoByReplicaIndex}
+	return map[string]map[int]pcsgReplicaInfo{"decode": infoByReplicaIndex}
 }
 
 // repeatPCSGState returns a slice of count copies of state.

@@ -472,7 +472,7 @@ func TestBuildTailSubStep(t *testing.T) {
 	// indices [0,2) are current-hash. This tail sub-step rolls each component's remaining toward its target:
 	// frontend 2 (subsumed, within MaxUnavailable 2), prefill 0 (done), decode min(MaxUnavailable 3, 4)=3
 	// worst-off old indices (all Ready, so ascending from 2) -> [2,3,4].
-	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices("100", map[string]int32{"prefill": 2, "decode": 2})}
+	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices(map[string]int32{"prefill": 2, "decode": 2})}
 	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 7)), "v2", entries, map[string]testComponent{
 		"frontend": {liveReplicas: 8, minAvailable: 2, maxUnavailable: 2, standalone: true},
 		"prefill":  {liveReplicas: 4, minAvailable: 2, maxUnavailable: 2},
@@ -492,7 +492,7 @@ func TestBuildLeftoverSubStep(t *testing.T) {
 	// This gives leftover {frontend:1, decode:2} (see TestAnyLeftoverRemaining for the derivation). All
 	// anchor-phase steps have committed decode's indices [0,20), so the leftover step rolls decode
 	// min(MaxUnavailable 4, 2)=2 worst-off old indices (all Ready, so [20,21]) and subsumes frontend 1.
-	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices("100", map[string]int32{"decode": 20})}
+	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices(map[string]int32{"decode": 20})}
 	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 7)), "v2", entries, map[string]testComponent{
 		"frontend": {liveReplicas: 9, minAvailable: 2, maxUnavailable: 2, standalone: true},
 		"decode":   {liveReplicas: 22, minAvailable: 3, maxUnavailable: 4},
@@ -633,7 +633,7 @@ func TestNextForPCSGOnlyMVU(t *testing.T) {
 	// PodGangs at most MaxUnavailable at a time, and nothing subsumes since there is no standalone PodClique.
 	newPlanner := func(committed map[string]int32) *subStepPlanner {
 		return newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 1)), "v2",
-			[]grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices("100", committed)},
+			[]grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices(committed)},
 			map[string]testComponent{
 				"prefill": {liveReplicas: 10, minAvailable: 3, maxUnavailable: 3},
 				"decode":  {liveReplicas: 20, minAvailable: 3, maxUnavailable: 4},
@@ -722,7 +722,7 @@ func TestDependsOnLatestEpoch(t *testing.T) {
 func TestBuildNonAnchorSubStepCapsByHeadroom(t *testing.T) {
 	// frontend standalone MaxUnavailable 5, decode PCSG MaxUnavailable 3. Remaining 4/4 would roll 4/3, but
 	// headroom 1/2 caps them to 1/2. decode indices [0,2) are already committed, so its old indices start at 2.
-	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices("100", map[string]int32{"decode": 2})}
+	entries := []grovecorev1alpha1.PodGangEntry{currentHashEntryWithCommittedPCSGIndices(map[string]int32{"decode": 2})}
 	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 12345)), "v2", entries, map[string]testComponent{
 		"frontend": {liveReplicas: 10, minAvailable: 2, maxUnavailable: 5, standalone: true},
 		"decode":   {liveReplicas: 20, minAvailable: 3, maxUnavailable: 3},
@@ -779,7 +779,7 @@ type testComponent struct {
 // currentHashEntryWithCommittedPCSGIndices builds a current-hash entry committing indices [0, count) of each
 // listed PodCliqueScalingGroup, the already-rolled set a scenario starts from. newTestPlanner derives
 // pcsgReplicaInfos from it, marking those indices atCurrentHash and the rest old.
-func currentHashEntryWithCommittedPCSGIndices(epoch string, committedCountByPCSG map[string]int32) grovecorev1alpha1.PodGangEntry {
+func currentHashEntryWithCommittedPCSGIndices(committedCountByPCSG map[string]int32) grovecorev1alpha1.PodGangEntry {
 	indicesByPCSG := make(map[string][]int32, len(committedCountByPCSG))
 	for name, count := range committedCountByPCSG {
 		indices := make([]int32, count)
@@ -788,7 +788,7 @@ func currentHashEntryWithCommittedPCSGIndices(epoch string, committedCountByPCSG
 		}
 		indicesByPCSG[name] = indices
 	}
-	return grovecorev1alpha1.PodGangEntry{Epoch: epoch, PodCliqueSetGenerationHash: "v2", PCSGReplicaIndices: indicesByPCSG}
+	return grovecorev1alpha1.PodGangEntry{Epoch: "100", PodCliqueSetGenerationHash: "v2", PCSGReplicaIndices: indicesByPCSG}
 }
 
 // newTestPlanner builds a subStepPlanner from an explicit per-component scenario, deriving the step plan
