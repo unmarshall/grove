@@ -336,17 +336,17 @@ func (p *subStepPlanner) standaloneDisruptionBudget(componentName string) int32 
 // in-flight replacements. A PodCliqueScalingGroup has no missing old-version count, so the whole drain is
 // charged. It may be negative, callers treat anything at or below zero as no headroom.
 func (p *subStepPlanner) pcsgDisruptionBudget(componentName string) int32 {
-	infoByReplicaIndex := p.pcsgReplicaInfos[componentName]
+	infos := p.pcsgReplicaInfos[componentName]
 	// requiredAvailable is the minimum number of replicas that must stay available during the update
 	// (desired - maxUnavailable). It is distinct from the component's MinAvailable spec field.
 	requiredAvailable := p.desiredReplicas[componentName] - p.maxUnavailableByComponent[componentName]
 	var newNotReady int32
-	for _, info := range infoByReplicaIndex {
+	for _, info := range infos {
 		if info.atCurrentHash && info.state != componentutils.PCSGReplicaStateReady {
 			newNotReady++
 		}
 	}
-	return int32(len(infoByReplicaIndex)) - requiredAvailable - newNotReady
+	return int32(len(infos)) - requiredAvailable - newNotReady
 }
 
 // headroomByComponent returns, per in-scope component, how many old-version Pods a sub-step may drain now.
@@ -456,6 +456,8 @@ func currentHashAnchorEpochSet(entries []grovecorev1alpha1.PodGangEntry, current
 
 // pcsgReplicaInfo holds the health and roll state of one PodCliqueScalingGroup replica.
 type pcsgReplicaInfo struct {
+	// index is the replica index of the PodCliqueScalingGroup this info describes.
+	index int
 	// state is the replica health from ComputePCSGReplicaState over its member PodCliques.
 	state componentutils.PCSGReplicaState
 	// atCurrentHash is true when a current-hash entry commits this replica index, meaning the plan has
@@ -465,13 +467,13 @@ type pcsgReplicaInfo struct {
 }
 
 // gatherPCSGReplicaInfos returns the pcsgReplicaInfo for each present replica index of every in-scope
-// PodCliqueScalingGroup under update, keyed by PCSG component name and then by PCSG replica index. It lists
-// each PCSG's member PodCliques, groups them by replica index, and records a replica as present when at
-// least one member is non-terminating. Health comes from ComputePCSGReplicaState over the members, and
-// atCurrentHash is set when a current-hash entry commits the index.
-func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (map[string]map[int]pcsgReplicaInfo, error) {
+// PodCliqueScalingGroup under update, keyed by PCSG component name. It lists each PCSG's member PodCliques,
+// groups them by replica index, and records a replica as present when at least one member is
+// non-terminating. Health comes from ComputePCSGReplicaState over the members, and atCurrentHash is set when
+// a current-hash entry commits the index.
+func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (map[string][]pcsgReplicaInfo, error) {
 	currentHash := *pcs.Status.CurrentGenerationHash
-	infoByComponent := make(map[string]map[int]pcsgReplicaInfo, len(pcsgByComponent))
+	infosByComponent := make(map[string][]pcsgReplicaInfo, len(pcsgByComponent))
 	for componentName, pcsg := range pcsgByComponent {
 		pcsgObjKey := client.ObjectKey{Namespace: pcs.Namespace, Name: pcsg.Name}
 		memberPCLQs, err := componentutils.GetPCLQsByOwner(ctx, r.client, constants.KindPodCliqueScalingGroup, pcsgObjKey,
@@ -481,7 +483,7 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 				fmt.Sprintf("could not list member PodCliques for PodCliqueScalingGroup %q under coherent update", componentName))
 		}
 		committedIndices := currentHashCommittedPCSGReplicaIndices(entries, componentName, currentHash)
-		infoByIndex := make(map[int]pcsgReplicaInfo)
+		var infos []pcsgReplicaInfo
 		for replicaIndexStr, members := range componentutils.GroupPCLQsByPCSGReplicaIndex(memberPCLQs) {
 			if allPodCliquesTerminating(members) {
 				continue // a replica who's every member is terminating is mid-replacement, not a live index
@@ -491,14 +493,15 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 				return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
 					fmt.Sprintf("invalid PodCliqueScalingGroup replica index %q for %q under coherent update", replicaIndexStr, componentName))
 			}
-			infoByIndex[replicaIndex] = pcsgReplicaInfo{
+			infos = append(infos, pcsgReplicaInfo{
+				index:         replicaIndex,
 				state:         componentutils.ComputePCSGReplicaState(members),
 				atCurrentHash: committedIndices.Has(replicaIndex),
-			}
+			})
 		}
-		infoByComponent[componentName] = infoByIndex
+		infosByComponent[componentName] = infos
 	}
-	return infoByComponent, nil
+	return infosByComponent, nil
 }
 
 // currentHashCommittedPCSGReplicaIndices returns the replica indices of one PodCliqueScalingGroup that

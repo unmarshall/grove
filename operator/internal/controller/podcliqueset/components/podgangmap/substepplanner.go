@@ -148,10 +148,9 @@ type subStepPlanner struct {
 	maxUnavailableByComponent map[string]int32
 	// standalonePCLQByComponent are the in-scope standalone PodCliques of the replica under update.
 	standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique
-	// pcsgReplicaInfos are the per-replica-index facts of each in-scope PodCliqueScalingGroup under update,
-	// keyed by PCSG component name then replica index. The count-anchored budget and the drain ordering both
-	// read it.
-	pcsgReplicaInfos map[string]map[int]pcsgReplicaInfo
+	// pcsgReplicaInfos are the per-replica facts of each in-scope PodCliqueScalingGroup under update, keyed
+	// by PCSG component name. The count-anchored budget and the drain ordering both read it.
+	pcsgReplicaInfos map[string][]pcsgReplicaInfo
 	// pclqPodCounts are the standalone Pod counts gathered once from the live Pod list this reconcile. Its
 	// runningByCliqueAndAnchor drives the Phase-1 reclaim and missing old-version detection, and its
 	// nonTerminatingByPCLQ and newNotReadyByPCLQ feed the count-anchored MaxUnavailable budget.
@@ -166,7 +165,7 @@ type subStepPlanner struct {
 
 // newSubStepPlanner builds the planner for one PCS replica from the in-scope live replica counts and the
 // current-template maxUnavailable, and computes the step plan the planner works against.
-func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, desiredReplicas map[string]int32, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgReplicaInfos map[string]map[int]pcsgReplicaInfo, pclqPodCounts standalonePCLQPodCounts) *subStepPlanner {
+func newSubStepPlanner(syncSnap *syncSnapshot, pcsReplicaIndex int, entries []grovecorev1alpha1.PodGangEntry, clk clock.Clock, desiredReplicas map[string]int32, standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique, pcsgReplicaInfos map[string][]pcsgReplicaInfo, pclqPodCounts standalonePCLQPodCounts) *subStepPlanner {
 	mvu := syncSnap.mvuTemplate
 	minAvailableByComponent := lo.Assign(mvu.standalonePCLQs, mvu.pcsgs)
 	return &subStepPlanner{
@@ -572,13 +571,12 @@ func (p *subStepPlanner) buildNonAnchorSubStep(epoch, anchorEpoch string, remain
 // These are the indices the next sub-step rolls, so an already-unavailable replica is replaced before a
 // healthy one.
 func (p *subStepPlanner) nextOldPCSGIndicesToRoll(pcsgName string, count int32) []int32 {
-	infoByReplicaIndex := p.pcsgReplicaInfos[pcsgName]
-	infos := make([]componentutils.PCSGReplicaDisruptionInfo, 0, len(infoByReplicaIndex))
-	for replicaIndex, info := range infoByReplicaIndex {
+	var infos []componentutils.PCSGReplicaDisruptionInfo
+	for _, info := range p.pcsgReplicaInfos[pcsgName] {
 		if info.atCurrentHash {
 			continue // already rolled to the current generation
 		}
-		infos = append(infos, componentutils.PCSGReplicaDisruptionInfo{Index: replicaIndex, State: info.state})
+		infos = append(infos, componentutils.PCSGReplicaDisruptionInfo{Index: info.index, State: info.state})
 	}
 	ordered := componentutils.OrderPCSGReplicaIndicesForDisruption(infos)
 	ordered = ordered[:min(int(count), len(ordered))]

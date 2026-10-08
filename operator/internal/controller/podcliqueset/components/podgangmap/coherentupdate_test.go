@@ -234,7 +234,7 @@ func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 		nonTerminatingByPCLQ      map[string]int32
 		newNotReadyByPCLQ         map[string]int32
 		numMissingOldVersionPods  map[string]int32
-		pcsgReplicaInfos          map[string]map[int]pcsgReplicaInfo
+		pcsgReplicaInfos          map[string][]pcsgReplicaInfo
 		drainByComponent          map[string]int32
 		want                      bool
 	}{
@@ -537,7 +537,7 @@ func TestAdvanceFullyDrainedEntries(t *testing.T) {
 func TestHeadroomByComponent(t *testing.T) {
 	testCases := []struct {
 		description               string
-		pcsgReplicaInfos          map[string]map[int]pcsgReplicaInfo
+		pcsgReplicaInfos          map[string][]pcsgReplicaInfo
 		desiredReplicas           map[string]int32
 		maxUnavailableByComponent map[string]int32
 		nonTerminatingByPCLQ      map[string]int32
@@ -768,13 +768,11 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 	got, err := r.gatherPCSGReplicaInfos(t.Context(), pcs, entries, map[string]grovecorev1alpha1.PodCliqueScalingGroup{"sga": pcsg})
 
 	require.NoError(t, err)
-	assert.Equal(t, map[string]map[int]pcsgReplicaInfo{
-		"sga": {
-			0: {state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
-			1: {state: componentutils.PCSGReplicaStateUnavailable, atCurrentHash: false},
-			2: {state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
-		},
-	}, got)
+	assert.ElementsMatch(t, []pcsgReplicaInfo{
+		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
+		{index: 1, state: componentutils.PCSGReplicaStateUnavailable, atCurrentHash: false},
+		{index: 2, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
+	}, got["sga"])
 }
 
 // pcsgMemberPCLQ builds a PodCliqueScalingGroup member PodClique at the given replica index with the owner
@@ -813,18 +811,18 @@ func pclqWithUpdatedScheduledReplicas(updatedReady int32) grovecorev1alpha1.PodC
 // pcsgReplicaInfosWith builds a single-component pcsgReplicaInfos map for the "decode" PodCliqueScalingGroup.
 // oldStates are the states of not-yet-rolled replica indices and currentHashStates the states of
 // already-rolled (current-hash) indices, assigned ascending indices.
-func pcsgReplicaInfosWith(oldStates, currentHashStates []componentutils.PCSGReplicaState) map[string]map[int]pcsgReplicaInfo {
-	infoByReplicaIndex := make(map[int]pcsgReplicaInfo, len(oldStates)+len(currentHashStates))
+func pcsgReplicaInfosWith(oldStates, currentHashStates []componentutils.PCSGReplicaState) map[string][]pcsgReplicaInfo {
+	infos := make([]pcsgReplicaInfo, 0, len(oldStates)+len(currentHashStates))
 	replicaIndex := 0
 	for _, state := range oldStates {
-		infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: state, atCurrentHash: false}
+		infos = append(infos, pcsgReplicaInfo{index: replicaIndex, state: state, atCurrentHash: false})
 		replicaIndex++
 	}
 	for _, state := range currentHashStates {
-		infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: state, atCurrentHash: true}
+		infos = append(infos, pcsgReplicaInfo{index: replicaIndex, state: state, atCurrentHash: true})
 		replicaIndex++
 	}
-	return map[string]map[int]pcsgReplicaInfo{"decode": infoByReplicaIndex}
+	return map[string][]pcsgReplicaInfo{"decode": infos}
 }
 
 // repeatPCSGState returns a slice of count copies of state.

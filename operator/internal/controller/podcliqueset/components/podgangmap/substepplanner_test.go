@@ -383,10 +383,10 @@ func TestBuildAnchorBearingSubStepPicksWorstOffFirst(t *testing.T) {
 	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 5)), "v2",
 		[]grovecorev1alpha1.PodGangEntry{{Epoch: "100", PodCliqueSetGenerationHash: "v2"}},
 		map[string]testComponent{"decode": {liveReplicas: 3, minAvailable: 1, maxUnavailable: 1}})
-	planner.pcsgReplicaInfos["decode"] = map[int]pcsgReplicaInfo{
-		0: {state: componentutils.PCSGReplicaStateReady},
-		1: {state: componentutils.PCSGReplicaStateUnavailable},
-		2: {state: componentutils.PCSGReplicaStateReady},
+	planner.pcsgReplicaInfos["decode"] = []pcsgReplicaInfo{
+		{index: 0, state: componentutils.PCSGReplicaStateReady},
+		{index: 1, state: componentutils.PCSGReplicaStateUnavailable},
+		{index: 2, state: componentutils.PCSGReplicaStateReady},
 	}
 	ss, err := planner.buildAnchorBearingSubStep()
 	require.NoError(t, err)
@@ -399,61 +399,61 @@ func TestBuildAnchorBearingSubStepPicksWorstOffFirst(t *testing.T) {
 // (ascending by index within each state), and the result is capped to the requested count.
 func TestNextOldPCSGIndicesToRoll(t *testing.T) {
 	const pcsgName = "decode"
-	old := func(state componentutils.PCSGReplicaState) pcsgReplicaInfo {
-		return pcsgReplicaInfo{state: state, atCurrentHash: false}
+	old := func(index int, state componentutils.PCSGReplicaState) pcsgReplicaInfo {
+		return pcsgReplicaInfo{index: index, state: state, atCurrentHash: false}
 	}
-	current := func(state componentutils.PCSGReplicaState) pcsgReplicaInfo {
-		return pcsgReplicaInfo{state: state, atCurrentHash: true}
+	current := func(index int, state componentutils.PCSGReplicaState) pcsgReplicaInfo {
+		return pcsgReplicaInfo{index: index, state: state, atCurrentHash: true}
 	}
 	testCases := []struct {
-		description        string
-		infoByReplicaIndex map[int]pcsgReplicaInfo
-		count              int32
-		want               []int32
+		description string
+		infos       []pcsgReplicaInfo
+		count       int32
+		want        []int32
 	}{
 		{
-			description:        "no replicas yields no indices",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{},
-			count:              3,
-			want:               []int32{},
+			description: "no replicas yields no indices",
+			infos:       []pcsgReplicaInfo{},
+			count:       3,
+			want:        []int32{},
 		},
 		{
-			description:        "all replicas already at the current hash yields no old indices",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{0: current(componentutils.PCSGReplicaStateReady), 1: current(componentutils.PCSGReplicaStateUnavailable)},
-			count:              3,
-			want:               []int32{},
+			description: "all replicas already at the current hash yields no old indices",
+			infos:       []pcsgReplicaInfo{current(0, componentutils.PCSGReplicaStateReady), current(1, componentutils.PCSGReplicaStateUnavailable)},
+			count:       3,
+			want:        []int32{},
 		},
 		{
 			description: "worst-off first across states, ascending index within a state",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{
-				0: old(componentutils.PCSGReplicaStateReady), 1: old(componentutils.PCSGReplicaStatePending), 2: old(componentutils.PCSGReplicaStateUnavailable),
-				3: old(componentutils.PCSGReplicaStatePending), 4: old(componentutils.PCSGReplicaStateReady), 5: old(componentutils.PCSGReplicaStateUnavailable),
+			infos: []pcsgReplicaInfo{
+				old(0, componentutils.PCSGReplicaStateReady), old(1, componentutils.PCSGReplicaStatePending), old(2, componentutils.PCSGReplicaStateUnavailable),
+				old(3, componentutils.PCSGReplicaStatePending), old(4, componentutils.PCSGReplicaStateReady), old(5, componentutils.PCSGReplicaStateUnavailable),
 			},
 			count: 6,
 			want:  []int32{1, 3, 2, 5, 0, 4},
 		},
 		{
-			description:        "a count smaller than the number of old indices returns only the worst-off ones",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{0: old(componentutils.PCSGReplicaStateReady), 1: old(componentutils.PCSGReplicaStateUnavailable), 2: old(componentutils.PCSGReplicaStatePending)},
-			count:              1,
-			want:               []int32{2},
+			description: "a count smaller than the number of old indices returns only the worst-off ones",
+			infos:       []pcsgReplicaInfo{old(0, componentutils.PCSGReplicaStateReady), old(1, componentutils.PCSGReplicaStateUnavailable), old(2, componentutils.PCSGReplicaStatePending)},
+			count:       1,
+			want:        []int32{2},
 		},
 		{
-			description:        "count beyond the available old indices returns them all",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{0: old(componentutils.PCSGReplicaStateReady), 2: old(componentutils.PCSGReplicaStateUnavailable)},
-			count:              5,
-			want:               []int32{2, 0},
+			description: "count beyond the available old indices returns them all",
+			infos:       []pcsgReplicaInfo{old(0, componentutils.PCSGReplicaStateReady), old(2, componentutils.PCSGReplicaStateUnavailable)},
+			count:       5,
+			want:        []int32{2, 0},
 		},
 		{
-			description:        "current-hash replicas are excluded regardless of state",
-			infoByReplicaIndex: map[int]pcsgReplicaInfo{0: current(componentutils.PCSGReplicaStatePending), 1: old(componentutils.PCSGReplicaStateReady), 2: current(componentutils.PCSGReplicaStateUnavailable)},
-			count:              3,
-			want:               []int32{1},
+			description: "current-hash replicas are excluded regardless of state",
+			infos:       []pcsgReplicaInfo{current(0, componentutils.PCSGReplicaStatePending), old(1, componentutils.PCSGReplicaStateReady), current(2, componentutils.PCSGReplicaStateUnavailable)},
+			count:       3,
+			want:        []int32{1},
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			p := &subStepPlanner{pcsgReplicaInfos: map[string]map[int]pcsgReplicaInfo{pcsgName: tc.infoByReplicaIndex}}
+			p := &subStepPlanner{pcsgReplicaInfos: map[string][]pcsgReplicaInfo{pcsgName: tc.infos}}
 			assert.Equal(t, tc.want, p.nextOldPCSGIndicesToRoll(pcsgName, tc.count))
 		})
 	}
@@ -816,14 +816,14 @@ func newTestPlanner(clk clock.Clock, currentHash string, entries []grovecorev1al
 	// health-ordered index selection exercises the real atCurrentHash derivation. Each PCSG's
 	// current-hash-committed indices are atCurrentHash and the remaining desired indices are old. Every
 	// replica defaults to Ready, a test needing other states sets pcsgReplicaInfos on the returned planner.
-	pcsgReplicaInfos := make(map[string]map[int]pcsgReplicaInfo, len(pcsgs))
+	pcsgReplicaInfos := make(map[string][]pcsgReplicaInfo, len(pcsgs))
 	for name := range pcsgs {
 		committedIndices := currentHashCommittedPCSGReplicaIndices(entries, name, currentHash)
-		infoByReplicaIndex := make(map[int]pcsgReplicaInfo, liveReplicas[name])
+		infos := make([]pcsgReplicaInfo, 0, liveReplicas[name])
 		for replicaIndex := 0; replicaIndex < int(liveReplicas[name]); replicaIndex++ {
-			infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: componentutils.PCSGReplicaStateReady, atCurrentHash: committedIndices.Has(replicaIndex)}
+			infos = append(infos, pcsgReplicaInfo{index: replicaIndex, state: componentutils.PCSGReplicaStateReady, atCurrentHash: committedIndices.Has(replicaIndex)})
 		}
-		pcsgReplicaInfos[name] = infoByReplicaIndex
+		pcsgReplicaInfos[name] = infos
 	}
 	return &subStepPlanner{
 		clk:                       clk,
