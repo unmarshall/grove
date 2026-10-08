@@ -37,7 +37,7 @@ func (p *subStepPlanner) applySubStep(ss subStep) ([]grovecorev1alpha1.PodGangEn
 		return nil, err
 	}
 
-	drainStandalonePCLQs(entries, currentHash, ss.drainStandalonePCLQCounts, p.runningPodsByCliqueAndAnchor)
+	drainStandalonePCLQs(entries, currentHash, ss.drainStandalonePCLQCounts, p.pclqPodCounts.runningByCliqueAndAnchor)
 	drainPCSGIndices(entries, currentHash, ss.drainPCSGReplicaIndices)
 	subsumeIntoAnchor(entries, ss.subsumeAnchorEpoch, ss.subsumeStandalonePCLQCounts)
 

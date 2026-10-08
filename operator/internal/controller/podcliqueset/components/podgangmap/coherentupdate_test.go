@@ -15,10 +15,13 @@
 package podgangmap
 
 import (
+	"strconv"
 	"testing"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
@@ -216,89 +219,144 @@ func TestSubsumedPodsScheduled(t *testing.T) {
 	}
 }
 
-// TestMaxUnavailableBudgetSatisfied covers the drain-aware disruption budget gate. Each case names the
-// in-scope components with their desired replicas, MaxUnavailable, the available count a standalone
-// PodClique reports through ReadyReplicas or a PodCliqueScalingGroup through AvailableReplicas, and what the
-// next sub-step would drain, and states whether the drain keeps unavailability within MaxUnavailable.
+// TestMaxUnavailableBudgetSatisfied covers the disruption budget gate. Standalone PodCliques use the
+// count-anchored budget (existing non-terminating minus the availability floor minus in-flight replacements,
+// with missing old-version Pods a free reclaim), so an already-unavailable old Pod never blocks its own
+// replacement. PodCliqueScalingGroups use the same count-anchored budget over their replica indices.
 func TestMaxUnavailableBudgetSatisfied(t *testing.T) {
 	testCases := []struct {
 		description               string
-		standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique
-		pcsgByComponent           map[string]grovecorev1alpha1.PodCliqueScalingGroup
 		desiredReplicas           map[string]int32
 		maxUnavailableByComponent map[string]int32
-		drainByComponent          map[string]int32
+		nonTerminatingByPCLQ      map[string]int32
+		newNotReadyByPCLQ         map[string]int32
 		numMissingOldVersionPods  map[string]int32
+		pcsgReplicaInfos          map[string]map[int]pcsgReplicaInfo
+		drainByComponent          map[string]int32
 		want                      bool
 	}{
 		{
+			description:               "a single-replica standalone PodClique whose only Pod is unavailable can start its own replacement",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 1},
+			desiredReplicas:           map[string]int32{"frontend": 1},
+			maxUnavailableByComponent: map[string]int32{"frontend": 1},
+			drainByComponent:          map[string]int32{"frontend": 1},
+			want:                      true,
+		},
+		{
 			description:               "a fully available standalone PodClique absorbs a full-budget drain",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			drainByComponent:          map[string]int32{"frontend": 3},
 			want:                      true,
 		},
 		{
-			description:               "a standalone PodClique already at the budget holds any further drain",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(7)},
+			description:               "a standalone drain beyond the budget holds",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 4},
+			want:                      false,
+		},
+		{
+			description:               "in-flight replacements consume the standalone budget so a further drain holds",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
+			newNotReadyByPCLQ:         map[string]int32{"frontend": 2},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 2},
+			want:                      false,
+		},
+		{
+			description:               "more unavailable old replicas than MaxUnavailable still lets the budgeted drain proceed",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 5},
+			desiredReplicas:           map[string]int32{"frontend": 5},
+			maxUnavailableByComponent: map[string]int32{"frontend": 1},
 			drainByComponent:          map[string]int32{"frontend": 1},
-			want:                      false,
-		},
-		{
-			description:               "unrelated unavailability plus the sub-step drain crossing the budget holds",
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(4)},
-			desiredReplicas:           map[string]int32{"decode": 6},
-			maxUnavailableByComponent: map[string]int32{"decode": 2},
-			drainByComponent:          map[string]int32{"decode": 2},
-			want:                      false,
-		},
-		{
-			description:               "a PodCliqueScalingGroup drain that exactly reaches the budget proceeds",
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
-			desiredReplicas:           map[string]int32{"decode": 6},
-			maxUnavailableByComponent: map[string]int32{"decode": 2},
-			drainByComponent:          map[string]int32{"decode": 2},
-			want:                      true,
-		},
-		{
-			description:               "a component the sub-step does not drain is not gated by its own unavailability",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
-			desiredReplicas:           map[string]int32{"frontend": 10},
-			maxUnavailableByComponent: map[string]int32{"frontend": 3},
-			drainByComponent:          map[string]int32{},
 			want:                      true,
 		},
 		{
 			description:               "a standalone PodClique reclaiming only missing old-version Pods proceeds even when over budget",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 6},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
-			drainByComponent:          map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{"frontend": 4},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 4},
 			want:                      true,
 		},
 		{
 			description:               "a standalone drain beyond its missing old-version Pods crossing the budget holds",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			drainByComponent:          map[string]int32{"frontend": 5},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
 			want:                      false,
 		},
+		{
+			description:               "a standalone PodClique the sub-step does not drain is not gated",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 6},
+			newNotReadyByPCLQ:         map[string]int32{"frontend": 4},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			drainByComponent:          map[string]int32{},
+			want:                      true,
+		},
+		{
+			description:               "a single-replica PodCliqueScalingGroup whose only replica is unavailable can start its replacement",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", []componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateUnavailable}, nil),
+			desiredReplicas:           map[string]int32{"decode": 1},
+			maxUnavailableByComponent: map[string]int32{"decode": 1},
+			drainByComponent:          map[string]int32{"decode": 1},
+			want:                      true,
+		},
+		{
+			description:               "more unavailable PodCliqueScalingGroup replicas than MaxUnavailable still lets the budgeted drain proceed",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", []componentutils.PCSGReplicaState{componentutils.PCSGReplicaStateReady, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable, componentutils.PCSGReplicaStateUnavailable}, nil),
+			desiredReplicas:           map[string]int32{"decode": 5},
+			maxUnavailableByComponent: map[string]int32{"decode": 1},
+			drainByComponent:          map[string]int32{"decode": 1},
+			want:                      true,
+		},
+		{
+			description:               "a PodCliqueScalingGroup drain that exactly reaches the budget proceeds",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			drainByComponent:          map[string]int32{"decode": 2},
+			want:                      true,
+		},
+		{
+			description:               "a PodCliqueScalingGroup drain beyond the budget holds",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			drainByComponent:          map[string]int32{"decode": 3},
+			want:                      false,
+		},
+		{
+			description:               "in-flight PodCliqueScalingGroup replacements consume the budget so a further drain holds",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 4), repeatPCSGState(componentutils.PCSGReplicaStateUnavailable, 2)),
+			desiredReplicas:           map[string]int32{"decode": 6},
+			maxUnavailableByComponent: map[string]int32{"decode": 2},
+			drainByComponent:          map[string]int32{"decode": 1},
+			want:                      false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			// The budget gate reads the ready count, the number of Pods that are Ready and not
-			// terminating. Each case's PodClique ReadyReplicas stands in for that ready count.
-			readyCountsByPCLQ := make(map[string]int32, len(tc.standalonePCLQByComponent))
-			for name, pclq := range tc.standalonePCLQByComponent {
-				readyCountsByPCLQ[name] = pclq.Status.ReadyReplicas
+			planner := &subStepPlanner{
+				desiredReplicas:           tc.desiredReplicas,
+				maxUnavailableByComponent: tc.maxUnavailableByComponent,
+				pcsgReplicaInfos:          tc.pcsgReplicaInfos,
+				pclqPodCounts: standalonePCLQPodCounts{
+					nonTerminatingByPCLQ: tc.nonTerminatingByPCLQ,
+					newNotReadyByPCLQ:    tc.newNotReadyByPCLQ,
+				},
+				numMissingOldVersionPodsByPCLQ: tc.numMissingOldVersionPods,
 			}
-			assert.Equal(t, tc.want, maxUnavailableBudgetSatisfied(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, tc.drainByComponent, readyCountsByPCLQ, tc.numMissingOldVersionPods))
+			assert.Equal(t, tc.want, planner.maxUnavailableBudgetSatisfied(tc.drainByComponent))
 		})
 	}
 }
@@ -470,42 +528,45 @@ func TestAdvanceFullyDrainedEntries(t *testing.T) {
 }
 
 // TestHeadroomByComponent checks the per-component drain headroom. For a standalone PodClique it is the
-// running-Pod takedown headroom plus the free missing old-version term. For a PodCliqueScalingGroup it is
-// only the running-replica takedown headroom, since a PodCliqueScalingGroup has no missing old-version term.
+// free missing old-version reclaims plus the count-anchored running-Pod takedown headroom. For a
+// PodCliqueScalingGroup it is the count-anchored replica takedown headroom, since a PodCliqueScalingGroup
+// has no missing old-version term.
 func TestHeadroomByComponent(t *testing.T) {
 	testCases := []struct {
 		description               string
-		standalonePCLQByComponent map[string]grovecorev1alpha1.PodClique
-		pcsgByComponent           map[string]grovecorev1alpha1.PodCliqueScalingGroup
+		pcsgReplicaInfos          map[string]map[int]pcsgReplicaInfo
 		desiredReplicas           map[string]int32
 		maxUnavailableByComponent map[string]int32
+		nonTerminatingByPCLQ      map[string]int32
+		newNotReadyByPCLQ         map[string]int32
 		numMissingOldVersionPods  map[string]int32
 		want                      map[string]int32
 	}{
 		{
-			description:               "standalone within budget and no missing old-version Pod leaves the remaining budget",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
-			desiredReplicas:           map[string]int32{"frontend": 10},
-			maxUnavailableByComponent: map[string]int32{"frontend": 3},
-			want:                      map[string]int32{"frontend": 1},
-		},
-		{
 			description:               "standalone fully available takes the full budget",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(10)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			want:                      map[string]int32{"frontend": 3},
 		},
 		{
-			description:               "standalone over budget with no missing old-version Pod has zero headroom",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			description:               "standalone in-flight replacements reduce the headroom",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
+			newNotReadyByPCLQ:         map[string]int32{"frontend": 2},
+			desiredReplicas:           map[string]int32{"frontend": 10},
+			maxUnavailableByComponent: map[string]int32{"frontend": 3},
+			want:                      map[string]int32{"frontend": 1},
+		},
+		{
+			description:               "standalone short of desired with no missing old-version Pod has zero headroom",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 6},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			want:                      map[string]int32{"frontend": 0},
 		},
 		{
-			description:               "standalone over budget with missing old-version Pods has headroom equal to that count",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(6)},
+			description:               "standalone short of desired with missing old-version Pods has headroom equal to that count",
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 6},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 4},
@@ -513,31 +574,31 @@ func TestHeadroomByComponent(t *testing.T) {
 		},
 		{
 			description:               "standalone within budget plus missing old-version Pods adds both",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 9},
 			desiredReplicas:           map[string]int32{"frontend": 10},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
-			want:                      map[string]int32{"frontend": 2},
+			want:                      map[string]int32{"frontend": 3},
 		},
 		{
 			description:               "PodCliqueScalingGroup within budget leaves the remaining budget",
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
 			want:                      map[string]int32{"decode": 2},
 		},
 		{
-			description:               "PodCliqueScalingGroup over budget has zero headroom and ignores any missing old-version count",
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(4)},
+			description:               "PodCliqueScalingGroup short of desired has zero headroom",
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 3), nil),
 			desiredReplicas:           map[string]int32{"decode": 6},
 			maxUnavailableByComponent: map[string]int32{"decode": 2},
-			numMissingOldVersionPods:  map[string]int32{"decode": 5},
 			want:                      map[string]int32{"decode": 0},
 		},
 		{
 			description:               "standalone and PodCliqueScalingGroup headroom computed together",
-			standalonePCLQByComponent: map[string]grovecorev1alpha1.PodClique{"frontend": pclqWithReadyReplicas(8)},
-			pcsgByComponent:           map[string]grovecorev1alpha1.PodCliqueScalingGroup{"decode": pcsgWithAvailableReplicas(6)},
+			nonTerminatingByPCLQ:      map[string]int32{"frontend": 10},
+			newNotReadyByPCLQ:         map[string]int32{"frontend": 2},
+			pcsgReplicaInfos:          pcsgReplicaInfosWith("decode", repeatPCSGState(componentutils.PCSGReplicaStateReady, 6), nil),
 			desiredReplicas:           map[string]int32{"frontend": 10, "decode": 6},
 			maxUnavailableByComponent: map[string]int32{"frontend": 3, "decode": 2},
 			numMissingOldVersionPods:  map[string]int32{"frontend": 1},
@@ -546,11 +607,17 @@ func TestHeadroomByComponent(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			readyCountsByPCLQ := make(map[string]int32, len(tc.standalonePCLQByComponent))
-			for name, pclq := range tc.standalonePCLQByComponent {
-				readyCountsByPCLQ[name] = pclq.Status.ReadyReplicas
+			planner := &subStepPlanner{
+				desiredReplicas:           tc.desiredReplicas,
+				maxUnavailableByComponent: tc.maxUnavailableByComponent,
+				pcsgReplicaInfos:          tc.pcsgReplicaInfos,
+				pclqPodCounts: standalonePCLQPodCounts{
+					nonTerminatingByPCLQ: tc.nonTerminatingByPCLQ,
+					newNotReadyByPCLQ:    tc.newNotReadyByPCLQ,
+				},
+				numMissingOldVersionPodsByPCLQ: tc.numMissingOldVersionPods,
 			}
-			assert.Equal(t, tc.want, headroomByComponent(tc.pcsgByComponent, tc.desiredReplicas, tc.maxUnavailableByComponent, readyCountsByPCLQ, tc.numMissingOldVersionPods))
+			assert.Equal(t, tc.want, planner.headroomByComponent())
 		})
 	}
 }
@@ -623,19 +690,22 @@ func TestNumMissingOldVersionPodsByStandalonePCLQ(t *testing.T) {
 
 // TestGatherStandalonePodCounts covers the single-pass Pod count read. runningByCliqueAndAnchor buckets
 // non-terminating Pods by their grove.io/podgang label mapped to an anchor epoch, and excludes terminating
-// Pods and Pods on a PodGang that is not an anchor of this replica. readyCountsByPCLQ counts Pods that
-// are Ready and not terminating across all of the PodClique's Pods, so it excludes a not-ready Pod and a
-// Ready-but-terminating Pod, and includes a Ready Pod that is not on an anchor.
+// Pods and Pods on a PodGang that is not an anchor of this replica. nonTerminatingByPCLQ counts all
+// non-terminating Pods. newNotReadyByPCLQ counts non-terminating, not-Ready Pods on a current-hash anchor,
+// so it excludes a not-Ready Pod on an old anchor and a not-Ready Pod off any anchor.
 func TestGatherStandalonePodCounts(t *testing.T) {
 	rnr := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
-	pcs := &grovecorev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace}}
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
+	}
 	pclq := grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "frontend-pclq", Namespace: coherentTestNamespace, UID: "frontend-uid"}}
 	entries := []grovecorev1alpha1.PodGangEntry{
-		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "50"},
-		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "200"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "50", PodCliqueSetGenerationHash: "old"},
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "200", PodCliqueSetGenerationHash: "new"},
 	}
-	gang50 := apicommon.GenerateAnchorPodGangName(rnr, "50")
-	gang200 := apicommon.GenerateAnchorPodGangName(rnr, "200")
+	oldGang := apicommon.GenerateAnchorPodGangName(rnr, "50")
+	currentGang := apicommon.GenerateAnchorPodGangName(rnr, "200")
 	pod := func(name, gang string, terminating, ready bool) *corev1.Pod {
 		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
@@ -653,19 +723,79 @@ func TestGatherStandalonePodCounts(t *testing.T) {
 		return p
 	}
 	objs := []client.Object{
-		pod("p1", gang50, false, true),
-		pod("p2", gang50, false, false),
-		pod("p3", gang200, false, true),
-		pod("p4", gang200, true, true),
-		pod("p5", "unrelated-gang", false, true),
+		pod("p1", oldGang, false, true),          // old anchor, Ready
+		pod("p2", oldGang, false, false),         // old anchor, not Ready (not counted as newNotReady)
+		pod("p3", currentGang, false, true),      // current anchor, Ready
+		pod("p6", currentGang, false, false),     // current anchor, not Ready (the only newNotReady)
+		pod("p4", currentGang, true, true),       // terminating, excluded everywhere
+		pod("p5", "unrelated-gang", false, true), // Ready, off any anchor of this replica
 	}
 	r := _resource{client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(objs...).Build()}
 
 	got, err := r.gatherStandalonePodCounts(t.Context(), pcs, 0, entries, map[string]grovecorev1alpha1.PodClique{"frontend": pclq})
 
 	require.NoError(t, err)
-	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 1}}, got.runningByCliqueAndAnchor)
-	assert.Equal(t, map[string]int32{"frontend": 3}, got.readyCountsByPCLQ)
+	assert.Equal(t, map[string]map[string]int32{"frontend": {"50": 2, "200": 2}}, got.runningByCliqueAndAnchor)
+	assert.Equal(t, map[string]int32{"frontend": 5}, got.nonTerminatingByPCLQ)
+	assert.Equal(t, map[string]int32{"frontend": 1}, got.newNotReadyByPCLQ)
+}
+
+// TestGatherPCSGReplicaInfos covers the per-replica-index read of a PodCliqueScalingGroup's member
+// PodCliques: a replica is present unless all its members terminate, its health comes from
+// ComputePCSGReplicaState over the members, and atCurrentHash is set when a current-hash entry commits the
+// index.
+func TestGatherPCSGReplicaInfos(t *testing.T) {
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
+	}
+	const pcsgName = "pcs-0-sga"
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: pcsgName, Namespace: coherentTestNamespace}}
+	// A current-hash entry commits replica index 0 of sga, so it is at the current hash.
+	entries := []grovecorev1alpha1.PodGangEntry{
+		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "100", PodCliqueSetGenerationHash: "new", PCSGReplicaIndices: map[string][]int32{"sga": {0}}},
+	}
+	objs := []client.Object{
+		pcsgMemberPCLQ("sga-0-m", pcsgName, 0, 1, 1, 1, false), // committed to current hash, Ready
+		pcsgMemberPCLQ("sga-1-m", pcsgName, 1, 1, 1, 0, false), // old, Unavailable (ready below MinAvailable)
+		pcsgMemberPCLQ("sga-2-m", pcsgName, 2, 1, 0, 0, false), // old, Pending (scheduled below MinAvailable)
+		pcsgMemberPCLQ("sga-3-m", pcsgName, 3, 1, 1, 1, true),  // all members terminating, skipped
+	}
+	r := _resource{client: testutils.NewTestClientBuilder().WithObjects(objs...).Build()}
+
+	got, err := r.gatherPCSGReplicaInfos(t.Context(), pcs, entries, map[string]grovecorev1alpha1.PodCliqueScalingGroup{"sga": pcsg})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]map[int]pcsgReplicaInfo{
+		"sga": {
+			0: {state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
+			1: {state: componentutils.PCSGReplicaStateUnavailable, atCurrentHash: false},
+			2: {state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
+		},
+	}, got)
+}
+
+// pcsgMemberPCLQ builds a PodCliqueScalingGroup member PodClique at the given replica index with the owner
+// reference, labels, MinAvailable, and scheduled and ready status counts that gatherPCSGReplicaInfos reads.
+func pcsgMemberPCLQ(name, pcsgName string, replicaIndex, minAvailable, scheduled, ready int32, terminating bool) *grovecorev1alpha1.PodClique {
+	pclq := &grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: coherentTestNamespace,
+			Labels: map[string]string{
+				apicommon.LabelPodCliqueScalingGroup:             pcsgName,
+				apicommon.LabelPodCliqueScalingGroupReplicaIndex: strconv.Itoa(int(replicaIndex)),
+			},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "grove.io/v1alpha1", Kind: constants.KindPodCliqueScalingGroup, Name: pcsgName, Controller: ptr.To(true)}},
+		},
+		Spec:   grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(minAvailable)},
+		Status: grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: scheduled, ReadyReplicas: ready},
+	}
+	if terminating {
+		pclq.DeletionTimestamp = ptr.To(metav1.Now())
+		pclq.Finalizers = []string{"grove.io/test"}
+	}
+	return pclq
 }
 
 // pclqWithUpdatedScheduledReplicas builds a standalone PodClique reporting the given new-hash scheduled
@@ -678,14 +808,30 @@ func pclqWithUpdatedScheduledReplicas(updatedReady int32) grovecorev1alpha1.PodC
 	}
 }
 
-// pclqWithReadyReplicas builds a standalone PodClique reporting the given total Ready Pod count.
-func pclqWithReadyReplicas(ready int32) grovecorev1alpha1.PodClique {
-	return grovecorev1alpha1.PodClique{Status: grovecorev1alpha1.PodCliqueStatus{ReadyReplicas: ready}}
+// pcsgReplicaInfosWith builds a single-component pcsgReplicaInfos map. oldStates are the states of
+// not-yet-rolled replica indices and currentHashStates the states of already-rolled (current-hash) indices,
+// assigned ascending indices.
+func pcsgReplicaInfosWith(componentName string, oldStates, currentHashStates []componentutils.PCSGReplicaState) map[string]map[int]pcsgReplicaInfo {
+	infoByReplicaIndex := make(map[int]pcsgReplicaInfo, len(oldStates)+len(currentHashStates))
+	replicaIndex := 0
+	for _, state := range oldStates {
+		infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: state, atCurrentHash: false}
+		replicaIndex++
+	}
+	for _, state := range currentHashStates {
+		infoByReplicaIndex[replicaIndex] = pcsgReplicaInfo{state: state, atCurrentHash: true}
+		replicaIndex++
+	}
+	return map[string]map[int]pcsgReplicaInfo{componentName: infoByReplicaIndex}
 }
 
-// pcsgWithAvailableReplicas builds a PodCliqueScalingGroup reporting the given available replica count.
-func pcsgWithAvailableReplicas(available int32) grovecorev1alpha1.PodCliqueScalingGroup {
-	return grovecorev1alpha1.PodCliqueScalingGroup{Status: grovecorev1alpha1.PodCliqueScalingGroupStatus{AvailableReplicas: available}}
+// repeatPCSGState returns a slice of count copies of state.
+func repeatPCSGState(state componentutils.PCSGReplicaState, count int) []componentutils.PCSGReplicaState {
+	states := make([]componentutils.PCSGReplicaState, count)
+	for i := range states {
+		states[i] = state
+	}
+	return states
 }
 
 // podGangAtEpoch builds a PodGang owned by the test PCS replica 0 and stamped with the given epoch, marked
