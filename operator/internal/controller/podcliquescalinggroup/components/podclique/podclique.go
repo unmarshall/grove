@@ -49,7 +49,6 @@ import (
 
 const (
 	errCodeListPodClique                                 grovecorev1alpha1.ErrorCode = "ERR_LIST_PODCLIQUE"
-	errCodeMissingStartupType                            grovecorev1alpha1.ErrorCode = "ERR_UNDEFINED_STARTUP_TYPE"
 	errCodeSetPodCliqueOwnerReference                    grovecorev1alpha1.ErrorCode = "ERR_SET_PODCLIQUE_OWNER_REFERENCE"
 	errCodeBuildPodClique                                grovecorev1alpha1.ErrorCode = "ERR_BUILD_PODCLIQUE"
 	errCodeCreatePodCliques                              grovecorev1alpha1.ErrorCode = "ERR_CREATE_PODCLIQUES"
@@ -312,7 +311,7 @@ func (r _resource) doCreateOrUpdate(ctx context.Context, logger logr.Logger, ss 
 func (r _resource) buildResource(logger logr.Logger, ss *syncSnapshot, pcsgReplicaIndex int, pclq *grovecorev1alpha1.PodClique, pclqExists bool) error {
 	pcs, pcsg, pcsReplicaIndex := ss.pcs, ss.pcsg, ss.pcsReplicaIndex
 	pclqObjectKey, pcsObjectKey := client.ObjectKeyFromObject(pclq), client.ObjectKeyFromObject(pcs)
-	pclqTemplateSpec, foundAtIndex, ok := lo.FindIndexOf(pcs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
+	pclqTemplateSpec, ok := lo.Find(pcs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
 		return strings.HasSuffix(pclq.Name, pclqTemplateSpec.Name)
 	})
 	if !ok {
@@ -372,11 +371,6 @@ func (r _resource) buildResource(logger logr.Logger, ss *syncSnapshot, pcsgRepli
 	}
 	pcsgTemplateNumPods := r.getPCSGTemplateNumPods(pcs, pcsg)
 	r.addEnvironmentVariablesToPodContainerSpecs(pclq, pcsgTemplateNumPods)
-	dependentCliqueNames, err := identifyStartupDependencyCliqueNames(pcs, pclq, foundAtIndex)
-	if err != nil {
-		return err
-	}
-	pclq.Spec.StartsAfter = dependentCliqueNames
 
 	// Inject MNNVL resourceClaims: resolve group hierarchically (PCLQ → PCSG).
 	// PCS-level annotations are already propagated onto the PCSG by the PCS
@@ -444,30 +438,6 @@ func getPCSReplicaFromPCSG(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (int, 
 		)
 	}
 	return pcsReplica, nil
-}
-
-// identifyStartupDependencyCliqueNames returns the unqualified parent clique names this PodClique starts
-// after, from the PodCliqueSet startup type: for InOrder the preceding template clique, for Explicit the
-// declared StartsAfter. The per-pod init container resolves these to the parent replicas co-committed in
-// each pod's own PodGang, so no replica index or MinAvailable is decided here.
-func identifyStartupDependencyCliqueNames(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, foundAtIndex int) ([]string, error) {
-	cliqueStartupType := pcs.Spec.Template.StartupType
-	if cliqueStartupType == nil {
-		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
-		// If it is still nil, then by not returning an error we break the API contract. It is a bug that should be fixed.
-		return nil, groveerr.New(errCodeMissingStartupType, component.OperationSync, fmt.Sprintf("PodClique: %v has nil StartupType", client.ObjectKeyFromObject(pclq)))
-	}
-	switch *cliqueStartupType {
-	case grovecorev1alpha1.CliqueStartupTypeInOrder:
-		if foundAtIndex == 0 {
-			return nil, nil
-		}
-		return []string{pcs.Spec.Template.Cliques[foundAtIndex-1].Name}, nil
-	case grovecorev1alpha1.CliqueStartupTypeExplicit:
-		return pclq.Spec.StartsAfter, nil
-	default:
-		return nil, nil
-	}
 }
 
 // getPodCliqueSelectorLabels creates label selector map for identifying PodCliques belonging to a PodCliqueScalingGroup

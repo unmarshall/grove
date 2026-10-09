@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -149,17 +150,37 @@ func generateArgsForInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *gro
 			fmt.Sprintf("error extracting PodCliqueSet replica index for PodClique %v", client.ObjectKeyFromObject(pclq)))
 	}
 	rnr := apicommon.ResourceNameReplica{Name: pcsName, Replica: pcsReplicaIndex}
+	parentCliqueNames, err := componentutils.StartupDependencyCliqueNames(pcs, cliqueTemplateName(pclq, rnr))
+	if err != nil {
+		return nil, groveerr.WrapError(err, errCodeResolveStartupDependencies, component.OperationSync,
+			fmt.Sprintf("error identifying startup dependencies for PodClique %v", client.ObjectKeyFromObject(pclq)))
+	}
+	if len(parentCliqueNames) == 0 {
+		return nil, nil
+	}
 	podGangName := pod.Labels[apicommon.LabelPodGang]
 	entry := entryForPodGangName(pgm, rnr, podGangName)
 	if entry == nil {
 		return nil, groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
 			fmt.Sprintf("PodGang %q for PodClique %v has no committed PodGangMap entry yet, requeuing", podGangName, client.ObjectKeyFromObject(pclq)))
 	}
-	args := make([]string, 0, len(pclq.Spec.StartsAfter))
-	for _, target := range componentutils.StartupDependencyTargetsInEntry(pcs, pcsReplicaIndex, entry, podGangName, pclq.Spec.StartsAfter) {
+	args := make([]string, 0, len(parentCliqueNames))
+	for _, target := range componentutils.StartupDependencyTargetsInEntry(pcs, pcsReplicaIndex, entry, podGangName, parentCliqueNames) {
 		args = append(args, fmt.Sprintf("--podcliques=%s:%d", target.PodCliqueFQN, target.MinReady))
 	}
 	return args, nil
+}
+
+// cliqueTemplateName returns the clique template name of pclq. A PodCliqueScalingGroup member clique is named
+// <pcsgFQN>-<pcsgReplicaIndex>-<cliqueName>, so the clique template name is recovered from the scaling group FQN and
+// replica-index labels. A standalone PodClique is named <pcs>-<pcsReplicaIndex>-<cliqueName> and can be extracted
+// given the PCS name and PCS replica index.
+func cliqueTemplateName(pclq *grovecorev1alpha1.PodClique, pcsRnr apicommon.ResourceNameReplica) string {
+	if pcsgFQN, ok := pclq.Labels[apicommon.LabelPodCliqueScalingGroup]; ok {
+		prefix := fmt.Sprintf("%s-%s-", pcsgFQN, pclq.Labels[apicommon.LabelPodCliqueScalingGroupReplicaIndex])
+		return strings.TrimPrefix(pclq.Name, prefix)
+	}
+	return apicommon.ExtractPodCliqueNameFromStandalonePCLQFQN(pclq.Name, pcsRnr)
 }
 
 // entryForPodGangName returns the committed PodGangMap entry that materializes podGangName for the replica,

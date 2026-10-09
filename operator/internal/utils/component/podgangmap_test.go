@@ -507,6 +507,64 @@ func TestStartupDependencyTargetsInEntry(t *testing.T) {
 	}
 }
 
+func TestStartupDependencyCliqueNames(t *testing.T) {
+	inOrderPCS := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "ml"},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeInOrder),
+				Cliques:     []*grovecorev1alpha1.PodCliqueTemplateSpec{{Name: "a"}, {Name: "b"}, {Name: "c"}},
+			},
+		},
+	}
+	explicitPCS := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "ml"},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeExplicit),
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "a"},
+					{Name: "b", Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{"a"}}},
+					{Name: "c", Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{"a", "b"}}},
+				},
+			},
+		},
+	}
+	noStartupTypePCS := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "ml"},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{{Name: "a"}},
+			},
+		},
+	}
+	tests := []struct {
+		description string
+		pcs         *grovecorev1alpha1.PodCliqueSet
+		cliqueName  string
+		want        []string
+		wantErr     bool
+	}{
+		{description: "InOrder first clique has no parent", pcs: inOrderPCS, cliqueName: "a", want: nil},
+		{description: "InOrder non-first clique starts after the preceding clique", pcs: inOrderPCS, cliqueName: "c", want: []string{"b"}},
+		{description: "Explicit clique returns its declared StartsAfter", pcs: explicitPCS, cliqueName: "c", want: []string{"a", "b"}},
+		{description: "Explicit clique without a declared StartsAfter returns none", pcs: explicitPCS, cliqueName: "a", want: nil},
+		{description: "unknown clique is an error", pcs: inOrderPCS, cliqueName: "missing", wantErr: true},
+		{description: "nil startup type is an error", pcs: noStartupTypePCS, cliqueName: "a", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			got, err := StartupDependencyCliqueNames(tc.pcs, tc.cliqueName)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func pgmNames(pgms []grovecorev1alpha1.PodGangMap) []string {
 	names := make([]string, 0, len(pgms))
 	for i := range pgms {

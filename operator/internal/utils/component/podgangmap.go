@@ -17,6 +17,7 @@ package component
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -277,6 +278,36 @@ func EpochByAnchorPodGangName(entries []grovecorev1alpha1.PodGangEntry, rnr apic
 		}
 	}
 	return epochByPodGangName
+}
+
+// StartupDependencyCliqueNames returns the parent clique names the given clique must start after.
+// The list of dependencies for the given clique is derived from the PodCliqueSet's immutable startup configuration.
+//   - For CliqueStartupTypeInOrder: it is the preceding clique in the template order (none for the first clique).
+//   - For CliqueStartupTypeExplicit: it is that clique template's declared StartsAfter.
+//
+// An error is returned when the startup type is unset or the clique name is not present in the PodCliqueSet template.
+func StartupDependencyCliqueNames(pcs *grovecorev1alpha1.PodCliqueSet, cliqueName string) ([]string, error) {
+	startupType := pcs.Spec.Template.StartupType
+	if startupType == nil {
+		return nil, fmt.Errorf("no startup type found for PodCliqueSet %q", pcs.Name)
+	}
+	cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(t *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
+		return t.Name == cliqueName
+	})
+	if cliqueIndex < 0 {
+		return nil, fmt.Errorf("clique %q is not present in PodCliqueSet %q template", cliqueName, pcs.Name)
+	}
+	switch *startupType {
+	case grovecorev1alpha1.CliqueStartupTypeInOrder:
+		if cliqueIndex == 0 {
+			return nil, nil
+		}
+		return []string{pcs.Spec.Template.Cliques[cliqueIndex-1].Name}, nil
+	case grovecorev1alpha1.CliqueStartupTypeExplicit:
+		return pcs.Spec.Template.Cliques[cliqueIndex].Spec.StartsAfter, nil
+	default:
+		return nil, nil
+	}
 }
 
 // StartupDependencyTarget is one init-container wait target. It contains the fully qualified name of a parent PodClique

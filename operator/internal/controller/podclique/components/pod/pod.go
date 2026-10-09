@@ -68,6 +68,7 @@ const (
 	errCodeUpdatePodCliqueStatus               grovecorev1alpha1.ErrorCode = "ERR_UPDATE_PODCLIQUE_STATUS"
 	errCodeLabelPod                            grovecorev1alpha1.ErrorCode = "ERR_LABEL_POD"
 	errCodeRegisterExpectationsIndexers        grovecorev1alpha1.ErrorCode = "ERR_REGISTER_EXPECTATIONS_INDEXERS"
+	errCodeResolveStartupDependencies          grovecorev1alpha1.ErrorCode = "ERR_RESOLVE_STARTUP_DEPS"
 )
 
 const (

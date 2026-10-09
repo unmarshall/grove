@@ -829,11 +829,11 @@ func TestGatherPCSGReplicaInfosInventoriesAbsentReplicasAsPending(t *testing.T) 
 	}
 	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: coherentTestPCSGObjName,
+			Name:      coherentTestPCSGObjName,
 			Namespace: coherentTestNamespace,
 		},
 		Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{
-			Replicas: 3,
+			Replicas:    3,
 			CliqueNames: []string{"m"},
 		},
 	}

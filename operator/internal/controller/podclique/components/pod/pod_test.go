@@ -752,9 +752,10 @@ func Test_generateArgsForInitContainer_WaitsOnParentReplicaInOwnPodGang(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: pcsName},
 		Spec: grovecorev1alpha1.PodCliqueSetSpec{
 			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeExplicit),
 				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
 					{Name: "pf", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))}},
-					{Name: "dc", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))}},
+					{Name: "dc", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1)), StartsAfter: []string{"pf"}}},
 				},
 				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
 					{Name: "prefill", CliqueNames: []string{"pf"}},
@@ -786,17 +787,124 @@ func Test_generateArgsForInitContainer_WaitsOnParentReplicaInOwnPodGang(t *testi
 			},
 		},
 	}
-	// decode replica 0 on the new generation; its pod belongs to the new anchor PodGang.
+	// decode replica 0 on the new generation; its pod belongs to the new anchor PodGang. Its StartsAfter is
+	// intentionally left empty: the operator derives the dependency from the PCS template, not this field.
 	pclq := &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   fmt.Sprintf("%s-0-decode-0-dc", pcsName),
-			Labels: map[string]string{common.LabelPartOfKey: pcsName},
+			Name: fmt.Sprintf("%s-0-decode-0-dc", pcsName),
+			Labels: map[string]string{
+				common.LabelPartOfKey:                         pcsName,
+				common.LabelPodCliqueScalingGroup:             fmt.Sprintf("%s-0-decode", pcsName),
+				common.LabelPodCliqueScalingGroupReplicaIndex: "0",
+			},
 		},
-		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{"pf"}},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{common.LabelPodGang: newAnchorGangName}}}
 
 	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
 	require.NoError(t, err)
 	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-prefill-1-pf:1", pcsName)}, args)
+}
+
+// Test_generateArgsForInitContainer_IgnoresStalePreUpgradeStartsAfter verifies the resolver derives startup
+// dependencies from the PodCliqueSet template, not from the PodClique's StartsAfter. An existing PCSG child
+// created by an older operator still carries a resolved parent FQN in StartsAfter; after an upgrade the
+// resolver must ignore that stale value and still emit the parent resolved against the pod's own gang.
+func Test_generateArgsForInitContainer_IgnoresStalePreUpgradeStartsAfter(t *testing.T) {
+	const (
+		pcsName = "ml"
+		epoch   = "100"
+	)
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: pcsName},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeExplicit),
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "pf", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))}},
+					{Name: "dc", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1)), StartsAfter: []string{"pf"}}},
+				},
+				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "prefill", CliqueNames: []string{"pf"}},
+					{Name: "decode", CliqueNames: []string{"dc"}},
+				},
+			},
+		},
+	}
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	anchorGangName := common.GenerateAnchorPodGangName(rnr, epoch)
+	pgm := &grovecorev1alpha1.PodGangMap{
+		Spec: grovecorev1alpha1.PodGangMapSpec{
+			Entries: []grovecorev1alpha1.PodGangEntry{
+				{
+					Epoch:                      epoch,
+					PodCliqueSetGenerationHash: "hash",
+					Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+					PCSGReplicaIndices:         map[string][]int32{"prefill": {0}, "decode": {0}},
+				},
+			},
+		},
+	}
+	// Existing PCSG child from an older operator: StartsAfter still holds a resolved parent FQN that is not a
+	// clique name. If the resolver trusted it, StartupDependencyTargetsInEntry would match nothing and emit
+	// no wait target, letting decode start before prefill.
+	pclq := &grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-0-decode-0-dc", pcsName),
+			Labels: map[string]string{
+				common.LabelPartOfKey:                         pcsName,
+				common.LabelPodCliqueScalingGroup:             fmt.Sprintf("%s-0-decode", pcsName),
+				common.LabelPodCliqueScalingGroupReplicaIndex: "0",
+			},
+		},
+		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{fmt.Sprintf("%s-0-prefill-1-pf", pcsName)}},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{common.LabelPodGang: anchorGangName}}}
+
+	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
+	require.NoError(t, err)
+	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-prefill-0-pf:1", pcsName)}, args)
+}
+
+func TestCliqueTemplateName(t *testing.T) {
+	const pcsName = "ml"
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	tests := []struct {
+		description string
+		pclq        *grovecorev1alpha1.PodClique
+		want        string
+	}{
+		{
+			description: "standalone PodClique FQN yields the clique template name",
+			pclq:        &grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-0-frontend", pcsName)}},
+			want:        "frontend",
+		},
+		{
+			description: "PodCliqueScalingGroup member FQN yields the clique template name",
+			pclq: &grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("%s-0-decode-0-dc", pcsName),
+				Labels: map[string]string{
+					common.LabelPodCliqueScalingGroup:             fmt.Sprintf("%s-0-decode", pcsName),
+					common.LabelPodCliqueScalingGroupReplicaIndex: "0",
+				},
+			}},
+			want: "dc",
+		},
+		{
+			description: "PodCliqueScalingGroup member clique name containing hyphens is recovered intact",
+			pclq: &grovecorev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("%s-0-decode-2-worker-a", pcsName),
+				Labels: map[string]string{
+					common.LabelPodCliqueScalingGroup:             fmt.Sprintf("%s-0-decode", pcsName),
+					common.LabelPodCliqueScalingGroupReplicaIndex: "2",
+				},
+			}},
+			want: "worker-a",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			assert.Equal(t, tc.want, cliqueTemplateName(tc.pclq, rnr))
+		})
+	}
 }

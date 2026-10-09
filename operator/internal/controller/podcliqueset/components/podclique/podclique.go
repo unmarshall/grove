@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"slices"
 	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -301,7 +300,7 @@ func (r _resource) buildResource(logger logr.Logger, pcs *grovecorev1alpha1.PodC
 	if err := r.setPodCliqueObjectMeta(pcs, pcsReplica, pclqTemplate, preserveRevision, pclq); err != nil {
 		return err
 	}
-	return setPodCliqueSpec(logger, pcs, pcsReplica, cliqueName, pclqTemplate, pclqExists, preserveRevision, pclq)
+	return setPodCliqueSpec(logger, pcs, pcsReplica, pclqTemplate, pclqExists, preserveRevision, pclq)
 }
 
 // setPodCliqueObjectMeta sets the controller reference, finalizer, labels, and annotations on the
@@ -336,9 +335,10 @@ func (r _resource) setPodCliqueObjectMeta(pcs *grovecorev1alpha1.PodCliqueSet, p
 
 // setPodCliqueSpec sets the PodClique spec from its template. It preserves the HPA-managed replica count
 // and, for a replica not under a coherent update, the entire running revision, leaving the existing spec
-// untouched. StartsAfter is structural and always reconciled, and MNNVL claims are injected only when a
-// fresh template is applied, since a preserved revision already carries them.
-func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplica int, cliqueName string, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec, pclqExists, preserveRevision bool, pclq *grovecorev1alpha1.PodClique) error {
+// untouched. StartsAfter is user-declared desired state carried through the template, so the controller does
+// not write it. MNNVL claims are injected only when a fresh template is applied, since a preserved revision
+// already carries them.
+func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, pcsReplica int, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec, pclqExists, preserveRevision bool, pclq *grovecorev1alpha1.PodClique) error {
 	if pclqExists {
 		// If an HPA is mutating the number of replicas, then it should not be overwritten by the template spec replicas.
 		preservedReplicas := pclq.Spec.Replicas
@@ -350,11 +350,6 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 		pclq.Spec = *pclqTemplate.Spec.DeepCopy()
 	}
 
-	dependentCliqueNames, err := identifyStartupDependencyCliqueNames(pcs, cliqueName, pclqTemplate)
-	if err != nil {
-		return err
-	}
-	pclq.Spec.StartsAfter = dependentCliqueNames
 	// This return fires only for an existing PodClique of a replica not under the coherent update, since
 	// preserveRevision requires pclqExists. Such an object already carries its MNNVL claims from when it was
 	// created, so skip the injection below. A recreated PodClique has preserveRevision false and takes the
@@ -367,33 +362,6 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 		mnnvl.InjectMNNVLIntoPodSpec(logger, &pclq.Spec.PodSpec, apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplica}, groupName)
 	}
 	return nil
-}
-
-// identifyStartupDependencyCliqueNames returns the unqualified parent clique names this standalone PodClique
-// starts after, from the PodCliqueSet startup type: for InOrder the preceding template clique, for Explicit
-// the declared StartsAfter. The per-pod init container resolves these to the parent replicas co-committed in
-// each pod's own PodGang.
-func identifyStartupDependencyCliqueNames(pcs *grovecorev1alpha1.PodCliqueSet, cliqueName string, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) ([]string, error) {
-	cliqueStartupType := pcs.Spec.Template.StartupType
-	if cliqueStartupType == nil {
-		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
-		// If it is still nil, then by not returning an error we break the API contract. It is a bug that should be fixed.
-		return nil, groveerr.New(errSyncPodClique, component.OperationSync, fmt.Sprintf("clique %q in PodCliqueSet %v has nil StartupType", cliqueName, client.ObjectKeyFromObject(pcs)))
-	}
-	switch *cliqueStartupType {
-	case grovecorev1alpha1.CliqueStartupTypeInOrder:
-		cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
-			return pclqTemplate.Name == cliqueName
-		})
-		if cliqueIndex <= 0 {
-			return nil, nil
-		}
-		return []string{pcs.Spec.Template.Cliques[cliqueIndex-1].Name}, nil
-	case grovecorev1alpha1.CliqueStartupTypeExplicit:
-		return pclqTemplate.Spec.StartsAfter, nil
-	default:
-		return nil, nil
-	}
 }
 
 // getPodCliqueSelectorLabels returns labels for selecting all PodCliques of a PodCliqueSet.
