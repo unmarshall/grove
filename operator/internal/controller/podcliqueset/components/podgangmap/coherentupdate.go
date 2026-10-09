@@ -17,7 +17,6 @@ package podgangmap
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/ai-dynamo/grove/operator/api/common/constants"
@@ -513,15 +512,15 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 				fmt.Sprintf("could not list member PodCliques for PodCliqueScalingGroup %q under coherent update", componentName))
 		}
 		committedIndices := currentHashCommittedPCSGReplicaIndices(entries, componentName, currentHash)
+		membersByReplicaIndex, err := componentutils.GroupPCLQsByPCSGReplicaIndex(memberPCLQs)
+		if err != nil {
+			return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
+				fmt.Sprintf("could not group member PodCliques by replica index for PodCliqueScalingGroup %q under coherent update", componentName))
+		}
 		var infos []pcsgReplicaInfo
-		for replicaIndexStr, members := range componentutils.GroupPCLQsByPCSGReplicaIndex(memberPCLQs) {
+		for replicaIndex, members := range membersByReplicaIndex {
 			if allPodCliquesTerminating(members) {
 				continue // a replica who's every member is terminating is mid-replacement, not a live index
-			}
-			replicaIndex, err := strconv.Atoi(replicaIndexStr)
-			if err != nil {
-				return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
-					fmt.Sprintf("invalid PodCliqueScalingGroup replica index %q for %q under coherent update", replicaIndexStr, componentName))
 			}
 			// A replica index outside [0, Spec.Replicas) is a stray left by a scale-down. Including it would let
 			// the drain select and commit an index the PCSG controller never recreates, stalling the update, and

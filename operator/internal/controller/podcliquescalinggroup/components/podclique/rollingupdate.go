@@ -106,7 +106,10 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 		return strconv.Itoa(index)
 	})
 	logger.Info("triggering deletion of old-configuration replicas for rolling update", "replicaIndices", replicaIndicesToUpdate)
-	deleteTasks := r.createDeleteTasks(logger, sc, replicaIndicesToUpdateStr, "deleting old-configuration replicas for rolling update")
+	deleteTasks, err := r.createDeleteTasks(logger, sc, replicaIndicesToUpdateStr, "deleting old-configuration replicas for rolling update")
+	if err != nil {
+		return err
+	}
 	if err := r.triggerDeletionOfPodCliques(ctx, logger, client.ObjectKeyFromObject(sc.pcsg), deleteTasks); err != nil {
 		return err
 	}
@@ -161,10 +164,13 @@ func (r _resource) markUpdateEnd(ctx context.Context, logger logr.Logger, pcsg *
 // counts that drive the disruption budget and the completion check.
 func (r _resource) computePendingUpdateWork(ss *syncSnapshot) (*updateWork, error) {
 	uw := &updateWork{}
-	existingPCLQsByReplicaIndex := componentutils.GroupPCLQsByPCSGReplicaIndex(ss.existingPCLQs)
+	existingPCLQsByReplicaIndex, err := componentutils.GroupPCLQsByPCSGReplicaIndex(ss.existingPCLQs)
+	if err != nil {
+		return nil, err
+	}
 	pcsgexpectations.SyncPCSGReplicaDeleteExpectations(r.expectationsStore, ss.expectationsStoreKey, ss.existingPCLQs)
 	for pcsgReplicaIndex := range int(ss.pcsg.Spec.Replicas) {
-		memberPCLQs := existingPCLQsByReplicaIndex[strconv.Itoa(pcsgReplicaIndex)]
+		memberPCLQs := existingPCLQsByReplicaIndex[pcsgReplicaIndex]
 
 		// A replica with no PodCliques, all terminating, or whose disruption we already triggered
 		// (delete expectation recorded, cache not yet caught up) is mid-replacement: not a live replica

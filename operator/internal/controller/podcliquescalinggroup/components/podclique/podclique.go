@@ -189,11 +189,20 @@ func (r _resource) triggerDeletionOfPodCliques(ctx context.Context, logger logr.
 // Each task records delete expectations for the disrupted replica's member PodCliques so the rolling
 // update budget treats that replica as unavailable immediately, independent of the eventually
 // consistent informer cache.
-func (r _resource) createDeleteTasks(logger logr.Logger, sc *syncSnapshot, pcsgReplicasToDelete []string, reason string) []utils.Task {
+func (r _resource) createDeleteTasks(logger logr.Logger, sc *syncSnapshot, pcsgReplicasToDelete []string, reason string) ([]utils.Task, error) {
 	pcs, pcsgName := sc.pcs, sc.pcsg.Name
-	membersByReplicaIndex := componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)
+	membersByReplicaIndex, err := componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)
+	if err != nil {
+		return nil, err
+	}
 	deletionTasks := make([]utils.Task, 0, len(pcsgReplicasToDelete))
 	for _, pcsgReplicaIndex := range pcsgReplicasToDelete {
+		replicaIndex, convErr := strconv.Atoi(pcsgReplicaIndex)
+		if convErr != nil {
+			return nil, groveerr.WrapError(convErr, errCodeParsePodCliqueScalingGroupReplicaIndex, component.OperationSync,
+				fmt.Sprintf("invalid PodCliqueScalingGroup replica index %q for %v", pcsgReplicaIndex, client.ObjectKeyFromObject(sc.pcsg)))
+		}
+		members := membersByReplicaIndex[replicaIndex]
 		task := utils.Task{
 			Name: "DeletePCSGReplicaPodCliques-" + pcsgReplicaIndex,
 			Fn: func(ctx context.Context) error {
@@ -208,7 +217,7 @@ func (r _resource) createDeleteTasks(logger logr.Logger, sc *syncSnapshot, pcsgR
 				// Treat the disrupted replica as unavailable immediately by recording delete expectations for
 				// its member PodCliques. The delete already happened, so a failure here is logged, not fatal;
 				// the expectations sync and the cache reconcile it on a later pass.
-				if err := pcsgexpectations.RecordPCSGReplicaDeleteExpectations(logger, r.expectationsStore, sc.expectationsStoreKey, membersByReplicaIndex[pcsgReplicaIndex]); err != nil {
+				if err := pcsgexpectations.RecordPCSGReplicaDeleteExpectations(logger, r.expectationsStore, sc.expectationsStoreKey, members); err != nil {
 					utilruntime.HandleErrorWithLogger(logger, err, "could not record replica delete expectations", "pcsg", client.ObjectKeyFromObject(sc.pcsg), "replicaIndex", pcsgReplicaIndex)
 				}
 				logger.Info("Deleting PodCliqueScalingGroup replica", "pcsgName", pcsgName, "pcsgReplicaIndex", pcsgReplicaIndex)
@@ -218,7 +227,7 @@ func (r _resource) createDeleteTasks(logger logr.Logger, sc *syncSnapshot, pcsgR
 		}
 		deletionTasks = append(deletionTasks, task)
 	}
-	return deletionTasks
+	return deletionTasks, nil
 }
 
 // getLabelsToDeletePCSGReplicaIndexPCLQs creates label selectors for identifying PodCliques to delete for a specific PCSG replica

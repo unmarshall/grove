@@ -1003,7 +1003,9 @@ func TestComputePendingUpdateWorkSkipsReplicaWithDeleteExpectation(t *testing.T)
 	// Simulate a disruption we already triggered for replica 0 whose deletion the informer cache has not
 	// yet observed, by recording a delete expectation for its member PodCliques.
 	store := expect.NewExpectationsStore()
-	replica0UIDs := lo.Map(componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)["0"], func(pclq grovecorev1alpha1.PodClique, _ int) types.UID {
+	membersByReplicaIndex, err := componentutils.GroupPCLQsByPCSGReplicaIndex(sc.existingPCLQs)
+	require.NoError(t, err)
+	replica0UIDs := lo.Map(membersByReplicaIndex[0], func(pclq grovecorev1alpha1.PodClique, _ int) types.UID {
 		return pclq.GetUID()
 	})
 	require.NoError(t, store.ExpectDeletions(logr.Discard(), sc.expectationsStoreKey, replica0UIDs...))
