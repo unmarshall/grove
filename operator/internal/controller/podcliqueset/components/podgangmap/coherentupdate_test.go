@@ -15,6 +15,7 @@
 package podgangmap
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -825,7 +827,16 @@ func TestGatherPCSGReplicaInfosInventoriesAbsentReplicasAsPending(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
 	}
-	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3, CliqueNames: []string{"m"}}}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: coherentTestPCSGObjName,
+			Namespace: coherentTestNamespace,
+		},
+		Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{
+			Replicas: 3,
+			CliqueNames: []string{"m"},
+		},
+	}
 	objs := []client.Object{
 		pcsgMemberPCLQ("sga-0-m", 0, 1, 1, false), // present, Ready
 		// index 1 has no member PodCliques (absent)
@@ -955,4 +966,100 @@ func newCoherentTestSnapshot(pcsNameReplica apicommon.ResourceNameReplica, liveR
 		mvuTemplate:                      &mvuTemplate{standalonePCLQs: map[string]int32{"frontend": minAvailable}},
 		existingStandalonePCLQsByReplica: map[int][]grovecorev1alpha1.PodClique{0: {frontendPCLQ}},
 	}
+}
+
+// pcsgReplicaCondition is the observable condition of a PodCliqueScalingGroup replica. newCoherentPCSGTest
+// synthesizes the replica's member PodClique to realize it, and gatherPCSGReplicaInfos re-derives the state
+// from it, so that derivation is part of what the test exercises.
+type pcsgReplicaCondition int
+
+const (
+	replicaReady       pcsgReplicaCondition = iota // member at or above MinAvailable ready
+	replicaUnavailable                             // member scheduled but below MinAvailable ready
+	replicaPending                                 // member present but below MinAvailable scheduled
+	replicaTerminating                             // member present but terminating
+)
+
+// memberPCLQ builds the member PodClique that realizes the replica condition at the given replica index.
+func (c pcsgReplicaCondition) memberPCLQ(replicaIndex int32) *grovecorev1alpha1.PodClique {
+	name := fmt.Sprintf("%s-%d-m", coherentTestPCSGObjName, replicaIndex)
+	switch c {
+	case replicaReady:
+		return pcsgMemberPCLQ(name, replicaIndex, 1, 1, false)
+	case replicaUnavailable:
+		return pcsgMemberPCLQ(name, replicaIndex, 1, 0, false)
+	case replicaPending:
+		return pcsgMemberPCLQ(name, replicaIndex, 0, 0, false)
+	default: // replicaTerminating
+		return pcsgMemberPCLQ(name, replicaIndex, 0, 0, true)
+	}
+}
+
+// newCoherentPCSGTest builds the _resource (fake client), syncSnapshot, and PodGangMap for a coherent update
+// of a single in-scope PodCliqueScalingGroup "sga" over one member clique "m". conditionByReplicaIndex gives
+// each present replica's condition; a replica index omitted from the map has no member PodClique at all
+// (temporarily absent). scheduledAnchorEpochs lists anchor epochs whose PodGang is already scheduled, to
+// drive the emit gate.
+func newCoherentPCSGTest(replicas, minAvailable int32, maxUnavailable *int32, conditionByReplicaIndex map[int32]pcsgReplicaCondition, entries []grovecorev1alpha1.PodGangEntry, scheduledAnchorEpochs ...string) (_resource, *syncSnapshot, *grovecorev1alpha1.PodGangMap) {
+	pcsNameReplica := apicommon.ResourceNameReplica{Name: coherentTestPCSName, Replica: 0}
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Replicas: 1,
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "m", Spec: grovecorev1alpha1.PodCliqueSpec{Replicas: 1, MinAvailable: ptr.To(int32(1))}},
+				},
+				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "sga", CliqueNames: []string{"m"}, Replicas: ptr.To(replicas), MinAvailable: ptr.To(minAvailable), RollingUpdate: &grovecorev1alpha1.RollingUpdateConfiguration{MaxUnavailable: maxUnavailable}},
+				},
+			},
+		},
+		Status: grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To(coherentTestCurrentGen)},
+	}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace},
+		Spec:       grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: replicas, CliqueNames: []string{"m"}},
+	}
+	objs := make([]client.Object, 0, len(conditionByReplicaIndex)+len(scheduledAnchorEpochs))
+	for replicaIndex, condition := range conditionByReplicaIndex {
+		objs = append(objs, condition.memberPCLQ(replicaIndex))
+	}
+	for _, epoch := range scheduledAnchorEpochs {
+		objs = append(objs, podGangAtEpoch(apicommon.GenerateAnchorPodGangName(pcsNameReplica, epoch), true))
+	}
+	r := _resource{
+		client: testutils.NewTestClientBuilder().WithPodControllerUIDIndex().WithObjects(objs...).Build(),
+		clk:    clocktesting.NewFakeClock(metav1.Now().Time),
+	}
+	snap := &syncSnapshot{
+		logger:                 logr.Discard(),
+		pcs:                    pcs,
+		existingPCSGsByReplica: map[int][]grovecorev1alpha1.PodCliqueScalingGroup{0: {pcsg}},
+		mvuTemplate:            &mvuTemplate{pcsgs: map[string]int32{"sga": minAvailable}},
+	}
+	pgm := &grovecorev1alpha1.PodGangMap{Spec: grovecorev1alpha1.PodGangMapSpec{Entries: entries}}
+	return r, snap, pgm
+}
+
+// TestBuildCoherentUpdateEntriesClaimsAbsentPCSGReplicaIntoWholeAnchor drives the whole pipeline for a
+// PodCliqueScalingGroup at Replicas=2, MinAvailable=2 whose old-generation anchor committed both replicas
+// [0,1], with replica 1's member temporarily absent. The new anchor must carry the complete MinAvailable
+// composition [0,1], claiming the absent replica as Pending and recreating it at the new generation, rather
+// than opening a smaller anchor that later splits replica 1 into a separate Tail entry.
+func TestBuildCoherentUpdateEntriesClaimsAbsentPCSGReplicaIntoWholeAnchor(t *testing.T) {
+	oldAnchor := grovecorev1alpha1.PodGangEntry{
+		Epoch: "50", PodCliqueSetGenerationHash: coherentTestOldGen,
+		Role: grovecorev1alpha1.PodGangEntryRoleAnchor, PCSGReplicaIndices: map[string][]int32{"sga": {0, 1}},
+	}
+	r, snap, pgm := newCoherentPCSGTest(2, 2, ptr.To[int32](2),
+		map[int32]pcsgReplicaCondition{0: replicaReady}, // replica 1 omitted => absent
+		[]grovecorev1alpha1.PodGangEntry{oldAnchor})
+
+	entries, err := r.buildCoherentUpdateEntries(t.Context(), snap, 0, pgm)
+	require.NoError(t, err)
+
+	require.Len(t, entries, 1)
+	assert.Equal(t, grovecorev1alpha1.PodGangEntryRoleAnchor, entries[0].Role)
+	assert.ElementsMatch(t, []int32{0, 1}, entries[0].PCSGReplicaIndices["sga"])
 }
