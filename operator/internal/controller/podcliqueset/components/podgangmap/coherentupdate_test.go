@@ -767,7 +767,7 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
 		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
 	}
-	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 4}}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 4, CliqueNames: []string{"m"}}}
 	// A current-hash entry commits replica index 0 of sga, so it is at the current hash.
 	entries := []grovecorev1alpha1.PodGangEntry{
 		{Role: grovecorev1alpha1.PodGangEntryRoleAnchor, Epoch: "100", PodCliqueSetGenerationHash: "new", PCSGReplicaIndices: map[string][]int32{"sga": {0}}},
@@ -776,7 +776,7 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		pcsgMemberPCLQ("sga-0-m", 0, 1, 1, false), // committed to current hash, Ready
 		pcsgMemberPCLQ("sga-1-m", 1, 1, 0, false), // old, Unavailable (ready below MinAvailable)
 		pcsgMemberPCLQ("sga-2-m", 2, 0, 0, false), // old, Pending (scheduled below MinAvailable)
-		pcsgMemberPCLQ("sga-3-m", 3, 1, 1, true),  // all members terminating, skipped
+		pcsgMemberPCLQ("sga-3-m", 3, 1, 1, true),  // all members terminating during a restart, classified Pending
 	}
 	r := _resource{client: testutils.NewTestClientBuilder().WithObjects(objs...).Build()}
 
@@ -787,6 +787,7 @@ func TestGatherPCSGReplicaInfos(t *testing.T) {
 		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
 		{index: 1, state: componentutils.PCSGReplicaStateUnavailable, atCurrentHash: false},
 		{index: 2, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
+		{index: 3, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
 	}, got["sga"])
 }
 
@@ -813,6 +814,32 @@ func TestGatherPCSGReplicaInfosSkipsStrayReplicaIndices(t *testing.T) {
 	assert.ElementsMatch(t, []pcsgReplicaInfo{
 		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
 		{index: 1, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
+	}, got["sga"])
+}
+
+// TestGatherPCSGReplicaInfosInventoriesAbsentReplicasAsPending verifies that every desired replica index is
+// inventoried: an index with no member PodCliques (absent) and an index whose members are all terminating (a
+// gang restart) are both classified Pending, so the anchor is never opened short of its replicas.
+func TestGatherPCSGReplicaInfosInventoriesAbsentReplicasAsPending(t *testing.T) {
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSName, Namespace: coherentTestNamespace},
+		Status:     grovecorev1alpha1.PodCliqueSetStatus{CurrentGenerationHash: ptr.To("new")},
+	}
+	pcsg := grovecorev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: coherentTestPCSGObjName, Namespace: coherentTestNamespace}, Spec: grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3, CliqueNames: []string{"m"}}}
+	objs := []client.Object{
+		pcsgMemberPCLQ("sga-0-m", 0, 1, 1, false), // present, Ready
+		// index 1 has no member PodCliques (absent)
+		pcsgMemberPCLQ("sga-2-m", 2, 1, 1, true), // all members terminating (restart)
+	}
+	r := _resource{client: testutils.NewTestClientBuilder().WithObjects(objs...).Build()}
+
+	got, err := r.gatherPCSGReplicaInfos(t.Context(), pcs, nil, map[string]grovecorev1alpha1.PodCliqueScalingGroup{"sga": pcsg})
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []pcsgReplicaInfo{
+		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
+		{index: 1, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
+		{index: 2, state: componentutils.PCSGReplicaStatePending, atCurrentHash: false},
 	}, got["sga"])
 }
 

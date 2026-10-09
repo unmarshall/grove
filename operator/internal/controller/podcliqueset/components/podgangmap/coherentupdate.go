@@ -26,7 +26,6 @@ import (
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
-	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -496,10 +495,12 @@ type pcsgReplicaInfo struct {
 }
 
 // gatherPCSGReplicaInfos returns the pcsgReplicaInfo for each present replica index of every in-scope
-// PodCliqueScalingGroup under update, keyed by PCSG component name. It lists each PCSG's member PodCliques,
-// groups them by replica index, and records a replica as present when at least one member is
-// non-terminating. Health comes from ComputePCSGReplicaState over the members, and atCurrentHash is set when
-// a current-hash entry commits the index.
+// gatherPCSGReplicaInfos returns one pcsgReplicaInfo for every desired replica index [0, Spec.Replicas) of
+// each in-scope PodCliqueScalingGroup under update, keyed by PCSG component name. It lists each PCSG's member
+// PodCliques and groups them by replica index. Every desired index is inventoried, so an index with no
+// member PodCliques, or whose members are all terminating during a gang restart, is classified Pending by
+// ComputePCSGReplicaState rather than dropped. Dropping it would let the anchor open with fewer than
+// MinAvailable replicas. atCurrentHash is set when a current-hash entry commits the index.
 func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet, entries []grovecorev1alpha1.PodGangEntry, pcsgByComponent map[string]grovecorev1alpha1.PodCliqueScalingGroup) (map[string][]pcsgReplicaInfo, error) {
 	currentHash := *pcs.Status.CurrentGenerationHash
 	infosByComponent := make(map[string][]pcsgReplicaInfo, len(pcsgByComponent))
@@ -517,17 +518,9 @@ func (r _resource) gatherPCSGReplicaInfos(ctx context.Context, pcs *grovecorev1a
 			return nil, groveerr.WrapError(err, errCodeExtractPCSGName, component.OperationSync,
 				fmt.Sprintf("could not group member PodCliques by replica index for PodCliqueScalingGroup %q under coherent update", componentName))
 		}
-		var infos []pcsgReplicaInfo
-		for replicaIndex, members := range membersByReplicaIndex {
-			if allPodCliquesTerminating(members) {
-				continue // a replica who's every member is terminating is mid-replacement, not a live index
-			}
-			// A replica index outside [0, Spec.Replicas) is a stray left by a scale-down. Including it would let
-			// the drain select and commit an index the PCSG controller never recreates, stalling the update, and
-			// would inflate the replica count the budget reads. The status path prunes the same strays.
-			if replicaIndex < 0 || replicaIndex >= int(pcsg.Spec.Replicas) {
-				continue
-			}
+		infos := make([]pcsgReplicaInfo, 0, pcsg.Spec.Replicas)
+		for replicaIndex := 0; replicaIndex < int(pcsg.Spec.Replicas); replicaIndex++ {
+			members := membersByReplicaIndex[replicaIndex]
 			infos = append(infos, pcsgReplicaInfo{
 				index:         replicaIndex,
 				state:         componentutils.ComputePCSGReplicaState(members, len(pcsg.Spec.CliqueNames)),
@@ -554,13 +547,6 @@ func currentHashCommittedPCSGReplicaIndices(entries []grovecorev1alpha1.PodGangE
 		}
 	}
 	return indices
-}
-
-// allPodCliquesTerminating reports whether every member PodClique of a PCSG replica is terminating.
-func allPodCliquesTerminating(members []grovecorev1alpha1.PodClique) bool {
-	return lo.EveryBy(members, func(pclq grovecorev1alpha1.PodClique) bool {
-		return k8sutils.IsResourceTerminating(pclq.ObjectMeta)
-	})
 }
 
 // numMissingOldVersionPodsByStandalonePCLQ returns the count of missing old-version Pods per in-scope

@@ -394,6 +394,23 @@ func TestBuildAnchorBearingSubStepPicksWorstOffFirst(t *testing.T) {
 	assert.Equal(t, map[string][]int32{"decode": {1}}, ss.drainPCSGReplicaIndices)
 }
 
+// TestBuildAnchorBearingSubStepRequeuesWhenPCSGShortOfMinAvailable verifies that when the step plan expects
+// an anchor-bearing step but the PodCliqueScalingGroup can no longer supply MinAvailable old replica indices,
+// buildAnchorBearingSubStep requeues to recompute the plan rather than opening a short anchor.
+func TestBuildAnchorBearingSubStepRequeuesWhenPCSGShortOfMinAvailable(t *testing.T) {
+	planner := newTestPlanner(testingclock.NewFakeClock(time.Unix(0, 5)), "v2",
+		[]grovecorev1alpha1.PodGangEntry{{Epoch: "100", PodCliqueSetGenerationHash: "v2"}},
+		map[string]testComponent{"decode": {liveReplicas: 3, minAvailable: 2, maxUnavailable: 1}})
+	// Opening the anchor needs MinAvailable 2 old replicas, but only one remains old.
+	planner.pcsgReplicaInfos["decode"] = []pcsgReplicaInfo{
+		{index: 0, state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
+		{index: 1, state: componentutils.PCSGReplicaStateReady, atCurrentHash: true},
+		{index: 2, state: componentutils.PCSGReplicaStateReady, atCurrentHash: false},
+	}
+	_, err := planner.buildAnchorBearingSubStep()
+	require.Error(t, err)
+}
+
 // TestNextOldPCSGIndicesToRoll covers the health-ordered selection of a PodCliqueScalingGroup's old replica
 // indices: current-hash indices are excluded, old indices are ordered pending then unavailable then ready
 // (ascending by index within each state), and the result is capped to the requested count.

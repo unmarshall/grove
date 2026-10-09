@@ -473,7 +473,15 @@ func (p *subStepPlanner) buildAnchorBearingSubStep() (*subStep, error) {
 		if p.desiredReplicas[pcsgName] == 0 {
 			continue // a scaled-to-zero PodCliqueScalingGroup has no replicas to place in the anchor
 		}
-		anchorPCSGIndices[pcsgName] = p.nextOldPCSGIndicesToRoll(pcsgName, minAvailable)
+		indices := p.nextOldPCSGIndicesToRoll(pcsgName, minAvailable)
+		// The step plan said an anchor-bearing step remains, which assumes MinAvailable old replicas are
+		// available to roll. If the live inventory can no longer supply it then requeue, so the next reconcile
+		// recomputes the plan rather than opening an anchor that violates the MinAvailable anchor contract.
+		if len(indices) < int(minAvailable) {
+			return nil, groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
+				fmt.Sprintf("step plan expects an anchor-bearing step but PodCliqueScalingGroup %q has only %d of %d old replica indices available, requeuing to recompute the plan", pcsgName, len(indices), minAvailable))
+		}
+		anchorPCSGIndices[pcsgName] = indices
 	}
 	anchorStandalonePCLQCounts := make(map[string]int32, len(p.mvu.standalonePCLQs))
 	for pclqName, minAvailable := range p.mvu.standalonePCLQs {
