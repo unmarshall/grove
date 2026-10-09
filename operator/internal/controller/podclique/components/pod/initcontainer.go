@@ -47,11 +47,12 @@ const (
 	volumeMountPathServiceAccount = "/var/run/secrets/kubernetes.io/serviceaccount"
 )
 
-// configurePodInitContainer adds the necessary volumes and init container to the pod for dependency management
-func configurePodInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) error {
-	addServiceAccountTokenSecretVolume(pcs.Name, pod)
+// configurePodInitContainer adds the volumes and the startup-order init container to the pod. args are the
+// resolved wait targets the init container blocks on.
+func configurePodInitContainer(pcsName string, pod *corev1.Pod, args []string) error {
+	addServiceAccountTokenSecretVolume(pcsName, pod)
 	addPodInfoVolume(pod)
-	return addInitContainer(pcs, pclq, pod, pgm)
+	return addInitContainer(pod, args)
 }
 
 // addServiceAccountTokenSecretVolume adds a volume that mounts the service account token secret
@@ -94,13 +95,9 @@ func addPodInfoVolume(pod *corev1.Pod) {
 	pod.Spec.Volumes = append(pod.Spec.Volumes, podInfoVol)
 }
 
-// addInitContainer adds the Grove init container to the pod with appropriate image, args, and volume mounts
-func addInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) error {
+// addInitContainer adds the Grove init container to the pod with the resolved wait args and volume mounts
+func addInitContainer(pod *corev1.Pod, args []string) error {
 	image, err := getInitContainerImage()
-	if err != nil {
-		return err
-	}
-	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
 	if err != nil {
 		return err
 	}
@@ -138,10 +135,10 @@ func getInitContainerImage() (string, error) {
 	return initContainerImage, nil
 }
 
-// generateArgsForInitContainer creates the init container arguments by resolving this PodClique's declared
-// startup dependencies (unqualified parent clique names in pclq.Spec.StartsAfter) against the committed
-// PodGangMap entry of the pod's own PodGang. Only parents co-committed in that gang are emitted, each with
-// the gang-local count of pods to wait on, so a pod waits only for the parents present in its own gang.
+// generateArgsForInitContainer builds the init container wait arguments for the pod. It derives this
+// PodClique's declared startup parents from the PodCliqueSet template and resolves them against the committed
+// PodGangMap entry of the pod's own PodGang. Only parents committed in that PodGang are returned, each with
+// the number of pods to wait on, so the pod waits only for the parents present in its own PodGang.
 func generateArgsForInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) ([]string, error) {
 	pcsName := componentutils.GetPodCliqueSetName(pclq.ObjectMeta)
 	pcsReplicaIndex, err := componentutils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclq.Name)

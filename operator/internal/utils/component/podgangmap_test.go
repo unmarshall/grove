@@ -496,7 +496,7 @@ func TestStartupDependencyTargetsInEntry(t *testing.T) {
 			want:          []StartupDependencyTarget{{PodCliqueFQN: "ml-0-frontend", MinReady: 1}},
 		},
 		{
-			description:   "a parent not co-committed in the pod's gang yields nothing",
+			description:   "a parent not committed in the pod's gang yields nothing",
 			entry:         anchorEntry(map[string][]int32{"decode": {0}}, nil),
 			podGangName:   anchorGang,
 			parentCliques: []string{"pf", "frontend"},

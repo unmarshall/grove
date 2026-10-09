@@ -320,12 +320,13 @@ type StartupDependencyTarget struct {
 }
 
 // StartupDependencyTargetsInEntry resolves each declared parent clique name against entry, the committed
-// PodGang entry the dependent pod belongs to, into the init-container wait targets co-committed in the
-// dependent pod's own PodGang (podGangName).
+// PodGang entry the dependent pod belongs to. It returns the init-container wait targets for the parents
+// that are committed in the dependent pod's own PodGang (podGangName).
 //
 // A PodCliqueScalingGroup parent yields one target per committed replica index whose materialized PodGang is
-// podGangName, each waiting on that member clique's MinAvailable, so an anchor pod waits on all co-anchor
-// parent replicas while a scale-out pod waits only on the parent replica in its own gang.
+// podGangName, each waiting on that member clique's MinAvailable. An anchor pod therefore waits on every
+// parent replica in the same anchor, while a scale-out pod waits only on the parent replica in its own
+// PodGang.
 //
 // A standalone parent lives only in anchor gangs. When it is present in podGangName it yields one target.
 // The target waits on min(MinAvailable, the number of its pods this gang holds). The init container watches
@@ -334,7 +335,7 @@ type StartupDependencyTarget struct {
 // highest gang first.
 //
 // A parent not committed in the pod's gang (out of the update scope) yields nothing, so a subset update
-// never stalls it, and only in-gang, satisfiable dependencies are emitted.
+// never stalls it, and only satisfiable dependencies in the pod's own gang are emitted.
 func StartupDependencyTargetsInEntry(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entry *grovecorev1alpha1.PodGangEntry, podGangName string, parentCliqueNames []string) []StartupDependencyTarget {
 	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
 	anchorGangName := apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)

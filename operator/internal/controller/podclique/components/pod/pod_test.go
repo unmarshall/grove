@@ -84,6 +84,7 @@ func TestBuildResourceWithLPXBackend(t *testing.T) {
 		}},
 	}
 	pcs := testutils.NewPodCliqueSetBuilder(pcsName, namespace, uid).
+		WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeInOrder)).
 		WithPodCliqueTemplateSpec(
 			testutils.NewPodCliqueTemplateSpecBuilder(cliqueName).
 				WithPodSpec(podSpec).
@@ -628,113 +629,6 @@ func TestAddGroveEnvironmentVariables_MultipleContainers(t *testing.T) {
 }
 
 // Helper functions
-// -------------------------------------------------------------------------------------------
-
-// assertExpectedEnvVars asserts that the expected environment variables are present.
-func assertExpectedEnvVars(t *testing.T, container corev1.Container, expectedEnvVars []string) {
-	envVarNames := make(map[string]bool)
-	for _, env := range container.Env {
-		envVarNames[env.Name] = true
-	}
-	for _, expectedEnv := range expectedEnvVars {
-		assert.True(t, envVarNames[expectedEnv], "expected environment variable %s not found in container %s", expectedEnv, container.Name)
-	}
-}
-
-// assertGroveEnvVarsDirectValues asserts Grove environment variables have direct values.
-func assertGroveEnvVarsDirectValues(t *testing.T, container corev1.Container, groveEnvVars []string) {
-	// Create a set of Grove env vars for quick lookup
-	groveEnvVarSet := make(map[string]bool)
-	for _, envVar := range groveEnvVars {
-		groveEnvVarSet[envVar] = true
-	}
-
-	for _, env := range container.Env {
-		// Only validate Grove environment variables
-		if groveEnvVarSet[env.Name] {
-			assert.NotEmpty(t, env.Value, "Grove environment variable %s should have a direct value", env.Name)
-			assert.Nil(t, env.ValueFrom, "Grove environment variable %s should not use ValueFrom (Downward API)", env.Name)
-		}
-	}
-}
-
-// Helper function to assert replaced environment variables use correct Downward API
-func assertReplacedEnvVars(t *testing.T, container corev1.Container, shouldReplace map[string]string) {
-	if shouldReplace == nil {
-		return
-	}
-
-	envVarNames := make(map[string]corev1.EnvVar)
-	for _, env := range container.Env {
-		envVarNames[env.Name] = env
-	}
-
-	for envName, expectedValue := range shouldReplace {
-		envVar, found := envVarNames[envName]
-		assert.True(t, found, "environment variable %s should exist", envName)
-		if found {
-			assert.Equal(t, expectedValue, envVar.Value,
-				"environment variable %s has wrong value", envName)
-		}
-	}
-}
-
-// Helper function to assert preserved environment variables maintain their values
-func assertPreservedEnvVars(t *testing.T, container corev1.Container, shouldPreserve []string) {
-	if shouldPreserve == nil {
-		return
-	}
-
-	envVarNames := make(map[string]corev1.EnvVar)
-	for _, env := range container.Env {
-		envVarNames[env.Name] = env
-	}
-
-	for _, preserveEnv := range shouldPreserve {
-		envVar, found := envVarNames[preserveEnv]
-		assert.True(t, found, "expected preserved environment variable %s not found in container %s", preserveEnv, container.Name)
-		if found {
-			assert.NotEmpty(t, envVar.Value, "preserved environment variable %s should have its original value", preserveEnv)
-		}
-	}
-}
-
-// Helper function to assert no duplicate environment variables
-func assertNoDuplicateEnvVars(t *testing.T, container corev1.Container) {
-	envVarCounts := make(map[string]int)
-	for _, env := range container.Env {
-		envVarCounts[env.Name]++
-	}
-	for envName, count := range envVarCounts {
-		assert.Equal(t, 1, count, "environment variable %s appears %d times (should be 1)", envName, count)
-	}
-}
-
-func assertEnvVarUsesFieldRef(t *testing.T, container corev1.Container, envVarName, expectedFieldPath string) {
-	for _, env := range container.Env {
-		if env.Name == envVarName {
-			assert.Empty(t, env.Value, "environment variable %s should not have a direct value", envVarName)
-			if assert.NotNil(t, env.ValueFrom, "environment variable %s should use ValueFrom", envVarName) {
-				if assert.NotNil(t, env.ValueFrom.FieldRef, "environment variable %s should use FieldRef", envVarName) {
-					assert.Equal(t, expectedFieldPath, env.ValueFrom.FieldRef.FieldPath,
-						"environment variable %s has wrong FieldPath", envVarName)
-				}
-			}
-			return
-		}
-	}
-	t.Errorf("environment variable %s not found in container %s", envVarName, container.Name)
-}
-
-func filterOutEnvVar(envVars []string, exclude string) []string {
-	var result []string
-	for _, v := range envVars {
-		if v != exclude {
-			result = append(result, v)
-		}
-	}
-	return result
-}
 
 // Test_generateArgsForInitContainer_WaitsOnParentReplicaInOwnPodGang covers the resolution half of #873.
 // The health-ordered drain selects the unavailable replica into the first anchor (its input and selection
@@ -964,4 +858,209 @@ func Test_generateArgsForInitContainer_BoundsStandaloneWaitToGangCommittedCount(
 	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
 	require.NoError(t, err)
 	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-frontend:1", pcsName)}, args)
+}
+
+func Test_buildResource_AddsStartupInitContainerForInOrderStandalone(t *testing.T) {
+	t.Setenv(envVarInitContainerImage, "registry:5001/grove-initc")
+	const (
+		pcsName   = "ml"
+		namespace = "default"
+		epoch     = "100"
+	)
+	uid := types.UID("test-uid")
+	podSpec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}}
+	pcs := testutils.NewPodCliqueSetBuilder(pcsName, namespace, uid).
+		WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeInOrder)).
+		WithStandaloneClique("leader").
+		WithStandaloneClique("worker").
+		Build()
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	anchorGangName := common.GenerateAnchorPodGangName(rnr, epoch)
+	pgm := &grovecorev1alpha1.PodGangMap{
+		Spec: grovecorev1alpha1.PodGangMapSpec{
+			Entries: []grovecorev1alpha1.PodGangEntry{{
+				Epoch:                      epoch,
+				PodCliqueSetGenerationHash: "hash",
+				Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+				PodCliques:                 map[string]int32{"leader": 1, "worker": 1},
+			}},
+		},
+	}
+	pclq := testutils.NewPodCliqueBuilder(pcsName, uid, "worker", namespace, 0).Build()
+	pclq.Spec.PodSpec = *podSpec.DeepCopy()
+
+	resource := newInitContainerTestResource(t)
+	pod := &corev1.Pod{}
+	require.NoError(t, resource.buildResource(pcs, pclq, anchorGangName, pod, 0, pgm))
+
+	require.Len(t, pod.Spec.InitContainers, 1)
+	assert.Equal(t, initContainerName, pod.Spec.InitContainers[0].Name)
+	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-leader:1", pcsName)}, pod.Spec.InitContainers[0].Args)
+}
+
+func Test_buildResource_AddsStartupInitContainerForInOrderPCSGMember(t *testing.T) {
+	t.Setenv(envVarInitContainerImage, "registry:5001/grove-initc")
+	const (
+		pcsName   = "ml"
+		namespace = "default"
+		epoch     = "100"
+	)
+	uid := types.UID("test-uid")
+	podSpec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}}
+	pcs := testutils.NewPodCliqueSetBuilder(pcsName, namespace, uid).
+		WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeInOrder)).
+		WithStandaloneClique("leader").
+		WithScalingGroupConfig("decode", []string{"worker"}, 1, 1).
+		Build()
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	anchorGangName := common.GenerateAnchorPodGangName(rnr, epoch)
+	pgm := &grovecorev1alpha1.PodGangMap{
+		Spec: grovecorev1alpha1.PodGangMapSpec{
+			Entries: []grovecorev1alpha1.PodGangEntry{{
+				Epoch:                      epoch,
+				PodCliqueSetGenerationHash: "hash",
+				Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+				PodCliques:                 map[string]int32{"leader": 1},
+				PCSGReplicaIndices:         map[string][]int32{"decode": {0}},
+			}},
+		},
+	}
+	pclq := testutils.NewPCSGPodCliqueBuilder(fmt.Sprintf("%s-0-decode-0-worker", pcsName), namespace, pcsName, fmt.Sprintf("%s-0-decode", pcsName), 0, 0).Build()
+	pclq.Spec.PodSpec = *podSpec.DeepCopy()
+	pclq.Annotations = map[string]string{constants.AnnotationPodCliqueScalingGroupPodIndexOffset: "0"}
+
+	resource := newInitContainerTestResource(t)
+	pod := &corev1.Pod{}
+	require.NoError(t, resource.buildResource(pcs, pclq, anchorGangName, pod, 0, pgm))
+
+	require.Len(t, pod.Spec.InitContainers, 1)
+	assert.Equal(t, initContainerName, pod.Spec.InitContainers[0].Name)
+	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-leader:1", pcsName)}, pod.Spec.InitContainers[0].Args)
+}
+
+// -------------------------------------------------------------------------------------------
+
+// assertExpectedEnvVars asserts that the expected environment variables are present.
+func assertExpectedEnvVars(t *testing.T, container corev1.Container, expectedEnvVars []string) {
+	envVarNames := make(map[string]bool)
+	for _, env := range container.Env {
+		envVarNames[env.Name] = true
+	}
+	for _, expectedEnv := range expectedEnvVars {
+		assert.True(t, envVarNames[expectedEnv], "expected environment variable %s not found in container %s", expectedEnv, container.Name)
+	}
+}
+
+// assertGroveEnvVarsDirectValues asserts Grove environment variables have direct values.
+func assertGroveEnvVarsDirectValues(t *testing.T, container corev1.Container, groveEnvVars []string) {
+	// Create a set of Grove env vars for quick lookup
+	groveEnvVarSet := make(map[string]bool)
+	for _, envVar := range groveEnvVars {
+		groveEnvVarSet[envVar] = true
+	}
+
+	for _, env := range container.Env {
+		// Only validate Grove environment variables
+		if groveEnvVarSet[env.Name] {
+			assert.NotEmpty(t, env.Value, "Grove environment variable %s should have a direct value", env.Name)
+			assert.Nil(t, env.ValueFrom, "Grove environment variable %s should not use ValueFrom (Downward API)", env.Name)
+		}
+	}
+}
+
+// Helper function to assert replaced environment variables use correct Downward API
+func assertReplacedEnvVars(t *testing.T, container corev1.Container, shouldReplace map[string]string) {
+	if shouldReplace == nil {
+		return
+	}
+
+	envVarNames := make(map[string]corev1.EnvVar)
+	for _, env := range container.Env {
+		envVarNames[env.Name] = env
+	}
+
+	for envName, expectedValue := range shouldReplace {
+		envVar, found := envVarNames[envName]
+		assert.True(t, found, "environment variable %s should exist", envName)
+		if found {
+			assert.Equal(t, expectedValue, envVar.Value,
+				"environment variable %s has wrong value", envName)
+		}
+	}
+}
+
+// Helper function to assert preserved environment variables maintain their values
+func assertPreservedEnvVars(t *testing.T, container corev1.Container, shouldPreserve []string) {
+	if shouldPreserve == nil {
+		return
+	}
+
+	envVarNames := make(map[string]corev1.EnvVar)
+	for _, env := range container.Env {
+		envVarNames[env.Name] = env
+	}
+
+	for _, preserveEnv := range shouldPreserve {
+		envVar, found := envVarNames[preserveEnv]
+		assert.True(t, found, "expected preserved environment variable %s not found in container %s", preserveEnv, container.Name)
+		if found {
+			assert.NotEmpty(t, envVar.Value, "preserved environment variable %s should have its original value", preserveEnv)
+		}
+	}
+}
+
+// Helper function to assert no duplicate environment variables
+func assertNoDuplicateEnvVars(t *testing.T, container corev1.Container) {
+	envVarCounts := make(map[string]int)
+	for _, env := range container.Env {
+		envVarCounts[env.Name]++
+	}
+	for envName, count := range envVarCounts {
+		assert.Equal(t, 1, count, "environment variable %s appears %d times (should be 1)", envName, count)
+	}
+}
+
+func assertEnvVarUsesFieldRef(t *testing.T, container corev1.Container, envVarName, expectedFieldPath string) {
+	for _, env := range container.Env {
+		if env.Name == envVarName {
+			assert.Empty(t, env.Value, "environment variable %s should not have a direct value", envVarName)
+			if assert.NotNil(t, env.ValueFrom, "environment variable %s should use ValueFrom", envVarName) {
+				if assert.NotNil(t, env.ValueFrom.FieldRef, "environment variable %s should use FieldRef", envVarName) {
+					assert.Equal(t, expectedFieldPath, env.ValueFrom.FieldRef.FieldPath,
+						"environment variable %s has wrong FieldPath", envVarName)
+				}
+			}
+			return
+		}
+	}
+	t.Errorf("environment variable %s not found in container %s", envVarName, container.Name)
+}
+
+func filterOutEnvVar(envVars []string, exclude string) []string {
+	var result []string
+	for _, v := range envVars {
+		if v != exclude {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// newInitContainerTestResource builds a _resource with a scheme and a fake scheduler registry for exercising
+// buildResource in init-container tests.
+func newInitContainerTestResource(t *testing.T) *_resource {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, grovecorev1alpha1.AddToScheme(scheme))
+	registry := &testutils.FakeSchedulerRegistry{
+		Backends: map[string]scheduler.Backend{
+			string(configv1alpha1.SchedulerNameLPX): lpx.New(
+				nil,
+				configv1alpha1.SchedulerProfile{Name: configv1alpha1.SchedulerNameLPX},
+				testutils.NewFakeSchedulerBackend(string(configv1alpha1.SchedulerNameKai)),
+			),
+		},
+		DefaultBackend: string(configv1alpha1.SchedulerNameLPX),
+	}
+	return &_resource{scheme: scheme, schedRegistry: registry}
 }
