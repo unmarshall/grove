@@ -350,11 +350,11 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 		pclq.Spec = *pclqTemplate.Spec.DeepCopy()
 	}
 
-	dependentPCLQNames, err := identifyFullyQualifiedStartupDependencyNames(pcs, pcsReplica, cliqueName, pclqTemplate)
+	dependentCliqueNames, err := identifyStartupDependencyCliqueNames(pcs, cliqueName, pclqTemplate)
 	if err != nil {
 		return err
 	}
-	pclq.Spec.StartsAfter = dependentPCLQNames
+	pclq.Spec.StartsAfter = dependentCliqueNames
 	// This return fires only for an existing PodClique of a replica not under the coherent update, since
 	// preserveRevision requires pclqExists. Such an object already carries its MNNVL claims from when it was
 	// created, so skip the injection below. A recreated PodClique has preserveRevision false and takes the
@@ -369,8 +369,11 @@ func setPodCliqueSpec(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, p
 	return nil
 }
 
-// identifyFullyQualifiedStartupDependencyNames determines the PodClique startup dependencies based on StartupType.
-func identifyFullyQualifiedStartupDependencyNames(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, cliqueName string, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) ([]string, error) {
+// identifyStartupDependencyCliqueNames returns the unqualified parent clique names this standalone PodClique
+// starts after, from the PodCliqueSet startup type: for InOrder the preceding template clique, for Explicit
+// the declared StartsAfter. The per-pod init container resolves these to the parent replicas co-committed in
+// each pod's own PodGang.
+func identifyStartupDependencyCliqueNames(pcs *grovecorev1alpha1.PodCliqueSet, cliqueName string, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) ([]string, error) {
 	cliqueStartupType := pcs.Spec.Template.StartupType
 	if cliqueStartupType == nil {
 		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
@@ -379,34 +382,18 @@ func identifyFullyQualifiedStartupDependencyNames(pcs *grovecorev1alpha1.PodCliq
 	}
 	switch *cliqueStartupType {
 	case grovecorev1alpha1.CliqueStartupTypeInOrder:
-		return getInOrderStartupDependencies(pcs, pcsReplicaIndex, cliqueName), nil
+		cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
+			return pclqTemplate.Name == cliqueName
+		})
+		if cliqueIndex <= 0 {
+			return nil, nil
+		}
+		return []string{pcs.Spec.Template.Cliques[cliqueIndex-1].Name}, nil
 	case grovecorev1alpha1.CliqueStartupTypeExplicit:
-		return getExplicitStartupDependencies(pcs, pcsReplicaIndex, pclqTemplate), nil
+		return pclqTemplate.Spec.StartsAfter, nil
 	default:
 		return nil, nil
 	}
-}
-
-// getInOrderStartupDependencies returns the preceding clique in the template as the dependency for in-order
-// startup, or nil for the first clique.
-func getInOrderStartupDependencies(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, cliqueName string) []string {
-	cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
-		return pclqTemplate.Name == cliqueName
-	})
-	if cliqueIndex <= 0 {
-		return nil
-	}
-	previousCliqueName := pcs.Spec.Template.Cliques[cliqueIndex-1].Name
-	return componentutils.GenerateDependencyNamesForBasePodGang(pcs, pcsReplicaIndex, previousCliqueName)
-}
-
-// getExplicitStartupDependencies resolves explicitly declared startup dependencies.
-func getExplicitStartupDependencies(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, pclqTemplate *grovecorev1alpha1.PodCliqueTemplateSpec) []string {
-	dependencies := make([]string, 0, len(pclqTemplate.Spec.StartsAfter))
-	for _, dependency := range pclqTemplate.Spec.StartsAfter {
-		dependencies = append(dependencies, componentutils.GenerateDependencyNamesForBasePodGang(pcs, pcsReplicaIndex, dependency)...)
-	}
-	return dependencies
 }
 
 // getPodCliqueSelectorLabels returns labels for selecting all PodCliques of a PodCliqueSet.

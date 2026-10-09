@@ -580,10 +580,11 @@ func TestBuildResource_PreservesRevisionForReplicaNotUnderCoherentUpdate(t *test
 	}
 }
 
-// TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed reconciles a preserved replica twice under the
-// Explicit startup type and asserts StartsAfter stays the single-prefix FQN. It guards against re-prefixing
-// the live StartsAfter (which already holds FQNs) instead of reading the template's clique names.
-func TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed(t *testing.T) {
+// TestBuildResource_ExplicitStartsAfterResolvesToCliqueName reconciles a preserved replica twice under the
+// Explicit startup type and asserts StartsAfter holds the declared parent clique name (unqualified). The
+// per-pod init container qualifies it against the pod's own PodGang, so the controller never writes FQNs,
+// and a stale FQN left by an older scheme is normalized back to the clique name.
+func TestBuildResource_ExplicitStartsAfterResolvesToCliqueName(t *testing.T) {
 	const (
 		leaderClique = "leader"
 		workerClique = "worker"
@@ -601,20 +602,20 @@ func TestBuildResource_ExplicitStartsAfterStaysSinglePrefixed(t *testing.T) {
 		WithPodCliqueTemplateSpec(testutils.NewPodCliqueTemplateSpecBuilder(workerClique).WithStartsAfter([]string{leaderClique}).Build()).
 		Build()
 
-	// The worker PodClique on the preserved replica already holds the resolved FQN from a previous reconcile.
-	wantStartsAfter := []string{fmt.Sprintf("%s-%d-%s", testPCSName, pcsReplica, leaderClique)}
+	// StartsAfter must resolve to the declared parent clique name; a stale FQN from an older scheme is normalized.
+	wantStartsAfter := []string{leaderClique}
 	pclq := &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%d-%s", testPCSName, pcsReplica, workerClique),
 			Namespace: testPCSNamespace,
 			Labels:    map[string]string{apicommon.LabelPodTemplateHash: "old-hash"},
 		},
-		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: wantStartsAfter},
+		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{fmt.Sprintf("%s-%d-%s", testPCSName, pcsReplica, leaderClique)}},
 	}
 
 	operator := &_resource{scheme: groveclientscheme.Scheme}
 
-	// Reconcile twice. StartsAfter must remain the single-prefix FQN both times.
+	// Reconcile twice. StartsAfter must remain the declared clique name both times.
 	for i := range 2 {
 		err := operator.buildResource(logr.Discard(), pcs, pcsReplica, true, pclq)
 		require.NoError(t, err, "reconcile %d", i)

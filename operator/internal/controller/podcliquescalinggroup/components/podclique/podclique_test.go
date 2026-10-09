@@ -652,7 +652,7 @@ func TestIdentifyFullyQualifiedStartupDependencyNames(t *testing.T) {
 			pcsgReplica:  1,
 			pclq:         &grovecorev1alpha1.PodClique{},
 			foundAtIndex: 1,
-			expected:     []string{"test-pcs-0-clique1"},
+			expected:     []string{"clique1"},
 			expectError:  false,
 		},
 		{
@@ -689,7 +689,7 @@ func TestIdentifyFullyQualifiedStartupDependencyNames(t *testing.T) {
 				},
 			},
 			foundAtIndex: 1,
-			expected:     []string{"test-pcs-0-clique1"},
+			expected:     []string{"clique1"},
 			expectError:  false,
 		},
 		{
@@ -724,11 +724,8 @@ func TestIdentifyFullyQualifiedStartupDependencyNames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := identifyFullyQualifiedStartupDependencyNames(
+			result, err := identifyStartupDependencyCliqueNames(
 				tc.pcs,
-				tc.pcsReplica,
-				tc.pcsg,
-				tc.pcsgReplica,
 				tc.pclq,
 				tc.foundAtIndex,
 			)

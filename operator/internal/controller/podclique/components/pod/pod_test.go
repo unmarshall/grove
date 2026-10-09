@@ -112,7 +112,7 @@ func TestBuildResourceWithLPXBackend(t *testing.T) {
 	resource := &_resource{scheme: scheme, schedRegistry: registry}
 	pod := &corev1.Pod{}
 
-	require.NoError(t, resource.buildResource(pcs, pclq, podGangName, pod, 0))
+	require.NoError(t, resource.buildResource(pcs, pclq, podGangName, pod, 0, nil))
 
 	assert.Equal(t, string(configv1alpha1.SchedulerNameLPX), pod.Spec.SchedulerName)
 	assert.Equal(t, pclq.Name+"-", pod.GenerateName)
@@ -734,4 +734,69 @@ func filterOutEnvVar(envVars []string, exclude string) []string {
 		}
 	}
 	return result
+}
+
+// Test_generateArgsForInitContainer_WaitsOnParentReplicaInOwnPodGang covers the resolution half of #873.
+// The health-ordered drain selects the unavailable replica into the first anchor (its input and selection
+// are covered by TestBuildAnchorBearingSubStepPicksWorstOffFirst). Given that committed anchor, which pairs
+// prefill replica 1 with decode replica 0, decode-0 (which starts after prefill) must wait on prefill
+// replica 1, the prefill replica in its own PodGang, and never on prefill replica 0, which the stale
+// pre-update anchor still holds and this pod's init container can never observe.
+func Test_generateArgsForInitContainer_WaitsOnParentReplicaInOwnPodGang(t *testing.T) {
+	const (
+		pcsName  = "ml"
+		oldEpoch = "100"
+		newEpoch = "200"
+	)
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: pcsName},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "pf", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))}},
+					{Name: "dc", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1))}},
+				},
+				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "prefill", CliqueNames: []string{"pf"}},
+					{Name: "decode", CliqueNames: []string{"dc"}},
+				},
+			},
+		},
+	}
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	newAnchorGangName := common.GenerateAnchorPodGangName(rnr, newEpoch)
+	// Mid coherent update: the old-generation anchor still holds the replicas that have not migrated, and
+	// the new-generation anchor is the first the health-ordered drain produced, pairing the unavailable
+	// prefill replica 1 with decode replica 0.
+	pgm := &grovecorev1alpha1.PodGangMap{
+		Spec: grovecorev1alpha1.PodGangMapSpec{
+			Entries: []grovecorev1alpha1.PodGangEntry{
+				{
+					Epoch:                      oldEpoch,
+					PodCliqueSetGenerationHash: "old-hash",
+					Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+					PCSGReplicaIndices:         map[string][]int32{"prefill": {0}, "decode": {1}},
+				},
+				{
+					Epoch:                      newEpoch,
+					PodCliqueSetGenerationHash: "new-hash",
+					Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+					PCSGReplicaIndices:         map[string][]int32{"prefill": {1}, "decode": {0}},
+				},
+			},
+		},
+	}
+	// decode replica 0 on the new generation; its pod belongs to the new anchor PodGang.
+	pclq := &grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   fmt.Sprintf("%s-0-decode-0-dc", pcsName),
+			Labels: map[string]string{common.LabelPartOfKey: pcsName},
+		},
+		Spec: grovecorev1alpha1.PodCliqueSpec{StartsAfter: []string{"pf"}},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{common.LabelPodGang: newAnchorGangName}}}
+
+	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
+	require.NoError(t, err)
+	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-prefill-1-pf:1", pcsName)}, args)
 }

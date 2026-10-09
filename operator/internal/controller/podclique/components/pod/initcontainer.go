@@ -17,18 +17,19 @@ package pod
 import (
 	"fmt"
 	"os"
-	"strings"
+	"slices"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
+	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	groveversion "github.com/ai-dynamo/grove/operator/internal/version"
 
-	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -46,10 +47,10 @@ const (
 )
 
 // configurePodInitContainer adds the necessary volumes and init container to the pod for dependency management
-func configurePodInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod) error {
+func configurePodInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) error {
 	addServiceAccountTokenSecretVolume(pcs.Name, pod)
 	addPodInfoVolume(pod)
-	return addInitContainer(pcs, pclq, pod)
+	return addInitContainer(pcs, pclq, pod, pgm)
 }
 
 // addServiceAccountTokenSecretVolume adds a volume that mounts the service account token secret
@@ -93,12 +94,12 @@ func addPodInfoVolume(pod *corev1.Pod) {
 }
 
 // addInitContainer adds the Grove init container to the pod with appropriate image, args, and volume mounts
-func addInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod) error {
+func addInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) error {
 	image, err := getInitContainerImage()
 	if err != nil {
 		return err
 	}
-	args, err := generateArgsForInitContainer(pcs, pclq)
+	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
 	if err != nil {
 		return err
 	}
@@ -136,21 +137,41 @@ func getInitContainerImage() (string, error) {
 	return initContainerImage, nil
 }
 
-// generateArgsForInitContainer creates command line arguments for the init container based on PodClique dependencies
-func generateArgsForInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique) ([]string, error) {
-	args := make([]string, 0)
-	for _, parentCliqueFQN := range pclq.Spec.StartsAfter {
-		parentCliqueTemplateSpec, ok := lo.Find(pcs.Spec.Template.Cliques, func(templateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
-			return strings.HasSuffix(parentCliqueFQN, templateSpec.Name)
-		})
-		if !ok {
-			return nil, groveerr.New(
-				errCodeMissingPodCliqueTemplate,
-				component.OperationSync,
-				fmt.Sprintf("PodClique %s specified in startsAfter is not present in the templates", parentCliqueFQN),
-			)
-		}
-		args = append(args, fmt.Sprintf("--podcliques=%s:%d", parentCliqueFQN, *parentCliqueTemplateSpec.Spec.MinAvailable))
+// generateArgsForInitContainer creates the init container arguments by resolving this PodClique's declared
+// startup dependencies (unqualified parent clique names in pclq.Spec.StartsAfter) against the committed
+// PodGangMap entry of the pod's own PodGang. Only parents co-committed in that gang are emitted, each with
+// the gang-local count of pods to wait on, so a pod waits only for the parents present in its own gang.
+func generateArgsForInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, pod *corev1.Pod, pgm *grovecorev1alpha1.PodGangMap) ([]string, error) {
+	pcsName := componentutils.GetPodCliqueSetName(pclq.ObjectMeta)
+	pcsReplicaIndex, err := componentutils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclq.Name)
+	if err != nil {
+		return nil, groveerr.WrapError(err, errCodeGetPodCliqueSetReplicaIndex, component.OperationSync,
+			fmt.Sprintf("error extracting PodCliqueSet replica index for PodClique %v", client.ObjectKeyFromObject(pclq)))
+	}
+	rnr := apicommon.ResourceNameReplica{Name: pcsName, Replica: pcsReplicaIndex}
+	podGangName := pod.Labels[apicommon.LabelPodGang]
+	entry := entryForPodGangName(pgm, rnr, podGangName)
+	if entry == nil {
+		return nil, groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
+			fmt.Sprintf("PodGang %q for PodClique %v has no committed PodGangMap entry yet, requeuing", podGangName, client.ObjectKeyFromObject(pclq)))
+	}
+	args := make([]string, 0, len(pclq.Spec.StartsAfter))
+	for _, target := range componentutils.StartupDependencyTargetsInEntry(pcs, pcsReplicaIndex, entry, podGangName, pclq.Spec.StartsAfter) {
+		args = append(args, fmt.Sprintf("--podcliques=%s:%d", target.PodCliqueFQN, target.MinReady))
 	}
 	return args, nil
+}
+
+// entryForPodGangName returns the committed PodGangMap entry that materializes podGangName for the replica,
+// or nil when no entry does.
+func entryForPodGangName(pgm *grovecorev1alpha1.PodGangMap, rnr apicommon.ResourceNameReplica, podGangName string) *grovecorev1alpha1.PodGangEntry {
+	if pgm == nil {
+		return nil
+	}
+	for i := range pgm.Spec.Entries {
+		if slices.Contains(componentutils.ExpectedPodGangNamesForEntry(rnr, pgm.Spec.Entries[i]), podGangName) {
+			return &pgm.Spec.Entries[i]
+		}
+	}
+	return nil
 }

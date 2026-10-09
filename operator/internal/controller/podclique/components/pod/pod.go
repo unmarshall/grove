@@ -149,7 +149,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pclq *grovecore
 }
 
 // buildResource constructs a Pod resource from PodClique specifications, setting up metadata, labels, scheduling gates, and dependencies
-func (r _resource) buildResource(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, podGangName string, pod *corev1.Pod, podIndex int) error {
+func (r _resource) buildResource(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovecorev1alpha1.PodClique, podGangName string, pod *corev1.Pod, podIndex int, pgm *grovecorev1alpha1.PodGangMap) error {
 	// Extract PCS replica index from PodClique FQN
 	pcsName := componentutils.GetPodCliqueSetName(pclq.ObjectMeta)
 	pcsReplicaIndex, err := componentutils.GetPodCliqueSetReplicaIndexFromPodCliqueFQN(pcsName, pclq.Name)
@@ -220,7 +220,7 @@ func (r _resource) buildResource(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grov
 	}
 	// If there is a need to enforce a Startup-Order then configure the init container and add it to the Pod Spec.
 	if len(pclq.Spec.StartsAfter) != 0 {
-		return configurePodInitContainer(pcs, pclq, pod)
+		return configurePodInitContainer(pcs, pclq, pod, pgm)
 	}
 	return nil
 }

@@ -72,22 +72,6 @@ func doGetPCSGsForPCS(ctx context.Context, cl client.Client, pcsObjKey client.Ob
 	return pcsgList, nil
 }
 
-// GenerateDependencyNamesForBasePodGang generates the FQNs of all PodCliques that would qualify as a dependency.
-func GenerateDependencyNamesForBasePodGang(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, parentCliqueName string) []string {
-	parentPCLQNames := make([]string, 0)
-	pcsgConfig := FindScalingGroupConfigForClique(pcs.Spec.Template.PodCliqueScalingGroupConfigs, parentCliqueName)
-	if pcsgConfig != nil {
-		// Generate FQNs of minAvailable number of PodCliques that belong to a PodCliueScalingGroup.
-		pcsgFQN := apicommon.GeneratePodCliqueScalingGroupName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}, pcsgConfig.Name)
-		for pcsgReplicaIndex := range int(*pcsgConfig.MinAvailable) {
-			parentPCLQNames = append(parentPCLQNames, apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcsgFQN, Replica: pcsgReplicaIndex}, parentCliqueName))
-		}
-	} else {
-		parentPCLQNames = append(parentPCLQNames, apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}, parentCliqueName))
-	}
-	return parentPCLQNames
-}
-
 // GroupPCSGsByPCSReplicaIndex filters PCSGs that have a PodCliqueSetReplicaIndex label and groups them by the PCS replica index.
 // A PodCliqueSetReplicaIndex label that is not a valid integer is a contract violation and returns an error.
 func GroupPCSGsByPCSReplicaIndex(pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) (map[int][]grovecorev1alpha1.PodCliqueScalingGroup, error) {

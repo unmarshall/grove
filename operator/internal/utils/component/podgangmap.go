@@ -24,6 +24,7 @@ import (
 
 	"github.com/samber/lo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -276,4 +277,77 @@ func EpochByAnchorPodGangName(entries []grovecorev1alpha1.PodGangEntry, rnr apic
 		}
 	}
 	return epochByPodGangName
+}
+
+// StartupDependencyTarget is one init-container wait target. It contains the fully qualified name of a parent PodClique
+// and the number of its pods that must be Ready within the dependent pod's own PodGang before it starts.
+type StartupDependencyTarget struct {
+	// PodCliqueFQN is the fully qualified name of the PodClique.
+	PodCliqueFQN string
+	// MinReady is the minimum number of pods for the PodClique that must be ready.
+	MinReady int32
+}
+
+// StartupDependencyTargetsInEntry resolves each declared parent clique name against entry, the committed
+// PodGang entry the dependent pod belongs to, into the init-container wait targets co-committed in the
+// dependent pod's own PodGang (podGangName). A PodCliqueScalingGroup parent yields one target per committed
+// replica index whose materialized PodGang is podGangName, each waiting on that member clique's
+// MinAvailable. This keeps an anchor pod waiting on all co-anchor parent replicas while a scale-out pod
+// waits only on the parent replica in its own gang. A standalone parent (an anchor-gang member only) yields
+// one target, waiting on that member clique's MinAvailable. This keeps an anchor pod waiting on all
+// co-anchor parent replicas while a scale-out pod waits only on the parent replica in its own gang. A
+// standalone parent (an anchor-gang member only), when it is committed in podGangName, yields one target
+// waiting on its MinAvailable. A coherent update may split its pods across anchors, but every anchor commits
+// at least MinAvailable, so MinAvailable is always satisfiable in the pod's own gang. A parent not committed
+// in the pod's gang (out of the update scope) yields nothing, so a subset update never stalls it, and only
+// in-gang, satisfiable dependencies are emitted.
+func StartupDependencyTargetsInEntry(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entry *grovecorev1alpha1.PodGangEntry, podGangName string, parentCliqueNames []string) []StartupDependencyTarget {
+	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
+	anchorGangName := apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)
+	var targets []StartupDependencyTarget
+	for _, parentCliqueName := range parentCliqueNames {
+		if pcsgConfig := FindScalingGroupConfigForClique(pcs.Spec.Template.PodCliqueScalingGroupConfigs, parentCliqueName); pcsgConfig != nil {
+			minReady := minAvailableForClique(pcs, parentCliqueName)
+			pcsgFQN := apicommon.GeneratePodCliqueScalingGroupName(rnr, pcsgConfig.Name)
+			for _, parentReplicaIndex := range entry.PCSGReplicaIndices[pcsgConfig.Name] {
+				memberGangName := anchorGangName
+				if entry.Role != grovecorev1alpha1.PodGangEntryRoleAnchor {
+					memberGangName = apicommon.GenerateNonAnchorPodGangName(rnr, entry.Epoch, pcsgConfig.Name, parentReplicaIndex)
+				}
+				if memberGangName != podGangName {
+					continue // parent replica is in a different PodGang than the dependent pod
+				}
+				targets = append(targets, StartupDependencyTarget{
+					PodCliqueFQN: apicommon.GeneratePodCliqueName(apicommon.ResourceNameReplica{Name: pcsgFQN, Replica: int(parentReplicaIndex)}, parentCliqueName),
+					MinReady:     minReady,
+				})
+			}
+			continue
+		}
+		// A standalone parent is only ever an anchor-gang member, and a coherent update may split its pods
+		// across the old and new anchor PodGangs. Every anchor commits at least MinAvailable of each component
+		// (extras are subsumed into the highest-epoch anchor), so when the parent is committed in this gang its
+		// MinAvailable is always satisfiable here. count > 0 is only the presence check: a parent not committed
+		// in this gang (out of the update scope) yields nothing and never stalls the dependent pod.
+		if podGangName == anchorGangName {
+			if count := entry.PodCliques[parentCliqueName]; count > 0 {
+				targets = append(targets, StartupDependencyTarget{
+					PodCliqueFQN: apicommon.GeneratePodCliqueName(rnr, parentCliqueName),
+					MinReady:     minAvailableForClique(pcs, parentCliqueName),
+				})
+			}
+		}
+	}
+	return targets
+}
+
+// minAvailableForClique returns the MinAvailable of the named PodClique template in the PodCliqueSet, or 0
+// when the clique is not found.
+func minAvailableForClique(pcs *grovecorev1alpha1.PodCliqueSet, cliqueName string) int32 {
+	for _, cliqueTemplate := range pcs.Spec.Template.Cliques {
+		if cliqueTemplate.Name == cliqueName {
+			return ptr.Deref(cliqueTemplate.Spec.MinAvailable, cliqueTemplate.Spec.Replicas)
+		}
+	}
+	return 0
 }
