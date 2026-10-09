@@ -486,6 +486,16 @@ func TestStartupDependencyTargetsInEntry(t *testing.T) {
 			want:          []StartupDependencyTarget{{PodCliqueFQN: "ml-0-frontend", MinReady: 2}},
 		},
 		{
+			// A scale-in reduces the clique from the highest-epoch gang first, so a gang can hold fewer than
+			// MinAvailable pods. The init container watches only its own gang, so the wait is clamped to the pods
+			// this gang holds.
+			description:   "standalone parent below MinAvailable in this gang waits only on the pods it commits",
+			entry:         anchorEntry(nil, map[string]int32{"frontend": 1}),
+			podGangName:   anchorGang,
+			parentCliques: []string{"frontend"},
+			want:          []StartupDependencyTarget{{PodCliqueFQN: "ml-0-frontend", MinReady: 1}},
+		},
+		{
 			description:   "a parent not co-committed in the pod's gang yields nothing",
 			entry:         anchorEntry(map[string][]int32{"decode": {0}}, nil),
 			podGangName:   anchorGang,

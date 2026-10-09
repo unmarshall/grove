@@ -908,3 +908,60 @@ func TestCliqueTemplateName(t *testing.T) {
 		})
 	}
 }
+
+// Test_generateArgsForInitContainer_BoundsStandaloneWaitToGangCommittedCount is the scale-in reproducer: a
+// worker PCSG member starts after a standalone frontend with MinAvailable 2. A scale-in can leave the gang
+// holding only one frontend pod, so the worker's init container must wait on just that one pod, not the full
+// MinAvailable, or it would never finish starting since it watches only its own gang.
+func Test_generateArgsForInitContainer_BoundsStandaloneWaitToGangCommittedCount(t *testing.T) {
+	const (
+		pcsName = "ml"
+		epoch   = "100"
+	)
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: pcsName},
+		Spec: grovecorev1alpha1.PodCliqueSetSpec{
+			Template: grovecorev1alpha1.PodCliqueSetTemplateSpec{
+				StartupType: ptr.To(grovecorev1alpha1.CliqueStartupTypeExplicit),
+				Cliques: []*grovecorev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(2))}},
+					{Name: "worker", Spec: grovecorev1alpha1.PodCliqueSpec{MinAvailable: ptr.To(int32(1)), StartsAfter: []string{"frontend"}}},
+				},
+				PodCliqueScalingGroupConfigs: []grovecorev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", CliqueNames: []string{"worker"}},
+				},
+			},
+		},
+	}
+	rnr := common.ResourceNameReplica{Name: pcsName, Replica: 0}
+	anchorGangName := common.GenerateAnchorPodGangName(rnr, epoch)
+	// A gang left with a single frontend pod after a scale-in, co-committing worker replica 1.
+	pgm := &grovecorev1alpha1.PodGangMap{
+		Spec: grovecorev1alpha1.PodGangMapSpec{
+			Entries: []grovecorev1alpha1.PodGangEntry{
+				{
+					Epoch:                      epoch,
+					PodCliqueSetGenerationHash: "hash",
+					Role:                       grovecorev1alpha1.PodGangEntryRoleAnchor,
+					PodCliques:                 map[string]int32{"frontend": 1},
+					PCSGReplicaIndices:         map[string][]int32{"decode": {1}},
+				},
+			},
+		},
+	}
+	pclq := &grovecorev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-0-decode-1-worker", pcsName),
+			Labels: map[string]string{
+				common.LabelPartOfKey:                         pcsName,
+				common.LabelPodCliqueScalingGroup:             fmt.Sprintf("%s-0-decode", pcsName),
+				common.LabelPodCliqueScalingGroupReplicaIndex: "1",
+			},
+		},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{common.LabelPodGang: anchorGangName}}}
+
+	args, err := generateArgsForInitContainer(pcs, pclq, pod, pgm)
+	require.NoError(t, err)
+	assert.Equal(t, []string{fmt.Sprintf("--podcliques=%s-0-frontend:1", pcsName)}, args)
+}

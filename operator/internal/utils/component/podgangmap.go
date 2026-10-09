@@ -321,17 +321,20 @@ type StartupDependencyTarget struct {
 
 // StartupDependencyTargetsInEntry resolves each declared parent clique name against entry, the committed
 // PodGang entry the dependent pod belongs to, into the init-container wait targets co-committed in the
-// dependent pod's own PodGang (podGangName). A PodCliqueScalingGroup parent yields one target per committed
-// replica index whose materialized PodGang is podGangName, each waiting on that member clique's
-// MinAvailable. This keeps an anchor pod waiting on all co-anchor parent replicas while a scale-out pod
-// waits only on the parent replica in its own gang. A standalone parent (an anchor-gang member only) yields
-// one target, waiting on that member clique's MinAvailable. This keeps an anchor pod waiting on all
-// co-anchor parent replicas while a scale-out pod waits only on the parent replica in its own gang. A
-// standalone parent (an anchor-gang member only), when it is committed in podGangName, yields one target
-// waiting on its MinAvailable. A coherent update may split its pods across anchors, but every anchor commits
-// at least MinAvailable, so MinAvailable is always satisfiable in the pod's own gang. A parent not committed
-// in the pod's gang (out of the update scope) yields nothing, so a subset update never stalls it, and only
-// in-gang, satisfiable dependencies are emitted.
+// dependent pod's own PodGang (podGangName).
+//
+// A PodCliqueScalingGroup parent yields one target per committed replica index whose materialized PodGang is
+// podGangName, each waiting on that member clique's MinAvailable, so an anchor pod waits on all co-anchor
+// parent replicas while a scale-out pod waits only on the parent replica in its own gang.
+//
+// A standalone parent lives only in anchor gangs. When it is present in podGangName it yields one target.
+// The target waits on min(MinAvailable, the number of its pods this gang holds). The init container watches
+// only its own gang, so it must not wait for more pods than this gang holds. A coherent update keeps every
+// gang at or above MinAvailable. A later scale-in can drop a gang below MinAvailable, since it drains the
+// highest gang first.
+//
+// A parent not committed in the pod's gang (out of the update scope) yields nothing, so a subset update
+// never stalls it, and only in-gang, satisfiable dependencies are emitted.
 func StartupDependencyTargetsInEntry(pcs *grovecorev1alpha1.PodCliqueSet, pcsReplicaIndex int, entry *grovecorev1alpha1.PodGangEntry, podGangName string, parentCliqueNames []string) []StartupDependencyTarget {
 	rnr := apicommon.ResourceNameReplica{Name: pcs.Name, Replica: pcsReplicaIndex}
 	anchorGangName := apicommon.GenerateAnchorPodGangName(rnr, entry.Epoch)
@@ -355,16 +358,15 @@ func StartupDependencyTargetsInEntry(pcs *grovecorev1alpha1.PodCliqueSet, pcsRep
 			}
 			continue
 		}
-		// A standalone parent is only ever an anchor-gang member, and a coherent update may split its pods
-		// across the old and new anchor PodGangs. Every anchor commits at least MinAvailable of each component
-		// (extras are subsumed into the highest-epoch anchor), so when the parent is committed in this gang its
-		// MinAvailable is always satisfiable here. count > 0 is only the presence check: a parent not committed
-		// in this gang (out of the update scope) yields nothing and never stalls the dependent pod.
+		// A standalone parent lives only in anchor gangs. The init container watches only its own gang, so it
+		// must not wait for more parent pods than this gang holds. A coherent update keeps every gang at or above
+		// MinAvailable. A later scale-in can drop a gang below MinAvailable, since it drains the highest gang
+		// first. So wait on min(MinAvailable, count). count == 0 means the parent is not in this gang, so skip it.
 		if podGangName == anchorGangName {
 			if count := entry.PodCliques[parentCliqueName]; count > 0 {
 				targets = append(targets, StartupDependencyTarget{
 					PodCliqueFQN: apicommon.GeneratePodCliqueName(rnr, parentCliqueName),
-					MinReady:     minAvailableForClique(pcs, parentCliqueName),
+					MinReady:     min(minAvailableForClique(pcs, parentCliqueName), count),
 				})
 			}
 		}
