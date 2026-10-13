@@ -254,7 +254,13 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 	}
 
 	if componentutils.IsPCLQRollingUpdateInProgress(ss.pclq) {
-		if componentutils.IsRollingRecreateUpdateInProgress(ss.pcs) {
+		if !pclqUpdateProgressMatchesCurrentRevision(ss) {
+			result.recordError(groveerr.New(
+				groveerr.ErrCodeContinueReconcileAndRequeue,
+				component.OperationSync,
+				fmt.Sprintf("PodClique %v update progress does not match the current PCS and PCLQ revisions, requeuing", client.ObjectKeyFromObject(ss.pclq)),
+			))
+		} else if componentutils.IsRollingRecreateUpdateInProgress(ss.pcs) {
 			// RollingRecreate self-paces the roll, deleting old-hash pods within the frozen PodGang.
 			if err := r.processPendingUpdates(ctx, logger, ss); err != nil {
 				result.recordError(err)
@@ -300,6 +306,20 @@ func (r _resource) removeSchedulerFinalizersFromDeletingPods(ctx context.Context
 		)
 	}
 	return nil
+}
+
+// pclqUpdateProgressMatchesCurrentRevision reports whether the PCLQ update progress identifies the
+// same PCS generation and Pod template revision currently observed on the PCS and PCLQ resources.
+// The PCS controller updates these resources independently, so update-specific Pod replacement and
+// completion must wait until all revision markers agree.
+func pclqUpdateProgressMatchesCurrentRevision(ss *syncSnapshot) bool {
+	if ss.pcs.Status.CurrentGenerationHash == nil || ss.pclq.Status.UpdateProgress == nil {
+		return false
+	}
+
+	progress := ss.pclq.Status.UpdateProgress
+	return progress.PodCliqueSetGenerationHash == *ss.pcs.Status.CurrentGenerationHash &&
+		progress.PodTemplateHash == ss.pclq.Labels[apicommon.LabelPodTemplateHash]
 }
 
 // syncPCSGPodIndexLabels backfills and reconciles the group-wide index label on existing PCSG pods.
