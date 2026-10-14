@@ -52,6 +52,30 @@ type Backend interface {
 	ValidatePodCliqueSet(ctx context.Context, pcs *grovecorev1alpha1.PodCliqueSet) error
 }
 
+// PodCliqueScaleValidator is an optional interface that Backend implementations may satisfy to
+// restrict scaling of an individual PodClique. The PodClique validating webhook type-asserts the
+// resolved backend to this interface; backends that do not implement it impose no restriction.
+// It exists for the kueue backend only, because a Kueue Workload's podSets cannot change once it is created.
+// Fold it into Backend if another backend needs it.
+type PodCliqueScaleValidator interface {
+	// ValidatePodCliqueScale validates a requested change to a PodClique's replica count.
+	ValidatePodCliqueScale(ctx context.Context, oldReplicas, newReplicas int32) error
+}
+
+// Finalizer is an optional interface for backends that must finalize Grove's Pods as they are deleted.
+// The PodClique controller calls it for Pods being deleted, and for every Pod of a PodClique being deleted.
+// It exists for the kueue backend only; fold it into Backend if another backend needs it.
+type Finalizer interface {
+	// RemovePodFinalizers removes the finalizers the scheduler puts on pod but never removes itself, so they
+	// never keep a deleted Pod around; it is a no-op if there are none. For example, when a PodClique is deleted,
+	// Kueue keeps its finalizer on the Pods of the serving pod group, so they would stay Terminating.
+	RemovePodFinalizers(ctx context.Context, pod *corev1.Pod) error
+	// IsPodFinalized reports whether the scheduler no longer counts pod, which is being deleted. The PodClique
+	// controller creates its replacement only then. For example, Kueue keeps counting a deleted Pod while it
+	// runs, so an earlier replacement would push the pod group past its Workload's PodSet count.
+	IsPodFinalized(pod *corev1.Pod) bool
+}
+
 // TopologyAwareBackend is an optional interface that Backend
 // implementations may satisfy if they manage a scheduler-specific topology CRD.
 // The ClusterTopologyBinding controller type-asserts each registered backend to this
