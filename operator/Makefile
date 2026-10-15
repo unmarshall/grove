@@ -25,6 +25,7 @@ INSTALL_CRDS_NAME    := "grove-install-crds"
 K3S_IMAGE       ?= rancher/k3s:v1.35.5-k3s1
 E2E_REGISTRY_PORT ?= 5001
 E2E_CREATE_FLAGS  ?=
+E2E_GO_TEST_FLAGS ?=
 ifndef DIAG_DIR
 DIAG_DIR := $(if $(GROVE_E2E_DIAG_DIR),$(GROVE_E2E_DIAG_DIR),$(MODULE_ROOT)/e2e-diagnostics)
 endif
@@ -124,13 +125,13 @@ run-e2e:
 	@echo "> Preparing charts (copying CRDs)..."
 	@$(MODULE_HACK_DIR)/prepare-charts.sh
 	@echo "> Running e2e tests (compilation may take a few minutes with no output)..."
-	@cd e2e && go test -count=1 -tags=e2e ./tests/... -v -timeout 45m $(if $(TEST_PATTERN),-run '$(TEST_PATTERN)')
+	@cd e2e && go test -count=1 -tags=e2e $(E2E_GO_TEST_FLAGS) ./tests/... -v -timeout 45m $(if $(TEST_PATTERN),-run '$(TEST_PATTERN)')
 
 # Same as run-e2e but with gotestsum for cleaner pass/fail summaries and colored output
 .PHONY: run-e2e-verbose
 run-e2e-verbose: $(GOTESTSUM)
 	@echo "> Running e2e tests (verbose)..."
-	@cd e2e && $(GOTESTSUM) --format short-verbose -- -count=1 -tags=e2e ./tests/... -timeout 45m $(if $(TEST_PATTERN),-run '$(TEST_PATTERN)')
+	@cd e2e && $(GOTESTSUM) --format short-verbose -- -count=1 -tags=e2e $(E2E_GO_TEST_FLAGS) ./tests/... -timeout 45m $(if $(TEST_PATTERN),-run '$(TEST_PATTERN)')
 
 # Run the standalone upgrade test from the latest published GitHub release to
 # the operator built from the current checkout. The test owns its k3d cluster.
