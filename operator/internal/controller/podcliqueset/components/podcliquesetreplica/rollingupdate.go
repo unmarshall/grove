@@ -50,8 +50,7 @@ func (r _resource) orchestrateRollingUpdate(ctx context.Context, logger logr.Log
 					return err
 				}
 			}
-			return groveerr.New(
-				groveerr.ErrCodeContinueReconcileAndRequeue,
+			return groveerr.NewContinueReconcileAndRequeue(
 				component.OperationSync,
 				fmt.Sprintf("rolling update of PodCliqueSet replica index %d is not completed", currentlyUpdating.replicaIndex),
 			)
@@ -67,8 +66,7 @@ func (r _resource) orchestrateRollingUpdate(ctx context.Context, logger logr.Log
 	}
 
 	if nextReplicaToUpdate != nil {
-		return groveerr.New(
-			groveerr.ErrCodeContinueReconcileAndRequeue,
+		return groveerr.NewContinueReconcileAndRequeue(
 			component.OperationSync,
 			fmt.Sprintf("commencing rolling update of PodCliqueSet replica index %d", *nextReplicaToUpdate),
 		)

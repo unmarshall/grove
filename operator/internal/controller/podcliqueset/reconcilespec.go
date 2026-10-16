@@ -16,8 +16,8 @@ package podcliqueset
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
 
 	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -25,6 +25,7 @@ import (
 	ctrlcommon "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	ctrlutils "github.com/ai-dynamo/grove/operator/internal/controller/utils"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
@@ -190,76 +191,73 @@ func (r *Reconciler) syncPodCliqueSetResources(ctx context.Context, logger logr.
 // syncKindGroup runs the Sync operation for each kind in the group concurrently.
 // Returns a non-nil ReconcileStepResult if reconciliation should stop for this group,
 // plus the list of kinds that returned "continue and requeue" errors.
-func (r *Reconciler) syncKindGroup(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, group []component.Kind, groupIdx int) (*ctrlcommon.ReconcileStepResult, []component.Kind) {
-	var (
-		mu              sync.Mutex
-		requeuedKinds   []component.Kind
-		requeueAfterMsg string
-		hasRequeueAfter bool
-		errsByKind      []error
-	)
+func (r *Reconciler) syncKindGroup(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, group []component.Kind, groupIndex int) (*ctrlcommon.ReconcileStepResult, []component.Kind) {
 	tasks := make([]utils.Task, 0, len(group))
+	kindByTaskName := make(map[string]component.Kind, len(group))
 	for _, kind := range group {
 		operator, err := r.operatorRegistry.GetOperator(kind)
 		if err != nil {
 			// MNNVL-only components (ComputeDomain) aren't registered when the feature is
-			// off. Not an error; just nothing to sync.
+			// off. Not an error, just nothing to sync.
 			logger.V(1).Info("Skipping unregistered operator", "kind", kind)
 			continue
 		}
+		taskName := fmt.Sprintf("SyncKind-%s", kind)
+		kindByTaskName[taskName] = kind
 		tasks = append(tasks, utils.Task{
-			Name: fmt.Sprintf("SyncKind-%s", kind),
+			Name: taskName,
 			Fn: func(ctx context.Context) error {
-				logger.V(1).Info("Syncing PodCliqueSet resource", "kind", kind, "group", groupIdx)
-				err := operator.Sync(ctx, logger, pcs)
-
-				// One lock + defer covers all branches below; requeuedKinds /
-				// hasRequeueAfter / errsByKind are read by the aggregator after
-				// RunConcurrently joins, so writes must be serialised here.
-				mu.Lock()
-				defer mu.Unlock()
-
-				if err == nil {
-					return nil
-				}
-				if ctrlutils.ShouldContinueReconcileAndRequeue(err) {
-					// Component is asking the parent to come back later — that signal is
-					// not a sync failure, so we record the kind and return nil. The
-					// caller bubbles requeuedKinds up and schedules one follow-up
-					// reconcile after the whole sync sweep completes.
-					requeuedKinds = append(requeuedKinds, kind)
-					logger.V(1).Info("component requested post-sync requeue", "kind", kind, "message", err.Error())
-					return nil
-				}
-				if ctrlutils.ShouldRequeueAfter(err) {
-					// Timed retry — caller will return ReconcileAfter for the whole
-					// group. First setter wins; runs are deterministic enough that the
-					// chosen message is fine.
-					hasRequeueAfter = true
-					requeueAfterMsg = err.Error()
-					return err
-				}
-				// Real failure: surface it as a reconcile error.
-				logger.Error(err, "failed to sync PodCliqueSet resource", "kind", kind)
-				errsByKind = append(errsByKind, fmt.Errorf("failed to sync %s: %w", kind, err))
-				return err
+				logger.V(1).Info("Syncing PodCliqueSet resource", "kind", kind, "group", groupIndex)
+				return operator.Sync(ctx, logger, pcs)
 			},
 		})
 	}
 	if len(tasks) == 0 {
 		return nil, nil
 	}
-	_ = utils.RunConcurrently(ctx, logger, tasks)
 
-	if hasRequeueAfter {
-		result := ctrlcommon.ReconcileAfter(constants.ComponentSyncRetryInterval, requeueAfterMsg)
-		return &result, requeuedKinds
+	runResult := utils.RunConcurrently(ctx, logger, tasks)
+	if runResult.HasErrors() {
+		return processKindGroupRunResultErrors(logger, runResult, kindByTaskName)
 	}
-	if len(errsByKind) > 0 {
-		result := ctrlcommon.ReconcileWithErrors("error syncing managed resources", errsByKind...)
-		return &result, requeuedKinds
+	return nil, nil
+}
+
+// processKindGroupRunResultErrors processes component task failures and determines whether
+// reconciliation should stop, requeue after a delay, or continue with the next group.
+func processKindGroupRunResultErrors(logger logr.Logger, runResult utils.RunResult, kindByTaskName map[string]component.Kind) (*ctrlcommon.ReconcileStepResult, []component.Kind) {
+	continueReconcileAndRequeueKinds := make([]component.Kind, 0)
+	reconciliationErrors := make([]error, 0)
+	requeueErrors := make([]error, 0)
+	for _, failedTask := range runResult.FailedTasks {
+		kind, ok := kindByTaskName[failedTask.Name]
+		if !ok {
+			reconciliationErrors = append(reconciliationErrors,
+				fmt.Errorf("failed task %q has no component kind: %w", failedTask.Name, failedTask.Err))
+			continue
+		}
+		if groveerr.IsContinueReconcileAndRequeue(failedTask.Err) {
+			continueReconcileAndRequeueKinds = append(continueReconcileAndRequeueKinds, kind)
+			logger.V(1).Info("Component requested post-sync requeue", "kind", kind, "message", failedTask.Err.Error())
+			continue
+		}
+		if groveerr.IsRequeueAfter(failedTask.Err) {
+			requeueErrors = append(requeueErrors, failedTask.Err)
+			continue
+		}
+		logger.Error(failedTask.Err, "Failed to sync PodCliqueSet resource", "kind", kind)
+		reconciliationErrors = append(reconciliationErrors, fmt.Errorf("failed to sync %s: %w", kind, failedTask.Err))
 	}
-	return nil, requeuedKinds
+
+	if len(reconciliationErrors) > 0 {
+		result := ctrlcommon.ReconcileWithErrors("error syncing managed resources", reconciliationErrors...)
+		return &result, continueReconcileAndRequeueKinds
+	}
+	if requeueAfter, shouldRequeue := groveerr.GetLowestRequeueAfter(requeueErrors); shouldRequeue {
+		result := ctrlcommon.ReconcileAfter(requeueAfter, errors.Join(requeueErrors...).Error())
+		return &result, continueReconcileAndRequeueKinds
+	}
+	return nil, continueReconcileAndRequeueKinds
 }
 
 // updateObservedGeneration updates the status to reflect the current observed generation.

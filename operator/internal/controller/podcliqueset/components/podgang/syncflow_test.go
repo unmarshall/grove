@@ -96,7 +96,7 @@ func TestVerifyAllPodsCreated(t *testing.T) {
 			r := &_resource{schedRegistry: defaultFakeSchedulerRegistry}
 			err := r.verifyAllPodsCreated(sc, tt.podGang)
 			if tt.wantRequeue {
-				testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, err)
+				assert.True(t, groveerr.IsRequeueAfter(err))
 			} else {
 				require.NoError(t, err)
 			}
@@ -293,7 +293,7 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 
 		require.True(t, result.hasErrors())
 		assert.Equal(t, []string{pgName}, result.createdPodGangNames)
-		testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, result.errs[0])
+		assert.True(t, groveerr.IsRequeueAfter(result.errs[0]))
 		// PodGang object was created even though it is not ready.
 		pgAfter := &groveschedulerv1alpha1.PodGang{}
 		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: pgName}, pgAfter))
@@ -335,7 +335,7 @@ func TestCreateOrUpdatePodGangs(t *testing.T) {
 		result := r.createOrUpdatePodGangs(ctx, ss)
 
 		require.True(t, result.hasErrors(), "verifyAllPodsCreated must record a requeue error")
-		testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, result.errs[0])
+		assert.True(t, groveerr.IsRequeueAfter(result.errs[0]))
 		patched := &groveschedulerv1alpha1.PodGang{}
 		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: pgName}, patched))
 		assert.False(t, meta.IsStatusConditionTrue(patched.Status.Conditions, string(groveschedulerv1alpha1.PodGangConditionTypeScheduled)), "Scheduled must flip to False on regression")
@@ -2019,7 +2019,7 @@ func TestReconcilePodGangStatus(t *testing.T) {
 
 		err := r.reconcilePodGangStatus(t.Context(), readyState(), pgi, true)
 
-		testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeRequeueAfter, Operation: component.OperationSync}, err)
+		assert.True(t, groveerr.IsRequeueAfter(err))
 	})
 
 	t.Run("returns error on a non-conflict status patch failure", func(t *testing.T) {

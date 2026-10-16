@@ -26,6 +26,7 @@ import (
 	ctrlcommon "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	ctrlutils "github.com/ai-dynamo/grove/operator/internal/controller/utils"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 
 	"github.com/go-logr/logr"
@@ -153,14 +154,14 @@ func (r *Reconciler) syncPodCliqueScalingGroupResources(ctx context.Context, log
 		}
 		logger.V(1).Info("Syncing PodCliqueScalingGroup resource", "kind", kind)
 		if err = operator.Sync(ctx, logger, pcsg); err != nil {
-			if ctrlutils.ShouldContinueReconcileAndRequeue(err) {
+			if groveerr.IsContinueReconcileAndRequeue(err) {
 				logger.V(1).Info("components has registered a request to requeue post completion of all components syncs", "kind", kind, "message", err.Error())
 				continueReconcileAndRequeueKinds = append(continueReconcileAndRequeueKinds, kind)
 				continue
 			}
-			if shouldRequeue := ctrlutils.ShouldRequeueAfter(err); shouldRequeue {
-				logger.V(1).Info("retrying sync due to components", "kind", kind, "syncRetryInterval", constants.ComponentSyncRetryInterval, "message", err.Error())
-				return ctrlcommon.ReconcileAfter(constants.ComponentSyncRetryInterval, err.Error())
+			if requeueAfter, shouldRequeue := groveerr.GetRequeueAfter(err); shouldRequeue {
+				logger.V(1).Info("Retrying sync due to component", "kind", kind, "requeueAfter", requeueAfter, "message", err.Error())
+				return ctrlcommon.ReconcileAfter(requeueAfter, err.Error())
 			}
 			logger.Error(err, "failed to sync PodCliqueScalingGroup resources", "kind", kind)
 			return ctrlcommon.ReconcileWithErrors("error syncing managed resources", fmt.Errorf("failed to sync %s: %w", kind, err))

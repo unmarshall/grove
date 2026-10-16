@@ -527,8 +527,8 @@ func (r _resource) reconcilePodGangStatus(ctx context.Context, ss *syncState, pg
 	}
 	if err = r.client.Status().Patch(ctx, pg, patch); err != nil {
 		if apierrors.IsConflict(err) {
-			return groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
-				fmt.Sprintf("conflict patching PodGang %s status from a stale cache, re-queueing", pgi.fqn))
+			return groveerr.NewRequeueAfter(component.OperationSync,
+				fmt.Sprintf("conflict patching PodGang %s status from a stale cache, re-queueing", pgi.fqn), constants.ComponentSyncRetryInterval)
 		}
 		return groveerr.WrapError(err, errCodeUpdatePodGangStatus, component.OperationSync,
 			fmt.Sprintf("failed to patch status for PodGang %s", pgi.fqn))
@@ -663,18 +663,20 @@ func (r _resource) verifyAllPodsCreated(ss *syncState, pgi *podGangInfo) error {
 	if len(pclqs) != len(pgi.pclqs) {
 		// Not all constituent PCLQs exist yet
 		ss.logger.V(1).Info("Not all constituent PCLQs exist yet", "podGang", pgi.fqn, "expected", len(pgi.pclqs), "actual", len(pclqs))
-		return groveerr.New(groveerr.ErrCodeRequeueAfter,
+		return groveerr.NewRequeueAfter(
 			component.OperationSync,
 			fmt.Sprintf("Waiting for all pods to be created for PodGang %s", pgi.fqn),
+			constants.ComponentSyncRetryInterval,
 		)
 	}
 	// check the health of each podclique
 	numPendingPods := r.getPodsPendingCreationOrAssociation(ss, pgi)
 	if numPendingPods > 0 {
 		ss.logger.V(1).Info("skipping creation of PodGang as all desired replicas have not yet been created or assigned", "podGang", pgi.fqn, "numPendingPodsToCreateOrAssociate", numPendingPods)
-		return groveerr.New(groveerr.ErrCodeRequeueAfter,
+		return groveerr.NewRequeueAfter(
 			component.OperationSync,
 			fmt.Sprintf("Waiting for all pods to be created or assigned for PodGang %s", pgi.fqn),
+			constants.ComponentSyncRetryInterval,
 		)
 	}
 	return nil

@@ -24,6 +24,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	"github.com/ai-dynamo/grove/operator/internal/controller/podclique/expectations"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
@@ -229,8 +230,8 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 			return result
 		}
 		if repaired {
-			result.recordError(groveerr.New(groveerr.ErrCodeRequeueAfter, component.OperationSync,
-				fmt.Sprintf("repaired pods missing the %s label for PodCliqueScalingGroup PodClique %v, re-queueing", apicommon.LabelPodGang, client.ObjectKeyFromObject(ss.pclq))))
+			result.recordError(groveerr.NewRequeueAfter(component.OperationSync,
+				fmt.Sprintf("repaired pods missing the %s label for PodCliqueScalingGroup PodClique %v, re-queueing", apicommon.LabelPodGang, client.ObjectKeyFromObject(ss.pclq)), constants.ComponentSyncRetryInterval))
 			return result
 		}
 
@@ -255,8 +256,7 @@ func (r _resource) runSyncFlow(ctx context.Context, logger logr.Logger, ss *sync
 
 	if componentutils.IsPCLQRollingUpdateInProgress(ss.pclq) {
 		if !pclqUpdateProgressMatchesCurrentRevision(ss) {
-			result.recordError(groveerr.New(
-				groveerr.ErrCodeContinueReconcileAndRequeue,
+			result.recordError(groveerr.NewContinueReconcileAndRequeue(
 				component.OperationSync,
 				fmt.Sprintf("PodClique %v update progress does not match the current PCS and PCLQ revisions, requeuing", client.ObjectKeyFromObject(ss.pclq)),
 			))

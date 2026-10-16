@@ -208,7 +208,7 @@ func TestSync(t *testing.T) {
 
 		err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
-		assertRequeueAfter(t, err)
+		assert.True(t, groveerr.IsRequeueAfter(err))
 
 		// Verify secret was created
 		secret := &corev1.Secret{}
@@ -239,7 +239,7 @@ func TestSync(t *testing.T) {
 
 		err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
-		assertRequeueAfter(t, err)
+		assert.True(t, groveerr.IsRequeueAfter(err))
 
 		secret := &corev1.Secret{}
 		secretName := apicommon.GenerateInitContainerSATokenSecretName(pcsName)
@@ -293,7 +293,7 @@ func TestSync(t *testing.T) {
 
 		err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
-		assertRequeueAfter(t, err)
+		assert.True(t, groveerr.IsRequeueAfter(err))
 
 		secret := &corev1.Secret{}
 		secretName := apicommon.GenerateInitContainerSATokenSecretName("test-pcs")
@@ -343,7 +343,7 @@ func TestSync(t *testing.T) {
 
 		err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
-		assertRequeueAfter(t, err)
+		assert.True(t, groveerr.IsRequeueAfter(err))
 
 		secret := &corev1.Secret{}
 		secretName := apicommon.GenerateInitContainerSATokenSecretName("test-pcs")
@@ -494,7 +494,7 @@ func TestSync(t *testing.T) {
 			err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
 			if tc.expectRequeue {
-				assertRequeueAfter(t, err)
+				assert.True(t, groveerr.IsRequeueAfter(err))
 			} else {
 				require.NoError(t, err)
 			}
@@ -520,14 +520,6 @@ func TestSync(t *testing.T) {
 			}
 		})
 	}
-}
-
-func assertRequeueAfter(t *testing.T, err error) {
-	t.Helper()
-
-	var groveErr *groveerr.GroveError
-	require.True(t, errors.As(err, &groveErr))
-	assert.Equal(t, groveerr.ErrCodeRequeueAfter, groveErr.Code)
 }
 
 func newOwnedSecret(name string, pcs *grovecorev1alpha1.PodCliqueSet) *corev1.Secret {
