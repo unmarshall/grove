@@ -56,11 +56,7 @@ func CreateOperatorRegistry(mgr manager.Manager, eventRecorder record.EventRecor
 	reg.Register(component.KindPodGangMap, podgangmap.New(cl, mgr.GetScheme(), clock.RealClock{}))
 	reg.Register(component.KindPodGangMigrator, podgangmigrator.New(cl, mgr.GetScheme(), schedRegistry))
 	reg.Register(component.KindPodCliqueSetReplica, podcliquesetreplica.New(cl, eventRecorder))
-
-	// Only register ComputeDomain operator if MNNVL is enabled
-	if networkConfig.AutoMNNVLEnabled {
-		reg.Register(component.KindComputeDomain, computedomain.New(cl, mgr.GetScheme(), eventRecorder))
-	}
+	reg.Register(component.KindComputeDomain, computedomain.New(cl, mgr.GetScheme(), eventRecorder, !networkConfig.AutoMNNVLEnabled))
 
 	return reg
 }

@@ -69,7 +69,7 @@ var testScheme = func() *runtime.Scheme {
 
 func TestNew(t *testing.T) {
 	cl := createTestClient()
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 	assert.NotNil(t, operator)
 }
 
@@ -359,6 +359,14 @@ func TestEmptyComputeDomain(t *testing.T) {
 // Sync Tests
 // ================================
 
+func TestSyncSkipsWhenDisabled(t *testing.T) {
+	operator := New(createClientThatFailsOnList(), testScheme, record.NewFakeRecorder(10), true)
+
+	err := operator.Sync(context.Background(), logr.Discard(), createPCSWithGPU(1))
+
+	assert.NoError(t, err)
+}
+
 // TestSyncSkipsWhenMNNVLNotEnabled tests that Sync returns early when PCS doesn't have MNNVL enabled.
 // We use a client that would fail on List - if Sync skips properly, it won't call List and won't error.
 func TestSyncSkipsWhenMNNVLNotEnabled(t *testing.T) {
@@ -384,7 +392,7 @@ func TestSyncSkipsWhenMNNVLNotEnabled(t *testing.T) {
 		t.Run(tc.description, func(t *testing.T) {
 			// Create a client that fails on List - proves we skipped before listing
 			cl := createClientThatFailsOnList()
-			operator := New(cl, testScheme, record.NewFakeRecorder(10))
+			operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 			err := operator.Sync(context.Background(), logr.Discard(), tc.pcs)
 
@@ -417,7 +425,7 @@ func TestSyncCreatesComputeDomains(t *testing.T) {
 		t.Run(tc.description, func(t *testing.T) {
 			pcs := createPCSWithMNNVLEnabled(tc.replicas)
 			cl := createTestClient()
-			operator := New(cl, testScheme, record.NewFakeRecorder(10))
+			operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 			err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
@@ -460,7 +468,7 @@ func TestSyncScaleIn(t *testing.T) {
 	pcs := createPCSWithMNNVLEnabled(2)
 	existingCDs := createTestCDs("default", 4)
 	cl := createTestClientWithCDs(existingCDs)
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
@@ -489,7 +497,7 @@ func TestSyncScaleOut(t *testing.T) {
 	pcs := createPCSWithMNNVLEnabled(4)
 	existingCDs := createTestCDs("default", 2)
 	cl := createTestClientWithCDs(existingCDs)
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 
@@ -508,7 +516,7 @@ func TestSyncScaleOut(t *testing.T) {
 func TestSyncIdempotent(t *testing.T) {
 	pcs := createPCSWithMNNVLEnabled(3)
 	cl := createTestClient()
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	// First sync
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
@@ -533,7 +541,7 @@ func TestSyncWithGroupAnnotation(t *testing.T) {
 	pcs.Annotations = map[string]string{mnnvl.AnnotationMNNVLGroup: "workers"}
 
 	cl := createTestClient()
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 	require.NoError(t, err)
@@ -574,7 +582,7 @@ func TestSyncMultipleGroups(t *testing.T) {
 	})
 
 	cl := createTestClient()
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 	require.NoError(t, err)
@@ -614,7 +622,7 @@ func TestSyncMultipleGroupsScaleDown(t *testing.T) {
 	workerCDs := createTestCDs("workers", 3)
 	allCDs := append(defaultCDs, workerCDs...)
 	cl := createTestClientWithCDs(allCDs)
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	err := operator.Sync(context.Background(), logr.Discard(), pcs)
 	require.NoError(t, err)
@@ -652,7 +660,7 @@ func TestDeleteRemovesAllComputeDomains(t *testing.T) {
 		builder.WithObjects(cd)
 	}
 	cl := builder.Build()
-	operator := New(cl, testScheme, record.NewFakeRecorder(10))
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	pcsObjMeta := metav1.ObjectMeta{
 		Name:      testPCSName,
