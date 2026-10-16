@@ -197,8 +197,6 @@ func (r *Reconciler) syncKindGroup(ctx context.Context, logger logr.Logger, pcs 
 	for _, kind := range group {
 		operator, err := r.operatorRegistry.GetOperator(kind)
 		if err != nil {
-			// MNNVL-only components (ComputeDomain) aren't registered when the feature is
-			// off. Not an error, just nothing to sync.
 			logger.V(1).Info("Skipping unregistered operator", "kind", kind)
 			continue
 		}

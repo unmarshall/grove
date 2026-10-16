@@ -52,14 +52,16 @@ type _resource struct {
 	client        client.Client
 	scheme        *runtime.Scheme
 	eventRecorder record.EventRecorder
+	disableSync   bool
 }
 
 // New creates a new ComputeDomain operator for managing ComputeDomain resources within PodCliqueSets.
-func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder) component.Operator[grovecorev1alpha1.PodCliqueSet] {
+func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, disableSync bool) component.Operator[grovecorev1alpha1.PodCliqueSet] {
 	return &_resource{
 		client:        cl,
 		scheme:        scheme,
 		eventRecorder: eventRecorder,
+		disableSync:   disableSync,
 	}
 }
 
@@ -85,6 +87,10 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Log
 
 // Sync synchronizes ComputeDomain resources for the PodCliqueSet.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
+	if r.disableSync {
+		return nil
+	}
+
 	requiredCDs := getRequiredCDNames(pcs)
 	if len(requiredCDs) == 0 {
 		logger.V(1).Info("PCS does not require any ComputeDomains, skipping sync")

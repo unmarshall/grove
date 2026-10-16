@@ -45,8 +45,8 @@ func TestCreateOperatorRegistry(t *testing.T) {
 	_ = autoscalingv2.AddToScheme(scheme)
 	schedRegistry := &utils.FakeSchedulerRegistry{}
 
-	// Test registry creation with MNNVL disabled (default)
-	t.Run("creates registry without ComputeDomain when MNNVL is disabled", func(t *testing.T) {
+	// Test registry creation with MNNVL disabled (default).
+	t.Run("registers ComputeDomain with sync disabled when MNNVL is disabled", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		mgr := &mockManager{client: cl, scheme: scheme}
 		eventRecorder := record.NewFakeRecorder(10)
@@ -57,7 +57,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 
 		require.NotNil(t, registry)
 
-		// Verify core operators are registered (without ComputeDomain)
+		// Verify all operators are registered.
 		expectedKinds := []component.Kind{
 			component.KindPodClique,
 			component.KindHeadlessService,
@@ -72,6 +72,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 			component.KindPodGangMap,
 			component.KindPodGangMigrator,
 			component.KindPodCliqueSetReplica,
+			component.KindComputeDomain,
 		}
 
 		allOps := registry.GetAllOperators()
@@ -83,13 +84,10 @@ func TestCreateOperatorRegistry(t *testing.T) {
 			assert.NotNil(t, op, "operator for kind %s should not be nil", kind)
 		}
 
-		// Verify ComputeDomain is NOT registered
-		_, err := registry.GetOperator(component.KindComputeDomain)
-		assert.Error(t, err, "ComputeDomain should not be registered when MNNVL is disabled")
 	})
 
-	// Test registry creation with MNNVL enabled
-	t.Run("creates registry with ComputeDomain when MNNVL is enabled", func(t *testing.T) {
+	// Test registry creation with MNNVL enabled.
+	t.Run("registers ComputeDomain with sync enabled when MNNVL is enabled", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		mgr := &mockManager{client: cl, scheme: scheme}
 		eventRecorder := record.NewFakeRecorder(10)
@@ -126,6 +124,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 			require.NoError(t, err, "operator for kind %s should be registered", kind)
 			assert.NotNil(t, op, "operator for kind %s should not be nil", kind)
 		}
+
 	})
 
 	// Test verifying specific operator registrations
