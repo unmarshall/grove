@@ -1476,3 +1476,73 @@ func Test_RU28_MaxUnavailableAboveTemplateReplicas(t *testing.T) {
 	assert.Equalf(t, 1, peakIn, "expected the single remaining sg-x replica to be rolled, observed peak %d", peakIn)
 	assertUpdateInProgressCleared(tc)
 }
+
+// Test_RU29_RapidRevisionChangesConvergeToLatestTarget verifies that independently reconciling
+// controllers do not execute or complete stale update progress when the PCS template rapidly moves
+// revision-1 -> revision-2 -> revision-1 -> revision-2. It covers both update orchestration paths:
+// a standalone PCLQ and a PCSG-owned PCLQ.
+func Test_RU29_RapidRevisionChangesConvergeToLatestTarget(t *testing.T) {
+	cases := []struct {
+		name                 string
+		cliqueName           string
+		standaloneCliqueName string
+		pcsgConfigName       string
+	}{
+		{name: "standalone PCLQ", cliqueName: "pc-a", standaloneCliqueName: "pc-a"},
+		{name: "PCSG-owned PCLQ", cliqueName: "pc-b", pcsgConfigName: "sg-x"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tests.Logger.Info("1. Deploy workload1")
+			tc, cleanup, _ := setupTest(t, testConfig{
+				workloadName: "workload1",
+				workloadYAML: "../../yaml/workload1.yaml",
+				workerNodes:  10,
+				expectedPods: 10,
+			})
+			defer cleanup()
+
+			revision1 := tt.cliqueName + "-revision-1"
+			revision2 := tt.cliqueName + "-revision-2"
+			tcLong := *tc
+			tcLong.Timeout = 2 * time.Minute
+
+			tests.Logger.Info("2. Establish revision-1 as a fully completed baseline")
+			require.NoError(t, triggerPodCliqueUpdateWithRevision(&tcLong, revision1, tt.cliqueName))
+			require.NoError(t, waitForRollingUpdateComplete(&tcLong, 1))
+			revision1GenerationHash := getPCSGenerationHash(t, &tcLong)
+
+			tests.Logger.Info("3. Delay readiness and start revision-2")
+			require.NoError(t, kwok.ApplyStage(tc.Ctx, tc.Client, kwokStageReadyDelayedPath))
+			defer func() { _ = kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName) }()
+			require.NoError(t, triggerPodCliqueUpdateWithRevision(&tcLong, revision2, tt.cliqueName))
+			require.NoError(t, waitForGenerationHashChange(&tcLong, revision1GenerationHash))
+			revision2GenerationHash := getPCSGenerationHash(t, &tcLong)
+			require.NoError(t, waitForActiveChildUpdateProgressGeneration(&tcLong, tt.standaloneCliqueName, tt.pcsgConfigName, revision2GenerationHash))
+
+			tests.Logger.Info("4. Revert to the exact revision-1 template while revision-2 is active")
+			require.NoError(t, triggerPodCliqueUpdateWithRevision(&tcLong, revision1, tt.cliqueName))
+			require.Eventually(t, func() bool {
+				return getPCSGenerationHash(t, &tcLong) == revision1GenerationHash
+			}, tcLong.Timeout, tcLong.Interval, "PCS did not return to the revision-1 generation hash")
+			require.NoError(t, waitForActiveChildUpdateProgressGeneration(&tcLong, tt.standaloneCliqueName, tt.pcsgConfigName, revision1GenerationHash))
+
+			tests.Logger.Info("5. Reapply the exact revision-2 template while the revert is active")
+			require.NoError(t, triggerPodCliqueUpdateWithRevision(&tcLong, revision2, tt.cliqueName))
+			require.Eventually(t, func() bool {
+				return getPCSGenerationHash(t, &tcLong) == revision2GenerationHash
+			}, tcLong.Timeout, tcLong.Interval, "PCS did not return to the revision-2 generation hash")
+			require.NoError(t, waitForActiveChildUpdateProgressGeneration(&tcLong, tt.standaloneCliqueName, tt.pcsgConfigName, revision2GenerationHash))
+
+			tests.Logger.Info("6. Let replacement Pods become Ready and verify final convergence")
+			require.NoError(t, kwok.DeleteStage(tc.Ctx, tc.Client, kwokStageReadyDelayedName))
+			require.NoError(t, waitForRollingUpdateComplete(&tcLong, 1))
+			require.NoError(t, tcLong.WaitForPods(10))
+			assertUpdateInProgressCleared(&tcLong)
+			assertGenerationHashConverged(&tcLong)
+			assertAffectedPodsAtRevision(&tcLong, tt.cliqueName, revision2)
+			assertNoActiveChildUpdates(&tcLong)
+		})
+	}
+}
