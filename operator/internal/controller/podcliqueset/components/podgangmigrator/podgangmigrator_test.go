@@ -191,7 +191,7 @@ func TestSyncHoldsGateUntilEpochPodGangsExist(t *testing.T) {
 	operator := New(cl, groveclientscheme.Scheme, newFakeRegistry())
 
 	err := operator.Sync(context.Background(), logr.Discard(), getPCS(t, cl))
-	testutils.AssertGroveError(t, &groveerr.GroveError{Code: groveerr.ErrCodeContinueReconcileAndRequeue, Operation: "Sync"}, err)
+	assert.True(t, groveerr.IsContinueReconcileAndRequeue(err))
 
 	// The relabeling still happened, but the gate is held until the epoch PodGangs exist.
 	assertReplicaMigrated(t, cl, 0, epochs)

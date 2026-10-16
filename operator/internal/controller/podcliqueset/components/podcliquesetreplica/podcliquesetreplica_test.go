@@ -154,8 +154,7 @@ func TestSync(t *testing.T) {
 			} else {
 				// May return a requeue error which is expected
 				if err != nil {
-					groveErr, ok := err.(*groveerr.GroveError)
-					if ok && groveErr.Code == groveerr.ErrCodeContinueReconcileAndRequeue {
+					if groveerr.IsContinueReconcileAndRequeue(err) {
 						// This is expected
 					} else {
 						t.Errorf("Unexpected error: %v", err)

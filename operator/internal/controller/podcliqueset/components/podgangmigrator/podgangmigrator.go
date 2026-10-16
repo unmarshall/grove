@@ -98,7 +98,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev
 	if !allCreated {
 		// Continue the reconcile so the PodGang component creates the missing PodGangs, then requeue to
 		// re-check and lift the gate.
-		return groveerr.New(groveerr.ErrCodeContinueReconcileAndRequeue, component.OperationSync,
+		return groveerr.NewContinueReconcileAndRequeue(component.OperationSync,
 			fmt.Sprintf("All epoch-schemed PodGangs for PodCliqueSet %v are not yet created, holding the migration gate until they exist", client.ObjectKeyFromObject(pcs)))
 	}
 	return r.clearMigrationGate(ctx, logger, pcs)

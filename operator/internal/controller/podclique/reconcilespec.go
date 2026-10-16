@@ -27,6 +27,7 @@ import (
 	ctrlcommon "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	ctrlutils "github.com/ai-dynamo/grove/operator/internal/controller/utils"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/utils/component"
 
 	"github.com/go-logr/logr"
@@ -216,8 +217,12 @@ func (r *Reconciler) syncPCLQResources(ctx context.Context, logger logr.Logger, 
 		}
 		logger.V(1).Info("Syncing PodClique resources", "kind", kind)
 		if err = operator.Sync(ctx, logger, pclq); err != nil {
-			if shouldRequeue := ctrlutils.ShouldRequeueAfter(err) || ctrlutils.ShouldContinueReconcileAndRequeue(err); shouldRequeue {
-				logger.V(1).Info("retrying sync due to components", "kind", kind, "syncRetryInterval", constants.ComponentSyncRetryInterval, "message", err.Error())
+			if requeueAfter, shouldRequeue := groveerr.GetRequeueAfter(err); shouldRequeue {
+				logger.V(1).Info("Retrying sync due to component", "kind", kind, "requeueAfter", requeueAfter, "message", err.Error())
+				return ctrlcommon.ReconcileAfter(requeueAfter, err.Error())
+			}
+			if groveerr.IsContinueReconcileAndRequeue(err) {
+				logger.V(1).Info("Retrying sync due to component", "kind", kind, "requeueAfter", constants.ComponentSyncRetryInterval, "message", err.Error())
 				return ctrlcommon.ReconcileAfter(constants.ComponentSyncRetryInterval, err.Error())
 			}
 			logger.Error(err, "failed to sync PodClique resources", "kind", kind)

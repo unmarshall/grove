@@ -16,6 +16,7 @@ package podcliqueset
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,8 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	ctrlcommon "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
+	"github.com/ai-dynamo/grove/operator/internal/utils"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
 	"github.com/go-logr/logr"
@@ -34,6 +37,87 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestProcessKindGroupRunResultErrors(t *testing.T) {
+	const (
+		podTaskName     = "SyncKind-Pod"
+		serviceTaskName = "SyncKind-HeadlessService"
+	)
+	kindByTaskName := map[string]component.Kind{
+		podTaskName:     component.KindPod,
+		serviceTaskName: component.KindHeadlessService,
+	}
+	reconciliationErr := errors.New("sync failed")
+
+	tests := []struct {
+		name                     string
+		runResult                utils.RunResult
+		wantResult               bool
+		wantErrors               bool
+		wantRequeueAfter         time.Duration
+		wantErrorIs              error
+		wantContinueRequeueKinds []component.Kind
+	}{
+		{
+			name: "continue and requeue failure",
+			runResult: utils.RunResult{FailedTasks: []utils.FailedTask{{
+				Name: podTaskName,
+				Err:  groveerr.NewContinueReconcileAndRequeue(component.OperationSync, "continue"),
+			}}},
+			wantContinueRequeueKinds: []component.Kind{component.KindPod},
+		},
+		{
+			name: "shortest timed requeue wins",
+			runResult: utils.RunResult{FailedTasks: []utils.FailedTask{
+				{Name: podTaskName, Err: groveerr.NewRequeueAfter(component.OperationSync, "later", 5*time.Second)},
+				{Name: serviceTaskName, Err: groveerr.NewRequeueAfter(component.OperationSync, "sooner", 2*time.Second)},
+			}},
+			wantResult:       true,
+			wantRequeueAfter: 2 * time.Second,
+		},
+		{
+			name: "reconciliation error takes precedence over timed requeue",
+			runResult: utils.RunResult{FailedTasks: []utils.FailedTask{
+				{Name: podTaskName, Err: groveerr.NewRequeueAfter(component.OperationSync, "retry", time.Second)},
+				{Name: serviceTaskName, Err: reconciliationErr},
+			}},
+			wantResult:  true,
+			wantErrors:  true,
+			wantErrorIs: reconciliationErr,
+		},
+		{
+			name: "unknown task is a reconciliation error",
+			runResult: utils.RunResult{FailedTasks: []utils.FailedTask{{
+				Name: "unknown",
+				Err:  reconciliationErr,
+			}}},
+			wantResult:  true,
+			wantErrors:  true,
+			wantErrorIs: reconciliationErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, continueRequeueKinds := processKindGroupRunResultErrors(logr.Discard(), tt.runResult, kindByTaskName)
+
+			assert.ElementsMatch(t, tt.wantContinueRequeueKinds, continueRequeueKinds)
+			if !tt.wantResult {
+				assert.Nil(t, result)
+				return
+			}
+			require.NotNil(t, result)
+			assert.Equal(t, tt.wantErrors, result.HasErrors())
+			ctrlResult, err := result.Result()
+			assert.Equal(t, tt.wantRequeueAfter, ctrlResult.RequeueAfter)
+			if tt.wantErrorIs != nil {
+				assert.ErrorIs(t, err, tt.wantErrorIs)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestUpdateObservedGeneration tests the updateObservedGeneration function for PodCliqueSet
 func TestUpdateObservedGeneration(t *testing.T) {

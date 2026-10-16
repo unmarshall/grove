@@ -91,7 +91,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev
 	}
 
 	if delWork.shouldRequeue() {
-		return groveerr.New(groveerr.ErrCodeContinueReconcileAndRequeue,
+		return groveerr.NewContinueReconcileAndRequeue(
 			component.OperationSync,
 			"Requeuing to re-process PCS replicas that have breached MinAvailable but not crossed TerminationDelay",
 		)

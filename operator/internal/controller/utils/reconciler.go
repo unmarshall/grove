@@ -16,13 +16,11 @@ package utils
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	grovectrl "github.com/ai-dynamo/grove/operator/internal/controller/common"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
-	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/go-logr/logr"
@@ -87,24 +85,4 @@ func VerifyNoResourceAwaitsCleanup[T component.GroveCustomResourceType](ctx cont
 	}
 	logger.Info("No resources are awaiting cleanup")
 	return grovectrl.ContinueReconcile()
-}
-
-// ShouldRequeueAfter checks if an error is a GroveError and if yes then returns true
-// when the error code is groveerr.ErrCodeRequeueAfter along with the GroveError.Message, else it returns false and an empty message.
-func ShouldRequeueAfter(err error) bool {
-	groveErr := &groveerr.GroveError{}
-	if errors.As(err, &groveErr) {
-		return groveErr.Code == groveerr.ErrCodeRequeueAfter
-	}
-	return false
-}
-
-// ShouldContinueReconcileAndRequeue checks if an error is a Grove error,
-// and if it is, returns true when the error code is groveerr.ErrCodeContinueReconcileAndRequeue.
-func ShouldContinueReconcileAndRequeue(err error) bool {
-	groveErr := &groveerr.GroveError{}
-	if errors.As(err, &groveErr) {
-		return groveErr.Code == groveerr.ErrCodeContinueReconcileAndRequeue
-	}
-	return false
 }
