@@ -119,6 +119,8 @@ jobs:
             test_pattern: "^Test_GS"
           - test_name: gang_termination
             test_pattern: "^Test_GT"
+          - test_name: pcs_scaling
+            test_pattern: "^Test_PCSS"
           - test_name: rolling_updates
             test_pattern: "^Test_RU"
           - test_name: ondelete_updates
@@ -213,6 +215,7 @@ jobs:
         include:
           - test_name: gang_scheduling
           - test_name: gang_termination
+          - test_name: pcs_scaling
           - test_name: rolling_updates
           - test_name: coherent_updates
           - test_name: ondelete_updates
