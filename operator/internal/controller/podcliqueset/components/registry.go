@@ -31,7 +31,7 @@ import (
 	"github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/satokensecret"
 	"github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/service"
 	"github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/serviceaccount"
-	"github.com/ai-dynamo/grove/operator/internal/mnnvl/computedomain"
+	"github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/computedomain"
 	"github.com/ai-dynamo/grove/operator/internal/scheduler"
 
 	"k8s.io/client-go/tools/record"
