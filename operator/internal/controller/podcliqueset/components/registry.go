@@ -37,6 +37,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -62,7 +63,9 @@ func CreateOperatorRegistry(mgr manager.Manager,
 	reg.Register(component.KindPodGangMap, podgangmap.New(cl, mgr.GetScheme(), clock.RealClock{}))
 	reg.Register(component.KindPodGangMigrator, podgangmigrator.New(cl, mgr.GetScheme(), schedRegistry))
 	reg.Register(component.KindPodCliqueSetReplica, podcliquesetreplica.New(cl, eventRecorder, scalingProgressExpectations))
-	reg.Register(component.KindComputeDomain, computedomain.New(cl, mgr.GetScheme(), eventRecorder, !networkConfig.AutoMNNVLEnabled))
+	if computedomain.ShouldRegister(mgr.GetRESTMapper(), networkConfig.AutoMNNVLEnabled, ctrl.Log.WithName("computedomain")) {
+		reg.Register(component.KindComputeDomain, computedomain.New(cl, mgr.GetScheme(), eventRecorder, !networkConfig.AutoMNNVLEnabled))
+	}
 
 	return reg
 }

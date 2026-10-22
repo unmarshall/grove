@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,6 +71,25 @@ func (c cdNameInfo) fullName() string {
 	return generateComputeDomainName(c.pcsName, c.replicaIndex, c.groupName)
 }
 
+// ShouldRegister reports whether the ComputeDomain component should be registered.
+func ShouldRegister(restMapper meta.RESTMapper, autoMNNVLEnabled bool, logger logr.Logger) bool {
+	if autoMNNVLEnabled {
+		// Startup preflight has already confirmed that the ComputeDomain API exists.
+		return true
+	}
+
+	_, err := restMapper.RESTMapping(mnnvl.ComputeDomainGVK.GroupKind(), mnnvl.ComputeDomainGVK.Version)
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			logger.Info("ComputeDomain API is unavailable, skipping component registration")
+		} else {
+			logger.Error(err, "could not confirm ComputeDomain API availability, skipping component registration")
+		}
+		return false
+	}
+	return true
+}
+
 // New creates a new ComputeDomain operator for managing ComputeDomain resources within PodCliqueSets.
 func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, disableSync bool) component.Operator[grovecorev1alpha1.PodCliqueSet, pcssync.State, pcssync.Result] {
 	return &_resource{
@@ -99,6 +119,9 @@ func (r _resource) listExistingComputeDomains(ctx context.Context, pcsObjMeta me
 		pcsObjMeta,
 		getSelectorLabels(pcsObjMeta.Name))
 	if err != nil {
+		if meta.IsNoMatchError(err) {
+			return nil, nil
+		}
 		return nil, groveerr.WrapError(err,
 			errListComputeDomain,
 			component.OperationGetExistingResourceNames,

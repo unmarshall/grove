@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,6 +42,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -68,6 +70,45 @@ var testScheme = func() *runtime.Scheme {
 // ================================
 // Constructor Test
 // ================================
+
+func TestShouldRegister(t *testing.T) {
+	testCases := []struct {
+		name               string
+		autoMNNVLEnabled   bool
+		restMapper         meta.RESTMapper
+		expectedRegistered bool
+	}{
+		{
+			name:               "enabled without API discovery",
+			autoMNNVLEnabled:   true,
+			restMapper:         nil,
+			expectedRegistered: true,
+		},
+		{
+			name:               "disabled with API available",
+			restMapper:         computeDomainRESTMapper(),
+			expectedRegistered: true,
+		},
+		{
+			name:               "disabled with API unavailable",
+			restMapper:         meta.NewDefaultRESTMapper(nil),
+			expectedRegistered: false,
+		},
+		{
+			name:               "disabled with discovery error",
+			restMapper:         meta.NewLazyRESTMapperLoader(func() (meta.RESTMapper, error) { return nil, errors.New("discovery failed") }),
+			expectedRegistered: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			registered := ShouldRegister(tc.restMapper, tc.autoMNNVLEnabled, logr.Discard())
+
+			assert.Equal(t, tc.expectedRegistered, registered)
+		})
+	}
+}
 
 func TestNew(t *testing.T) {
 	cl := createTestClient()
@@ -712,6 +753,27 @@ func TestSyncMultipleGroupsScaleDown(t *testing.T) {
 // Delete Tests
 // ================================
 
+func TestGetExistingResourceNamesTreatsMissingComputeDomainAPIAsEmpty(t *testing.T) {
+	cl := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return &meta.NoKindMatchError{GroupKind: mnnvl.ComputeDomainGVK.GroupKind()}
+			},
+		}).
+		Build()
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), true)
+
+	names, err := operator.GetExistingResourceNames(context.Background(), logr.Discard(), metav1.ObjectMeta{
+		Name:      testPCSName,
+		Namespace: testPCSNamespace,
+		UID:       "pcs-uid",
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, names)
+}
+
 // TestDeleteRemovesAllComputeDomains tests that Delete removes all ComputeDomains when MNNVL is enabled.
 func TestDeleteRemovesAllComputeDomains(t *testing.T) {
 	// Create PCS with MNNVL enabled
@@ -816,6 +878,12 @@ func createPCSWithGPU(replicas int32) *grovecorev1alpha1.PodCliqueSet {
 // createTestClient creates a test client with testScheme that supports ComputeDomain operations.
 func createTestClient() client.Client {
 	return fake.NewClientBuilder().WithScheme(testScheme).Build()
+}
+
+func computeDomainRESTMapper() meta.RESTMapper {
+	restMapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{mnnvl.ComputeDomainGVK.GroupVersion()})
+	restMapper.Add(mnnvl.ComputeDomainGVK, meta.RESTScopeNamespace)
+	return restMapper
 }
 
 // createTestClientWithCDs creates a test client pre-populated with ComputeDomains.

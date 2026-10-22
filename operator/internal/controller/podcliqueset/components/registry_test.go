@@ -21,6 +21,7 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	pcssync "github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/sync"
+	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
 	"github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
@@ -29,7 +30,9 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -49,7 +52,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 	// Test registry creation with MNNVL disabled (default).
 	t.Run("registers ComputeDomain with sync disabled when MNNVL is disabled", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		mgr := &mockManager{client: cl, scheme: scheme}
+		mgr := &mockManager{client: cl, scheme: scheme, restMapper: computeDomainRESTMapper()}
 		eventRecorder := record.NewFakeRecorder(10)
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
@@ -89,7 +92,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 	// Test registry creation with MNNVL enabled.
 	t.Run("registers ComputeDomain with sync enabled when MNNVL is enabled", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		mgr := &mockManager{client: cl, scheme: scheme}
+		mgr := &mockManager{client: cl, scheme: scheme, restMapper: computeDomainRESTMapper()}
 		eventRecorder := record.NewFakeRecorder(10)
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
@@ -129,7 +132,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 	// Test verifying specific operator registrations
 	t.Run("verifies key operator registrations", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		mgr := &mockManager{client: cl, scheme: scheme}
+		mgr := &mockManager{client: cl, scheme: scheme, restMapper: computeDomainRESTMapper()}
 		eventRecorder := record.NewFakeRecorder(10)
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
@@ -161,11 +164,18 @@ func TestCreateOperatorRegistry(t *testing.T) {
 	})
 }
 
+func computeDomainRESTMapper() meta.RESTMapper {
+	restMapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{mnnvl.ComputeDomainGVK.GroupVersion()})
+	restMapper.Add(mnnvl.ComputeDomainGVK, meta.RESTScopeNamespace)
+	return restMapper
+}
+
 // mockManager is a minimal mock implementation for testing
 type mockManager struct {
 	manager.Manager
-	client client.Client
-	scheme *runtime.Scheme
+	client     client.Client
+	scheme     *runtime.Scheme
+	restMapper meta.RESTMapper
 }
 
 func (m *mockManager) GetClient() client.Client {
@@ -174,4 +184,8 @@ func (m *mockManager) GetClient() client.Client {
 
 func (m *mockManager) GetScheme() *runtime.Scheme {
 	return m.scheme
+}
+
+func (m *mockManager) GetRESTMapper() meta.RESTMapper {
+	return m.restMapper
 }
