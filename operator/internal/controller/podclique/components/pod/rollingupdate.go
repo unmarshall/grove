@@ -108,7 +108,7 @@ func (r _resource) processPendingUpdates(ctx context.Context, logger logr.Logger
 	deletionTasks := r.createPodDeletionTasks(logger, ss.pclq, podsToUpdate)
 	logger.Info("triggering deletion of Ready Pods with old pod template hash for rolling update",
 		"pods", componentutils.PodsToObjectNames(podsToUpdate))
-	if runResult := utils.RunConcurrently(ctx, logger, deletionTasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrentlyAndWait(ctx, logger, deletionTasks); runResult.HasErrors() {
 		err := runResult.GetAggregatedError()
 		logger.Error(err, "failed to delete Ready Pods selected for rolling update", "runSummary", runResult.GetSummary())
 		return groveerr.WrapError(err,

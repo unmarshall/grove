@@ -22,6 +22,7 @@ import (
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	pcssync "github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/sync"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 
 	"github.com/go-logr/logr"
@@ -206,7 +207,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		assert.True(t, groveerr.IsRequeueAfter(err))
 
@@ -237,7 +238,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		assert.True(t, groveerr.IsRequeueAfter(err))
 
@@ -291,7 +292,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		assert.True(t, groveerr.IsRequeueAfter(err))
 
@@ -341,7 +342,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		assert.True(t, groveerr.IsRequeueAfter(err))
 
@@ -380,7 +381,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		require.Error(t, err)
 		var groveErr *groveerr.GroveError
@@ -432,7 +433,7 @@ func TestSync(t *testing.T) {
 			},
 		}
 
-		err := operator.Sync(context.Background(), logr.Discard(), pcs)
+		_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 		// Should not error when secret already exists
 		require.NoError(t, err)
@@ -491,7 +492,7 @@ func TestSync(t *testing.T) {
 				Build()
 			operator := New(cl, scheme)
 
-			err := operator.Sync(context.Background(), logr.Discard(), pcs)
+			_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
 
 			if tc.expectRequeue {
 				assert.True(t, groveerr.IsRequeueAfter(err))
@@ -513,7 +514,8 @@ func TestSync(t *testing.T) {
 
 			if tc.retryAfterReferenceRemoval {
 				require.NoError(t, cl.Delete(context.Background(), referencingPod))
-				require.NoError(t, operator.Sync(context.Background(), logr.Discard(), pcs))
+				_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{})
+				require.NoError(t, err)
 
 				err = cl.Get(context.Background(), client.ObjectKeyFromObject(legacySecret), &corev1.Secret{})
 				assert.True(t, apierrors.IsNotFound(err))

@@ -42,7 +42,7 @@ type testTaskConfig struct {
 	taskType   taskType
 }
 
-func TestRunConcurrently(t *testing.T) {
+func TestRunConcurrentlyAndWait(t *testing.T) {
 	testCases := []struct {
 		description             string
 		taskConfigs             []testTaskConfig
@@ -82,7 +82,7 @@ func TestRunConcurrently(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			actualRunResult := RunConcurrently(context.Background(), logr.Discard(), createTasks(tc.taskConfigs))
+			actualRunResult := RunConcurrentlyAndWait(context.Background(), logr.Discard(), createTasks(tc.taskConfigs))
 			assert.Equal(t, tc.expectedSuccessfulTasks, actualRunResult.SuccessfulTasks)
 			failedTaskNames := lo.Map(actualRunResult.FailedTasks, func(failedTask FailedTask, _ int) string {
 				return failedTask.Name

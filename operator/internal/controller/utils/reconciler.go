@@ -16,16 +16,12 @@ package utils
 
 import (
 	"context"
-	"time"
 
 	"github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	grovectrl "github.com/ai-dynamo/grove/operator/internal/controller/common"
-	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
-	k8sutils "github.com/ai-dynamo/grove/operator/internal/utils/kubernetes"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -63,26 +59,5 @@ func GetPodCliqueScalingGroup(ctx context.Context, cl client.Client, logger logr
 		logger.Error(err, "error getting PodCliqueScalingGroup")
 		return grovectrl.ReconcileWithErrors("error getting PodCliqueScalingGroup", err)
 	}
-	return grovectrl.ContinueReconcile()
-}
-
-// VerifyNoResourceAwaitsCleanup ensures no resources that are to be cleaned up are still present in the cluster.
-func VerifyNoResourceAwaitsCleanup[T component.GroveCustomResourceType](ctx context.Context, logger logr.Logger, operatorRegistry component.OperatorRegistry[T], objMeta metav1.ObjectMeta) grovectrl.ReconcileStepResult {
-	operators := operatorRegistry.GetAllOperators()
-	resourceNamesAwaitingCleanup := make([]string, 0, len(operators))
-	for _, operator := range operators {
-		existingResourceNames, err := operator.GetExistingResourceNames(ctx, logger, objMeta)
-		if err != nil {
-			return grovectrl.ReconcileWithErrors("error getting existing resource names", err)
-		}
-		if len(existingResourceNames) > 0 {
-			resourceNamesAwaitingCleanup = append(resourceNamesAwaitingCleanup, existingResourceNames...)
-		}
-	}
-	if len(resourceNamesAwaitingCleanup) > 0 {
-		logger.Info("Resources are still awaiting cleanup", "reconciledObjectKey", k8sutils.GetObjectKeyFromObjectMeta(objMeta), "resources", resourceNamesAwaitingCleanup)
-		return grovectrl.ReconcileAfter(5*time.Second, "Resources are still awaiting cleanup. Skipping removal of finalizer")
-	}
-	logger.Info("No resources are awaiting cleanup")
 	return grovectrl.ContinueReconcile()
 }

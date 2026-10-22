@@ -17,6 +17,7 @@ package podgang
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -994,10 +995,11 @@ func TestComputeExpectedPodGangsWithTopologyConstraints(t *testing.T) {
 			fakeClient := testutils.NewTestClientBuilder().WithObjects(pcs, pgm).Build()
 			r := &_resource{client: fakeClient, schedRegistry: defaultFakeSchedulerRegistry}
 			ss := &syncState{
-				pcs:            pcs,
-				logger:         ctrllogger.FromContext(t.Context()),
-				tasEnabled:     test.tasEnabled,
-				topologyLevels: clusterTopologyLevels,
+				pcs:                       pcs,
+				logger:                    ctrllogger.FromContext(t.Context()),
+				expectedPCSReplicaIndices: lo.Range(int(pcs.Spec.Replicas)),
+				tasEnabled:                test.tasEnabled,
+				topologyLevels:            clusterTopologyLevels,
 			}
 
 			actual, err := r.computeExpectedPodGangs(t.Context(), ss)
@@ -1334,7 +1336,7 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 
 			fakeClient := testutils.NewTestClientBuilder().WithObjects(objs...).Build()
 			r := &_resource{client: fakeClient, schedRegistry: defaultFakeSchedulerRegistry}
-			ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context())}
+			ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context()), expectedPCSReplicaIndices: lo.Range(int(pcs.Spec.Replicas))}
 
 			actual, err := r.computeExpectedPodGangs(t.Context(), ss)
 			require.NoError(t, err)
@@ -1352,6 +1354,44 @@ func TestComputeExpectedPodGangs(t *testing.T) {
 // PodClique is split across more than one anchor, the MinAvailable anchor (the lowest-epoch anchor)
 // keeps its PodGroup MinReplicas at the template MinAvailable, while a higher-epoch anchor carrying
 // fewer than the template MinAvailable has its PodGroup MinReplicas clamped to the per-anchor count.
+func TestComputeExpectedPodGangsUsesSparsePCSReplicaIndices(t *testing.T) {
+	pcs := testutils.NewPodCliqueSetBuilder("pcs", "default", "uid").
+		WithReplicas(3).
+		WithPodCliqueSetGenerationHash(ptr.To("hash1")).
+		Build()
+	objects := []client.Object{pcs}
+	for _, pcsReplicaIndex := range []int{0, 2, 4} {
+		entry := testutils.NewPodGangEntryBuilder("hash1", fmt.Sprintf("%d00", pcsReplicaIndex)).
+			WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
+			Build()
+		objects = append(objects, testutils.NewPodGangMapBuilder(pcs.Name, pcs.Namespace, pcs.UID, pcsReplicaIndex).WithEntries(entry).Build())
+	}
+	fakeClient := testutils.NewTestClientBuilder().WithObjects(objects...).Build()
+	r := &_resource{client: fakeClient, schedRegistry: defaultFakeSchedulerRegistry}
+	podGangSyncState := &syncState{pcs: pcs, expectedPCSReplicaIndices: []int{0, 2, 4}, logger: ctrllogger.FromContext(t.Context())}
+
+	actual, err := r.computeExpectedPodGangs(t.Context(), podGangSyncState)
+
+	require.NoError(t, err)
+	actualPCSReplicaIndices := lo.Map(actual, func(podGang *podGangInfo, _ int) int { return podGang.pcsReplicaIndex })
+	assert.Equal(t, []int{0, 2, 4}, actualPCSReplicaIndices)
+	assert.Equal(t, []int{0, 2, 4}, podGangSyncState.expectedPCSReplicaIndices)
+}
+
+func TestGetScaleInPCSReplicaIndicesAwaitingPodGangCleanup(t *testing.T) {
+	podGangSyncState := &syncState{
+		scaleInPCSReplicaIndices: []int{1, 3, 5},
+		existingPodGangsByPCSReplicaIndex: map[int][]groveschedulerv1alpha1.PodGang{
+			1: {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-100"}}},
+			5: {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-5-500"}}},
+		},
+	}
+
+	got := podGangSyncState.getScaleInPCSReplicaIndicesAwaitingPodGangCleanup()
+
+	assert.Equal(t, []int{1, 5}, got)
+}
+
 func TestComputeExpectedPodGangsClampsNonMinAvailableAnchorMinReplicas(t *testing.T) {
 	const (
 		pcsName   = "test-pcs"
@@ -1385,7 +1425,7 @@ func TestComputeExpectedPodGangsClampsNonMinAvailableAnchorMinReplicas(t *testin
 	pgm := testutils.NewPodGangMapBuilder(pcsName, namespace, pcs.UID, 0).WithEntries(entries...).Build()
 	fakeClient := testutils.NewTestClientBuilder().WithObjects(pcs, pgm).Build()
 	r := &_resource{client: fakeClient, schedRegistry: defaultFakeSchedulerRegistry}
-	ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context())}
+	ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context()), expectedPCSReplicaIndices: lo.Range(int(pcs.Spec.Replicas))}
 
 	actual, err := r.computeExpectedPodGangs(t.Context(), ss)
 	require.NoError(t, err)
@@ -1500,7 +1540,7 @@ func TestBuildStandalonePCLQInfosForAnchorEntry(t *testing.T) {
 	cliqueByFQN := map[string]string{pclqName("worker"): "worker", pclqName("aux"): "aux"}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context())}
+			ss := &syncState{pcs: pcs, logger: ctrllogger.FromContext(t.Context()), expectedPCSReplicaIndices: lo.Range(int(pcs.Spec.Replicas))}
 			entry := testutils.NewPodGangEntryBuilder("hash", "1000").
 				WithRole(grovecorev1alpha1.PodGangEntryRoleAnchor).
 				WithPodCliques(test.podCliques).Build()

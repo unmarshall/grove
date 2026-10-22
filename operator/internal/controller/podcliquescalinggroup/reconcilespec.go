@@ -146,6 +146,7 @@ func (r *Reconciler) initOrResetUpdate(ctx context.Context, pcs *grovecorev1alph
 
 // syncPodCliqueScalingGroupResources synchronizes all managed resources using registered operators with retry logic
 func (r *Reconciler) syncPodCliqueScalingGroupResources(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
+	state := &component.EmptyState{}
 	continueReconcileAndRequeueKinds := make([]component.Kind, 0)
 	for _, kind := range getOrderedKindsForSync() {
 		operator, err := r.operatorRegistry.GetOperator(kind)
@@ -153,7 +154,7 @@ func (r *Reconciler) syncPodCliqueScalingGroupResources(ctx context.Context, log
 			return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("error getting operator for kind: %s", kind), err)
 		}
 		logger.V(1).Info("Syncing PodCliqueScalingGroup resource", "kind", kind)
-		if err = operator.Sync(ctx, logger, pcsg); err != nil {
+		if _, err = operator.Sync(ctx, logger, pcsg, state); err != nil {
 			if groveerr.IsContinueReconcileAndRequeue(err) {
 				logger.V(1).Info("components has registered a request to requeue post completion of all components syncs", "kind", kind, "message", err.Error())
 				continueReconcileAndRequeueKinds = append(continueReconcileAndRequeueKinds, kind)

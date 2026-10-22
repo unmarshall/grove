@@ -23,6 +23,7 @@ import (
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	pcssync "github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/sync"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
 	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
@@ -34,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -55,8 +57,21 @@ type _resource struct {
 	disableSync   bool
 }
 
+// cdNameInfo holds the resolved identity for a single ComputeDomain resource.
+// The full CD name is computed via fullName() to avoid redundancy with the
+// individual components (pcsName, replicaIndex, groupName).
+type cdNameInfo struct {
+	pcsName      string
+	replicaIndex int
+	groupName    string // empty for the default group
+}
+
+func (c cdNameInfo) fullName() string {
+	return generateComputeDomainName(c.pcsName, c.replicaIndex, c.groupName)
+}
+
 // New creates a new ComputeDomain operator for managing ComputeDomain resources within PodCliqueSets.
-func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, disableSync bool) component.Operator[grovecorev1alpha1.PodCliqueSet] {
+func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, disableSync bool) component.Operator[grovecorev1alpha1.PodCliqueSet, pcssync.State, pcssync.Result] {
 	return &_resource{
 		client:        cl,
 		scheme:        scheme,
@@ -69,6 +84,15 @@ func New(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRec
 func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Logger, pcsObjMeta metav1.ObjectMeta) ([]string, error) {
 	logger.Info("Looking for existing ComputeDomains", "pcs", k8sutils.GetObjectKeyFromObjectMeta(pcsObjMeta))
 
+	existingCDs, err := r.listExistingComputeDomains(ctx, pcsObjMeta)
+	if err != nil {
+		return nil, err
+	}
+	return lo.Map(existingCDs, func(cd metav1.PartialObjectMetadata, _ int) string { return cd.Name }), nil
+}
+
+// listExistingComputeDomains lists ComputeDomains controlled by the PCS.
+func (r _resource) listExistingComputeDomains(ctx context.Context, pcsObjMeta metav1.ObjectMeta) ([]metav1.PartialObjectMetadata, error) {
 	existingCDs, err := k8sutils.ListExistingPartialObjectMetadata(ctx,
 		r.client,
 		mnnvl.ComputeDomainGVK,
@@ -81,51 +105,252 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Log
 			fmt.Sprintf("Error listing ComputeDomains for PodCliqueSet: %v", k8sutils.GetObjectKeyFromObjectMeta(pcsObjMeta)),
 		)
 	}
+	return lo.Filter(existingCDs, func(cd metav1.PartialObjectMetadata, _ int) bool {
+		return metav1.IsControlledBy(&cd, &pcsObjMeta)
+	}), nil
+}
 
-	return k8sutils.FilterMapOwnedResourceNames(pcsObjMeta, existingCDs), nil
+// getSelectorLabels returns labels for selecting ComputeDomains of a PCS.
+func getSelectorLabels(pcsName string) map[string]string {
+	return lo.Assign(
+		apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName),
+		map[string]string{
+			apicommon.LabelComponentKey: labelComponentNameComputeDomain,
+		},
+	)
 }
 
 // Sync synchronizes ComputeDomain resources for the PodCliqueSet.
-func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
+func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, state *pcssync.State) (pcssync.Result, error) {
 	if r.disableSync {
-		return nil
+		return pcssync.Result{}, nil
 	}
 
-	requiredCDs := getRequiredCDNames(pcs)
-	if len(requiredCDs) == 0 {
+	if len(collectDistinctGroups(pcs)) == 0 {
 		logger.V(1).Info("PCS does not require any ComputeDomains, skipping sync")
+		return pcssync.Result{}, nil
+	}
+
+	expectedCDs := computeExpectedComputeDomains(pcs, state.ExpectedReplicaIndices)
+	existingCDs, err := r.listExistingComputeDomains(ctx, pcs.ObjectMeta)
+	if err != nil {
+		return pcssync.Result{}, err
+	}
+	existingCDNames := lo.Map(existingCDs, func(cd metav1.PartialObjectMetadata, _ int) string { return cd.Name })
+	toCreate, toDelete := computeComputeDomainChanges(expectedCDs, existingCDNames)
+
+	replicaIndicesAwaitingResourceCleanup, err := getScaleInPCSReplicaIndicesAwaitingComputeDomainCleanup(existingCDs, state.ScaleInReplicaIndices)
+	if err != nil {
+		return pcssync.Result{}, err
+	}
+	if err := r.triggerDeletionOfComputeDomainsByName(ctx, logger, pcs, toDelete); err != nil {
+		return pcssync.Result{}, err
+	}
+	if err := r.createComputeDomains(ctx, logger, pcs, toCreate); err != nil {
+		return pcssync.Result{}, err
+	}
+
+	return pcssync.Result{
+		ScaleInReplicaIndicesAwaitingResourceCleanup: replicaIndicesAwaitingResourceCleanup,
+	}, nil
+}
+
+// collectDistinctGroups determines which MNNVL groups need ComputeDomains by
+// resolving the effective group for each GPU clique using hierarchical
+// annotation resolution (clique → PCSG → PCS). Non-GPU cliques are skipped
+// so that a PCS-level annotation doesn't create orphaned CDs when no GPU
+// cliques exist.
+func collectDistinctGroups(pcs *grovecorev1alpha1.PodCliqueSet) map[string]struct{} {
+	groups := make(map[string]struct{})
+
+	pcsgByClique := buildPCSGLookup(pcs)
+
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique == nil || !mnnvl.HasGPUInPodSpec(&clique.Spec.PodSpec) {
+			continue
+		}
+		var pcsgAnnotations map[string]string
+		if pcsgCfg, ok := pcsgByClique[clique.Name]; ok {
+			pcsgAnnotations = pcsgCfg.Annotations
+		}
+		if group, ok := mnnvl.ResolveGroupNameHierarchically(clique.Annotations, pcsgAnnotations, pcs.Annotations); ok {
+			groups[group] = struct{}{}
+		}
+	}
+
+	return groups
+}
+
+// buildPCSGLookup builds a map from clique name to the PCSG config that contains it.
+func buildPCSGLookup(pcs *grovecorev1alpha1.PodCliqueSet) map[string]grovecorev1alpha1.PodCliqueScalingGroupConfig {
+	lookup := make(map[string]grovecorev1alpha1.PodCliqueScalingGroupConfig)
+	for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		for _, cliqueName := range pcsg.CliqueNames {
+			lookup[cliqueName] = pcsg
+		}
+	}
+	return lookup
+}
+
+// computeExpectedComputeDomains returns the desired ComputeDomains for the expected PCS replica identities.
+// It resolves and deduplicates MNNVL groups across the PCS, PCSG configs, and clique templates,
+// then produces one ComputeDomain per group for each expected PCS replica index.
+func computeExpectedComputeDomains(pcs *grovecorev1alpha1.PodCliqueSet, expectedPCSReplicaIndices []int) []cdNameInfo {
+	groups := collectDistinctGroups(pcs)
+	if len(groups) == 0 {
 		return nil
 	}
 
-	existingCDFQNs, err := r.GetExistingResourceNames(ctx, logger, pcs.ObjectMeta)
-	if err != nil {
-		return err
+	var result []cdNameInfo
+	for _, replicaIndex := range expectedPCSReplicaIndices {
+		for group := range groups {
+			result = append(result, cdNameInfo{
+				pcsName:      pcs.Name,
+				replicaIndex: replicaIndex,
+				groupName:    group,
+			})
+		}
+	}
+	return result
+}
+
+// computeComputeDomainChanges compares expected and existing ComputeDomains and returns
+// the expected resources to create and the existing resource names to delete.
+func computeComputeDomainChanges(expectedCDs []cdNameInfo, existingCDNames []string) (toCreate []cdNameInfo, toDelete []string) {
+	expectedByName := lo.SliceToMap(expectedCDs, func(cd cdNameInfo) (string, cdNameInfo) {
+		return cd.fullName(), cd
+	})
+	existingSet := lo.SliceToMap(existingCDNames, func(name string) (string, struct{}) {
+		return name, struct{}{}
+	})
+
+	toCreate = lo.Filter(expectedCDs, func(cd cdNameInfo, _ int) bool {
+		_, exists := existingSet[cd.fullName()]
+		return !exists
+	})
+	toDelete = lo.Filter(existingCDNames, func(name string, _ int) bool {
+		_, expected := expectedByName[name]
+		return !expected
+	})
+	return toCreate, toDelete
+}
+
+// generateComputeDomainName creates the CD name for a replica.
+// Format: {pcs-name}-{replica-index}-{group-name} (e.g., "my-pcs-0-workers").
+func generateComputeDomainName(pcsName string, replicaIndex int, groupName string) string {
+	return fmt.Sprintf("%s-%d-%s", pcsName, replicaIndex, groupName)
+}
+
+// getScaleInPCSReplicaIndicesAwaitingComputeDomainCleanup returns scale-in replica indices for which at least one ComputeDomain still exists.
+func getScaleInPCSReplicaIndicesAwaitingComputeDomainCleanup(existingCDs []metav1.PartialObjectMetadata, scaleInReplicaIndices []int) ([]int, error) {
+	scaleInPCSReplicaIndices := sets.New(scaleInReplicaIndices...)
+	pcsReplicaIndicesAwaitingResourceCleanup := sets.New[int]()
+	for _, cd := range existingCDs {
+		pcsReplicaIndex, err := k8sutils.GetPodCliqueSetReplicaIndex(cd.ObjectMeta)
+		if err != nil {
+			return nil, groveerr.WrapError(err,
+				errSyncComputeDomain,
+				component.OperationSync,
+				fmt.Sprintf("Invalid PCS replica index label on ComputeDomain: %v", client.ObjectKeyFromObject(&cd)),
+			)
+		}
+		if scaleInPCSReplicaIndices.Has(pcsReplicaIndex) {
+			pcsReplicaIndicesAwaitingResourceCleanup.Insert(pcsReplicaIndex)
+		}
+	}
+	return sets.List(pcsReplicaIndicesAwaitingResourceCleanup), nil
+}
+
+// triggerDeletionOfComputeDomainsByName deletes the specified ComputeDomains.
+func (r _resource) triggerDeletionOfComputeDomainsByName(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, cdNames []string) error {
+	if len(cdNames) == 0 {
+		return nil
 	}
 
-	toCreate, toDelete := triageCDs(requiredCDs, existingCDFQNs)
+	logger.Info("Triggering deletion of excess ComputeDomains", "count", len(cdNames))
+	deleteTasks := r.buildDeletionTasks(logger, pcs, cdNames)
 
-	if err := r.triggerDeletionOfComputeDomainsByName(ctx, logger, pcs, toDelete); err != nil {
-		return err
+	if runResult := utils.RunConcurrentlyAndWait(ctx, logger, deleteTasks); runResult.HasErrors() {
+		return groveerr.WrapError(runResult.GetAggregatedError(),
+			errDeleteComputeDomain,
+			component.OperationSync,
+			fmt.Sprintf("Error deleting ComputeDomains for PodCliqueSet: %s", pcs.Name),
+		)
 	}
-
-	if err := r.createComputeDomains(ctx, logger, pcs, toCreate); err != nil {
-		return err
-	}
-
+	logger.Info("Deleted excess ComputeDomains", "pcs", client.ObjectKeyFromObject(pcs))
 	return nil
 }
 
-// Delete removes finalizers and deletes all ComputeDomains owned by the PodCliqueSet.
-func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsObjMeta metav1.ObjectMeta) error {
-	logger.Info("Deleting ComputeDomains", "pcs", k8sutils.GetObjectKeyFromObjectMeta(pcsObjMeta))
+// buildDeletionTasks generates deletion tasks for the specified ComputeDomains.
+func (r _resource) buildDeletionTasks(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, targetCDFQNs []string) []utils.Task {
+	deleteTasks := make([]utils.Task, 0, len(targetCDFQNs))
+	for _, cdName := range targetCDFQNs {
+		cdName := cdName // Capture loop variable
+		cdObjKey := client.ObjectKey{Name: cdName, Namespace: pcs.Namespace}
+		task := utils.Task{
+			Name: "DeleteComputeDomain-" + cdObjKey.Name,
+			Fn: func(ctx context.Context) error {
+				if err := r.deleteCD(ctx, logger, cdObjKey); err != nil {
+					logger.Error(err, "Failed to delete ComputeDomain", "objectKey", cdObjKey)
+					r.eventRecorder.Eventf(pcs, corev1.EventTypeWarning, constants.ReasonComputeDomainDeleteFailed,
+						"Failed to delete ComputeDomain %s: %v", cdObjKey.Name, err)
+					return err
+				}
+				r.eventRecorder.Eventf(pcs, corev1.EventTypeNormal, constants.ReasonComputeDomainDeleteSuccessful,
+					"Deleted ComputeDomain %s", cdObjKey.Name)
+				return nil
+			},
+		}
+		deleteTasks = append(deleteTasks, task)
+	}
+	return deleteTasks
+}
 
-	existingCDFQNs, err := r.GetExistingResourceNames(ctx, logger, pcsObjMeta)
-	if err != nil {
-		return err
+// deleteCD removes the finalizer and deletes a ComputeDomain.
+func (r _resource) deleteCD(ctx context.Context, logger logr.Logger, cdObjKey client.ObjectKey) error {
+	// First remove the finalizer
+	if err := r.removeFinalizerFromCD(ctx, logger, cdObjKey); err != nil {
+		return fmt.Errorf("failed to remove finalizer from ComputeDomain %s: %w", cdObjKey.Name, err)
 	}
 
-	pcs := &grovecorev1alpha1.PodCliqueSet{ObjectMeta: pcsObjMeta}
-	return r.triggerDeletionOfComputeDomainsByName(ctx, logger, pcs, existingCDFQNs)
+	// Then delete the CD
+	if err := client.IgnoreNotFound(r.client.Delete(ctx, emptyComputeDomain(cdObjKey))); err != nil {
+		return fmt.Errorf("failed to delete ComputeDomain %s: %w", cdObjKey.Name, err)
+	}
+
+	logger.Info("Deleted ComputeDomain", "objectKey", cdObjKey)
+	return nil
+}
+
+// removeFinalizerFromCD removes the protection finalizer from a ComputeDomain.
+func (r _resource) removeFinalizerFromCD(ctx context.Context, logger logr.Logger, cdObjKey client.ObjectKey) error {
+	cd := emptyComputeDomain(cdObjKey)
+	if err := r.client.Get(ctx, cdObjKey, cd); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	if !controllerutil.ContainsFinalizer(cd, mnnvl.FinalizerComputeDomain) {
+		return nil
+	}
+
+	controllerutil.RemoveFinalizer(cd, mnnvl.FinalizerComputeDomain)
+	if err := r.client.Update(ctx, cd); err != nil {
+		return fmt.Errorf("failed to remove finalizer from ComputeDomain %s: %w", cdObjKey.Name, err)
+	}
+
+	logger.Info("Removed finalizer from ComputeDomain", "objectKey", cdObjKey)
+	return nil
+}
+
+// emptyComputeDomain creates an empty ComputeDomain with only metadata set.
+// We use unstructured.Unstructured instead of typed structs to avoid
+// a compile-time dependency on the NVIDIA DRA driver package.
+func emptyComputeDomain(objKey client.ObjectKey) *unstructured.Unstructured {
+	cd := &unstructured.Unstructured{}
+	cd.SetGroupVersionKind(mnnvl.ComputeDomainGVK)
+	cd.SetName(objKey.Name)
+	cd.SetNamespace(objKey.Namespace)
+	return cd
 }
 
 // createComputeDomains creates the given ComputeDomains that don't already exist.
@@ -147,7 +372,7 @@ func (r _resource) createComputeDomains(ctx context.Context, logger logr.Logger,
 		tasks = append(tasks, task)
 	}
 
-	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrentlyAndWait(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errSyncComputeDomain,
 			component.OperationSync,
@@ -227,203 +452,15 @@ func (r _resource) buildResource(cd *unstructured.Unstructured, pcs *grovecorev1
 	return nil
 }
 
-// triggerDeletionOfComputeDomainsByName deletes the specified ComputeDomains.
-func (r _resource) triggerDeletionOfComputeDomainsByName(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, cdNames []string) error {
-	if len(cdNames) == 0 {
-		return nil
+// Delete removes finalizers and deletes all ComputeDomains owned by the PodCliqueSet.
+func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsObjMeta metav1.ObjectMeta) error {
+	logger.Info("Deleting ComputeDomains", "pcs", k8sutils.GetObjectKeyFromObjectMeta(pcsObjMeta))
+
+	existingCDFQNs, err := r.GetExistingResourceNames(ctx, logger, pcsObjMeta)
+	if err != nil {
+		return err
 	}
 
-	logger.Info("Triggering deletion of excess ComputeDomains", "count", len(cdNames))
-	deleteTasks := r.buildDeletionTasks(logger, pcs, cdNames)
-
-	if runResult := utils.RunConcurrently(ctx, logger, deleteTasks); runResult.HasErrors() {
-		return groveerr.WrapError(runResult.GetAggregatedError(),
-			errDeleteComputeDomain,
-			component.OperationSync,
-			fmt.Sprintf("Error deleting ComputeDomains for PodCliqueSet: %s", pcs.Name),
-		)
-	}
-	logger.Info("Deleted excess ComputeDomains", "pcs", client.ObjectKeyFromObject(pcs))
-	return nil
-}
-
-// buildDeletionTasks generates deletion tasks for the specified ComputeDomains.
-func (r _resource) buildDeletionTasks(logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet, targetCDFQNs []string) []utils.Task {
-	deleteTasks := make([]utils.Task, 0, len(targetCDFQNs))
-	for _, cdName := range targetCDFQNs {
-		cdName := cdName // Capture loop variable
-		cdObjKey := client.ObjectKey{Name: cdName, Namespace: pcs.Namespace}
-		task := utils.Task{
-			Name: "DeleteComputeDomain-" + cdObjKey.Name,
-			Fn: func(ctx context.Context) error {
-				if err := r.deleteCD(ctx, logger, cdObjKey); err != nil {
-					logger.Error(err, "Failed to delete ComputeDomain", "objectKey", cdObjKey)
-					r.eventRecorder.Eventf(pcs, corev1.EventTypeWarning, constants.ReasonComputeDomainDeleteFailed,
-						"Failed to delete ComputeDomain %s: %v", cdObjKey.Name, err)
-					return err
-				}
-				r.eventRecorder.Eventf(pcs, corev1.EventTypeNormal, constants.ReasonComputeDomainDeleteSuccessful,
-					"Deleted ComputeDomain %s", cdObjKey.Name)
-				return nil
-			},
-		}
-		deleteTasks = append(deleteTasks, task)
-	}
-	return deleteTasks
-}
-
-// deleteCD removes the finalizer and deletes a ComputeDomain.
-func (r _resource) deleteCD(ctx context.Context, logger logr.Logger, cdObjKey client.ObjectKey) error {
-	// First remove the finalizer
-	if err := r.removeFinalizerFromCD(ctx, logger, cdObjKey); err != nil {
-		return fmt.Errorf("failed to remove finalizer from ComputeDomain %s: %w", cdObjKey.Name, err)
-	}
-
-	// Then delete the CD
-	if err := client.IgnoreNotFound(r.client.Delete(ctx, emptyComputeDomain(cdObjKey))); err != nil {
-		return fmt.Errorf("failed to delete ComputeDomain %s: %w", cdObjKey.Name, err)
-	}
-
-	logger.Info("Deleted ComputeDomain", "objectKey", cdObjKey)
-	return nil
-}
-
-// removeFinalizerFromCD removes the protection finalizer from a ComputeDomain.
-func (r _resource) removeFinalizerFromCD(ctx context.Context, logger logr.Logger, cdObjKey client.ObjectKey) error {
-	cd := emptyComputeDomain(cdObjKey)
-	if err := r.client.Get(ctx, cdObjKey, cd); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-
-	if !controllerutil.ContainsFinalizer(cd, mnnvl.FinalizerComputeDomain) {
-		return nil
-	}
-
-	controllerutil.RemoveFinalizer(cd, mnnvl.FinalizerComputeDomain)
-	if err := r.client.Update(ctx, cd); err != nil {
-		return fmt.Errorf("failed to remove finalizer from ComputeDomain %s: %w", cdObjKey.Name, err)
-	}
-
-	logger.Info("Removed finalizer from ComputeDomain", "objectKey", cdObjKey)
-	return nil
-}
-
-// cdNameInfo holds the resolved identity for a single ComputeDomain resource.
-// The full CD name is computed via fullName() to avoid redundancy with the
-// individual components (pcsName, replicaIndex, groupName).
-type cdNameInfo struct {
-	pcsName      string
-	replicaIndex int
-	groupName    string // empty for the default group
-}
-
-func (c cdNameInfo) fullName() string {
-	return generateComputeDomainName(c.pcsName, c.replicaIndex, c.groupName)
-}
-
-// triageCDs computes the set differences between required and existing ComputeDomains,
-// returning which CDs need to be created and which names need to be deleted.
-func triageCDs(requiredCDs []cdNameInfo, existingCDFQNs []string) (toCreate []cdNameInfo, toDelete []string) {
-	requiredByName := lo.SliceToMap(requiredCDs, func(cd cdNameInfo) (string, cdNameInfo) {
-		return cd.fullName(), cd
-	})
-	existingSet := lo.SliceToMap(existingCDFQNs, func(name string) (string, struct{}) {
-		return name, struct{}{}
-	})
-
-	toCreate = lo.Filter(requiredCDs, func(cd cdNameInfo, _ int) bool {
-		_, exists := existingSet[cd.fullName()]
-		return !exists
-	})
-	toDelete = lo.Filter(existingCDFQNs, func(name string, _ int) bool {
-		_, required := requiredByName[name]
-		return !required
-	})
-	return toCreate, toDelete
-}
-
-// getRequiredCDNames resolves the list of ComputeDomain names needed by a PCS.
-// It collects MNNVL groups from all annotation layers (PCS, PCSG configs,
-// clique templates), deduplicates, and generates a cdNameInfo per group per replica.
-func getRequiredCDNames(pcs *grovecorev1alpha1.PodCliqueSet) []cdNameInfo {
-	groups := collectDistinctGroups(pcs)
-	if len(groups) == 0 {
-		return nil
-	}
-
-	var result []cdNameInfo
-	for replicaIndex := range int(pcs.Spec.Replicas) {
-		for group := range groups {
-			result = append(result, cdNameInfo{
-				pcsName:      pcs.Name,
-				replicaIndex: replicaIndex,
-				groupName:    group,
-			})
-		}
-	}
-	return result
-}
-
-// collectDistinctGroups determines which MNNVL groups need ComputeDomains by
-// resolving the effective group for each GPU clique using hierarchical
-// annotation resolution (clique → PCSG → PCS). Non-GPU cliques are skipped
-// so that a PCS-level annotation doesn't create orphaned CDs when no GPU
-// cliques exist.
-func collectDistinctGroups(pcs *grovecorev1alpha1.PodCliqueSet) map[string]struct{} {
-	groups := make(map[string]struct{})
-
-	pcsgByClique := buildPCSGLookup(pcs)
-
-	for _, clique := range pcs.Spec.Template.Cliques {
-		if clique == nil || !mnnvl.HasGPUInPodSpec(&clique.Spec.PodSpec) {
-			continue
-		}
-		var pcsgAnnotations map[string]string
-		if pcsgCfg, ok := pcsgByClique[clique.Name]; ok {
-			pcsgAnnotations = pcsgCfg.Annotations
-		}
-		if group, ok := mnnvl.ResolveGroupNameHierarchically(clique.Annotations, pcsgAnnotations, pcs.Annotations); ok {
-			groups[group] = struct{}{}
-		}
-	}
-
-	return groups
-}
-
-// buildPCSGLookup builds a map from clique name to the PCSG config that contains it.
-func buildPCSGLookup(pcs *grovecorev1alpha1.PodCliqueSet) map[string]grovecorev1alpha1.PodCliqueScalingGroupConfig {
-	lookup := make(map[string]grovecorev1alpha1.PodCliqueScalingGroupConfig)
-	for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-		for _, cliqueName := range pcsg.CliqueNames {
-			lookup[cliqueName] = pcsg
-		}
-	}
-	return lookup
-}
-
-// generateComputeDomainName creates the CD name for a replica.
-// Format: {pcs-name}-{replica-index}-{group-name} (e.g., "my-pcs-0-workers").
-func generateComputeDomainName(pcsName string, replicaIndex int, groupName string) string {
-	return fmt.Sprintf("%s-%d-%s", pcsName, replicaIndex, groupName)
-}
-
-// getSelectorLabels returns labels for selecting ComputeDomains of a PCS.
-func getSelectorLabels(pcsName string) map[string]string {
-	return lo.Assign(
-		apicommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcsName),
-		map[string]string{
-			apicommon.LabelComponentKey: labelComponentNameComputeDomain,
-		},
-	)
-}
-
-// emptyComputeDomain creates an empty ComputeDomain with only metadata set.
-// We use unstructured.Unstructured instead of typed structs to avoid
-// a compile-time dependency on the NVIDIA DRA driver package.
-func emptyComputeDomain(objKey client.ObjectKey) *unstructured.Unstructured {
-	cd := &unstructured.Unstructured{}
-	cd.SetGroupVersionKind(mnnvl.ComputeDomainGVK)
-	cd.SetName(objKey.Name)
-	cd.SetNamespace(objKey.Namespace)
-	return cd
+	pcs := &grovecorev1alpha1.PodCliqueSet{ObjectMeta: pcsObjMeta}
+	return r.triggerDeletionOfComputeDomainsByName(ctx, logger, pcs, existingCDFQNs)
 }

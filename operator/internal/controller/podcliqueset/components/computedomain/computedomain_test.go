@@ -23,6 +23,8 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/constants"
+	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	pcssync "github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/sync"
 	"github.com/ai-dynamo/grove/operator/internal/mnnvl"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
@@ -230,7 +232,7 @@ func TestGetRequiredCDNames(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			t.Parallel()
-			result := getRequiredCDNames(tc.pcs)
+			result := computeExpectedComputeDomains(tc.pcs, []int{1, 3})
 			if tc.expectedGroups == nil {
 				assert.Nil(t, result)
 				return
@@ -241,13 +243,16 @@ func TestGetRequiredCDNames(t *testing.T) {
 			}
 			assert.Equal(t, tc.expectedGroups, actualGroups)
 
-			expectedCount := len(tc.expectedGroups) * int(tc.pcs.Spec.Replicas)
-			assert.Len(t, result, expectedCount, "should have one CD per group per replica")
+			expectedCount := len(tc.expectedGroups) * 2
+			assert.Len(t, result, expectedCount, "should have one CD per group per expected replica index")
+			for _, cd := range result {
+				assert.Contains(t, []int{1, 3}, cd.replicaIndex)
+			}
 		})
 	}
 }
 
-func TestTriageCDs(t *testing.T) {
+func TestComputeComputeDomainChanges(t *testing.T) {
 	testCases := []struct {
 		description      string
 		requiredCDs      []cdNameInfo
@@ -325,7 +330,7 @@ func TestTriageCDs(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			t.Parallel()
-			toCreate, toDelete := triageCDs(tc.requiredCDs, tc.existingCDFQNs)
+			toCreate, toDelete := computeComputeDomainChanges(tc.requiredCDs, tc.existingCDFQNs)
 			if tc.expectedToCreate == nil {
 				assert.Empty(t, toCreate)
 			} else {
@@ -359,10 +364,22 @@ func TestEmptyComputeDomain(t *testing.T) {
 // Sync Tests
 // ================================
 
+func syncComputeDomains(t *testing.T, operator component.Operator[grovecorev1alpha1.PodCliqueSet, pcssync.State, pcssync.Result], pcs *grovecorev1alpha1.PodCliqueSet) error {
+	t.Helper()
+	expectedPCSReplicaIndices := make([]int, pcs.Spec.Replicas)
+	for pcsReplicaIndex := range int(pcs.Spec.Replicas) {
+		expectedPCSReplicaIndices[pcsReplicaIndex] = pcsReplicaIndex
+	}
+	_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{
+		ExpectedReplicaIndices: expectedPCSReplicaIndices,
+	})
+	return err
+}
+
 func TestSyncSkipsWhenDisabled(t *testing.T) {
 	operator := New(createClientThatFailsOnList(), testScheme, record.NewFakeRecorder(10), true)
 
-	err := operator.Sync(context.Background(), logr.Discard(), createPCSWithGPU(1))
+	err := syncComputeDomains(t, operator, createPCSWithGPU(1))
 
 	assert.NoError(t, err)
 }
@@ -394,7 +411,7 @@ func TestSyncSkipsWhenMNNVLNotEnabled(t *testing.T) {
 			cl := createClientThatFailsOnList()
 			operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-			err := operator.Sync(context.Background(), logr.Discard(), tc.pcs)
+			err := syncComputeDomains(t, operator, tc.pcs)
 
 			// If Sync skipped properly, it didn't call List, so no error
 			assert.NoError(t, err)
@@ -427,7 +444,7 @@ func TestSyncCreatesComputeDomains(t *testing.T) {
 			cl := createTestClient()
 			operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-			err := operator.Sync(context.Background(), logr.Discard(), pcs)
+			err := syncComputeDomains(t, operator, pcs)
 
 			require.NoError(t, err)
 
@@ -462,6 +479,41 @@ func TestSyncCreatesComputeDomains(t *testing.T) {
 	}
 }
 
+func TestSyncUsesSparseExpectedReplicaIndices(t *testing.T) {
+	pcs := createPCSWithMNNVLEnabled(2)
+	existingCDs := []*unstructured.Unstructured{
+		createTestCD("test-pcs-0-default", testPCSNamespace, testPCSName, 0),
+		createTestCD("test-pcs-2-default", testPCSNamespace, testPCSName, 2),
+	}
+	cl := createTestClientWithCDs(existingCDs)
+	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
+
+	_, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{
+		ExpectedReplicaIndices: []int{0, 3},
+	})
+	require.NoError(t, err)
+
+	for _, cdName := range []string{"test-pcs-0-default", "test-pcs-3-default"} {
+		cd := emptyComputeDomain(client.ObjectKey{Name: cdName, Namespace: testPCSNamespace})
+		assert.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cd), cd), "ComputeDomain %s should exist", cdName)
+	}
+	deletedCD := emptyComputeDomain(client.ObjectKey{Name: "test-pcs-2-default", Namespace: testPCSNamespace})
+	assert.True(t, apierrors.IsNotFound(cl.Get(context.Background(), client.ObjectKeyFromObject(deletedCD), deletedCD)))
+}
+
+func TestGetScaleInPCSReplicaIndicesAwaitingComputeDomainCleanup(t *testing.T) {
+	existingCDs := []metav1.PartialObjectMetadata{
+		{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-default", Labels: map[string]string{apicommon.LabelPodCliqueSetReplicaIndex: "1"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pcs-3-default", Labels: map[string]string{apicommon.LabelPodCliqueSetReplicaIndex: "3"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pcs-4-default", Labels: map[string]string{apicommon.LabelPodCliqueSetReplicaIndex: "4"}}},
+	}
+
+	got, err := getScaleInPCSReplicaIndicesAwaitingComputeDomainCleanup(existingCDs, []int{3, 1, 2})
+
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 3}, got)
+}
+
 // TestSyncScaleIn tests that Sync deletes excess ComputeDomains when scaling down.
 func TestSyncScaleIn(t *testing.T) {
 	// Setup: 4 existing CDs, scale down to 2 replicas
@@ -470,9 +522,13 @@ func TestSyncScaleIn(t *testing.T) {
 	cl := createTestClientWithCDs(existingCDs)
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	result, err := operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{
+		ExpectedReplicaIndices: []int{0, 1},
+		ScaleInReplicaIndices:  []int{2, 3},
+	})
 
 	require.NoError(t, err)
+	assert.Equal(t, []int{2, 3}, result.ScaleInReplicaIndicesAwaitingResourceCleanup)
 
 	// Verify CDs 0 and 1 still exist
 	for i := 0; i < 2; i++ {
@@ -482,13 +538,21 @@ func TestSyncScaleIn(t *testing.T) {
 		assert.NoError(t, err, "CD %s should still exist", cdName)
 	}
 
-	// Verify CDs 2 and 3 were deleted
+	// Verify CDs 2 and 3 were deleted.
 	for i := 2; i < 4; i++ {
 		cdName := testPCSName + "-" + strconv.Itoa(i) + "-default"
 		cd := emptyComputeDomain(client.ObjectKey{Name: cdName, Namespace: testPCSNamespace})
 		err := cl.Get(context.Background(), client.ObjectKeyFromObject(cd), cd)
 		assert.True(t, apierrors.IsNotFound(err), "CD %s should be deleted", cdName)
 	}
+
+	// Once deletion is visible to the client, the component no longer reports cleanup pending.
+	result, err = operator.Sync(context.Background(), logr.Discard(), pcs, &pcssync.State{
+		ExpectedReplicaIndices: []int{0, 1},
+		ScaleInReplicaIndices:  []int{2, 3},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.ScaleInReplicaIndicesAwaitingResourceCleanup)
 }
 
 // TestSyncScaleOut tests that Sync creates new ComputeDomains when scaling up.
@@ -499,7 +563,7 @@ func TestSyncScaleOut(t *testing.T) {
 	cl := createTestClientWithCDs(existingCDs)
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	err := syncComputeDomains(t, operator, pcs)
 
 	require.NoError(t, err)
 
@@ -519,11 +583,11 @@ func TestSyncIdempotent(t *testing.T) {
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
 	// First sync
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	err := syncComputeDomains(t, operator, pcs)
 	require.NoError(t, err)
 
 	// Second sync - should be idempotent
-	err = operator.Sync(context.Background(), logr.Discard(), pcs)
+	err = syncComputeDomains(t, operator, pcs)
 	require.NoError(t, err)
 
 	// Verify exactly 3 CDs exist
@@ -543,7 +607,7 @@ func TestSyncWithGroupAnnotation(t *testing.T) {
 	cl := createTestClient()
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	err := syncComputeDomains(t, operator, pcs)
 	require.NoError(t, err)
 
 	expectedNames := []string{"test-pcs-0-workers", "test-pcs-1-workers"}
@@ -584,7 +648,7 @@ func TestSyncMultipleGroups(t *testing.T) {
 	cl := createTestClient()
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	err := syncComputeDomains(t, operator, pcs)
 	require.NoError(t, err)
 
 	for _, group := range []string{"default", "workers"} {
@@ -624,7 +688,7 @@ func TestSyncMultipleGroupsScaleDown(t *testing.T) {
 	cl := createTestClientWithCDs(allCDs)
 	operator := New(cl, testScheme, record.NewFakeRecorder(10), false)
 
-	err := operator.Sync(context.Background(), logr.Discard(), pcs)
+	err := syncComputeDomains(t, operator, pcs)
 	require.NoError(t, err)
 
 	for _, group := range []string{"default", "workers"} {

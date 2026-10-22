@@ -367,7 +367,7 @@ func (r _resource) createExpectedPCLQs(ctx context.Context, logger logr.Logger, 
 			tasks = append(tasks, createTask)
 		}
 	}
-	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrentlyAndWait(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errCodeCreatePodCliques,
 			component.OperationSync,
@@ -397,7 +397,7 @@ func (r _resource) createOrUpdatePCLQs(ctx context.Context, logger logr.Logger, 
 			tasks = append(tasks, createOrUpdateTask)
 		}
 	}
-	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
+	if runResult := utils.RunConcurrentlyAndWait(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errCodeCreateOrUpdatePodCliques,
 			component.OperationSync,

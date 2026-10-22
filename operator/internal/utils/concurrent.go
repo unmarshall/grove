@@ -85,7 +85,7 @@ func RunConcurrentlyWithSlowStart(ctx context.Context, logger logr.Logger, initi
 	for batchSize := min(remaining, initialBatchSize); batchSize > 0; batchSize = min(2*batchSize, remaining) {
 		logger.V(4).Info("Triggering batch of taskConfigs with slow start", "batchSize", batchSize, "remainingTasks", remaining)
 		runEndIndex := nextRunStartIndex + batchSize
-		batchRunResult := RunConcurrently(ctx, logger, tasks[nextRunStartIndex:runEndIndex])
+		batchRunResult := RunConcurrentlyAndWait(ctx, logger, tasks[nextRunStartIndex:runEndIndex])
 		updateWithBatchRunResult(&aggregatedRunResult, batchRunResult)
 		if batchRunResult.HasErrors() {
 			logger.V(4).Info("Batch of taskConfigs failed, halting further execution", "batchSize", batchSize, "remainingTasks", remaining)
@@ -98,8 +98,9 @@ func RunConcurrentlyWithSlowStart(ctx context.Context, logger logr.Logger, initi
 	return aggregatedRunResult
 }
 
-// RunConcurrently executes a slice of Tasks concurrently.
-func RunConcurrently(ctx context.Context, logger logr.Logger, tasks []Task) RunResult {
+// RunConcurrentlyAndWait executes tasks concurrently and waits for every started task to return.
+// The context is passed to each task. Cancellation may cause context-aware tasks to return early.
+func RunConcurrentlyAndWait(ctx context.Context, logger logr.Logger, tasks []Task) RunResult {
 	return RunConcurrentlyWithBounds(ctx, logger, tasks, len(tasks))
 }
 

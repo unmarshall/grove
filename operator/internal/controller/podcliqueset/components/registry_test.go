@@ -20,6 +20,7 @@ import (
 	groveconfigv1alpha1 "github.com/ai-dynamo/grove/operator/api/config/v1alpha1"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
+	pcssync "github.com/ai-dynamo/grove/operator/internal/controller/podcliqueset/components/sync"
 	"github.com/ai-dynamo/grove/operator/test/utils"
 
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
@@ -53,7 +54,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
 			AutoMNNVLEnabled: false,
-		}, schedRegistry)
+		}, schedRegistry, &pcssync.ScalingProgressExpectations{})
 
 		require.NotNil(t, registry)
 
@@ -83,7 +84,6 @@ func TestCreateOperatorRegistry(t *testing.T) {
 			require.NoError(t, err, "operator for kind %s should be registered", kind)
 			assert.NotNil(t, op, "operator for kind %s should not be nil", kind)
 		}
-
 	})
 
 	// Test registry creation with MNNVL enabled.
@@ -94,7 +94,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
 			AutoMNNVLEnabled: true,
-		}, schedRegistry)
+		}, schedRegistry, &pcssync.ScalingProgressExpectations{})
 
 		require.NotNil(t, registry)
 
@@ -124,7 +124,6 @@ func TestCreateOperatorRegistry(t *testing.T) {
 			require.NoError(t, err, "operator for kind %s should be registered", kind)
 			assert.NotNil(t, op, "operator for kind %s should not be nil", kind)
 		}
-
 	})
 
 	// Test verifying specific operator registrations
@@ -135,7 +134,7 @@ func TestCreateOperatorRegistry(t *testing.T) {
 
 		registry := CreateOperatorRegistry(mgr, eventRecorder, groveconfigv1alpha1.TopologyAwareSchedulingConfiguration{}, groveconfigv1alpha1.NetworkAcceleration{
 			AutoMNNVLEnabled: false,
-		}, schedRegistry)
+		}, schedRegistry, &pcssync.ScalingProgressExpectations{})
 
 		// Verify PodClique operator
 		pclqOp, err := registry.GetOperator(component.KindPodClique)

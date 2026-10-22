@@ -80,7 +80,7 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pclq
 			fmt.Sprintf("failed to extract clique name from PodClique: %v", pclqObjectKey),
 		)
 	}
-	ss.isStandalonePCLQ = componentutils.IsStandalonePCLQ(ss.pcs, ss.cliqueName)
+	ss.isStandalonePCLQ = componentutils.IsStandalonePCLQTemplate(ss.pcs, ss.cliqueName)
 
 	ss.pcsReplicaIndex, err = k8sutils.GetPodCliqueSetReplicaIndex(pclq.ObjectMeta)
 	if err != nil {
@@ -648,7 +648,7 @@ func removePodGangSchedulingGate(pod *corev1.Pod) bool {
 // createPods creates the specified number of new pods for the PodClique with proper indexing and concurrency control
 func (r _resource) createPods(ctx context.Context, logger logr.Logger, ss *syncSnapshot, numPods int) (int, error) {
 	// Pre-calculate all needed indices to avoid race conditions
-	availableIndices, err := index.GetAvailableIndices(logger, ss.existingPCLQPods, numPods)
+	availableIndices, err := index.GetAvailablePodIndices(logger, ss.existingPCLQPods, numPods)
 	if err != nil {
 		return 0, groveerr.WrapError(err,
 			errCodeGetAvailablePodHostNameIndices,

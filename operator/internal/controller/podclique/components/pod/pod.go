@@ -90,7 +90,7 @@ func New(client client.Client,
 	scheme *runtime.Scheme,
 	eventRecorder record.EventRecorder,
 	expectationsStore *expect.ExpectationsStore,
-	schedRegistry scheduler.Registry) (component.Operator[grovecorev1alpha1.PodClique], error) {
+	schedRegistry scheduler.Registry) (component.Operator[grovecorev1alpha1.PodClique, component.EmptyState, component.NoResult], error) {
 	// The pod component groups its create and delete expectations by owning PodClique so it can clear
 	// them per PodClique in one call regardless of how many PodGangs a PodClique's pods span.
 	if err := expectationsStore.AddIndexers(expectations.PodCliqueExpectationsIndexers()); err != nil {
@@ -130,26 +130,26 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, _ logr.Logger, 
 }
 
 // Sync ensures that the desired number of Pods exist for the PodClique with the correct configuration
-func (r _resource) Sync(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) error {
+func (r _resource) Sync(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique, _ *component.EmptyState) (component.NoResult, error) {
 	sc, err := r.prepareSyncFlow(ctx, logger, pclq)
 	if err != nil {
-		return err
+		return component.NoResult{}, err
 	}
 	if err = r.syncPCSGPodIndexLabels(ctx, sc); err != nil {
-		return err
+		return component.NoResult{}, err
 	}
 	result := r.runSyncFlow(ctx, logger, sc)
 	if result.hasErrors() {
-		return result.getAggregatedError()
+		return component.NoResult{}, result.getAggregatedError()
 	}
 	if result.hasPendingScheduleGatedPods() {
-		return groveerr.NewRequeueAfter(
+		return component.NoResult{}, groveerr.NewRequeueAfter(
 			component.OperationSync,
 			"some pods are still schedule gated. requeuing request to retry removal of scheduling gates",
 			constants.ComponentSyncRetryInterval,
 		)
 	}
-	return nil
+	return component.NoResult{}, nil
 }
 
 // buildResource constructs a Pod resource from PodClique specifications, setting up metadata, labels, scheduling gates, and dependencies

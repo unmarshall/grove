@@ -338,7 +338,7 @@ func (r _resource) buildPerPodGangCreationTasks(logger logr.Logger, ss *syncSnap
 	if totalToCreate == 0 {
 		return nil, nil
 	}
-	availableIndices, err := index.GetAvailableIndices(logger, ss.existingPCLQPods, int(totalToCreate))
+	availableIndices, err := index.GetAvailablePodIndices(logger, ss.existingPCLQPods, int(totalToCreate))
 	if err != nil {
 		return nil, groveerr.WrapError(err, errCodeGetAvailablePodHostNameIndices, component.OperationSync,
 			fmt.Sprintf("error getting available indices for Pods in PodClique %v", client.ObjectKeyFromObject(ss.pclq)))
