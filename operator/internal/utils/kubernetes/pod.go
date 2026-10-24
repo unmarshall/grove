@@ -42,13 +42,16 @@ const (
 	PodStartedButNotReady corev1.PodConditionType = "PodStartedButNotReady"
 )
 
-// CategorizePodsByConditionType groups pods by their pod condition. Terminating pods are placed only
-// in the TerminatingPod category because they no longer contribute to active PodClique status counts.
+// CategorizePodsByConditionType groups active pods by their pod condition. Terminating pods are placed
+// only in the TerminatingPod category, and terminal-phase pods are excluded from active status categories.
 func CategorizePodsByConditionType(logger logr.Logger, pods []*corev1.Pod) map[corev1.PodConditionType][]*corev1.Pod {
 	podCategories := make(map[corev1.PodConditionType][]*corev1.Pod)
 	for _, pod := range pods {
 		if IsResourceTerminating(pod.ObjectMeta) {
 			podCategories[TerminatingPod] = append(podCategories[TerminatingPod], pod)
+			continue
+		}
+		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
 

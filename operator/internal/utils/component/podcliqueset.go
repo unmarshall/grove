@@ -239,6 +239,37 @@ func IsPCSReplicaAvailable(expectedStandalonePCLQCount int, expectedPCSGCount in
 	return nonTerminatingPCSGCount == expectedPCSGCount
 }
 
+// HasSufficientScheduledReplicasForPCSReplica reports whether all expected standalone PodCliques and
+// PodCliqueScalingGroups for one PCS replica exist and have at least MinAvailable scheduled replicas.
+// Resources with a deletion timestamp do not count.
+func HasSufficientScheduledReplicasForPCSReplica(expectedStandalonePCLQCount int, expectedPCSGCount int, standalonePCLQs []grovecorev1alpha1.PodClique, pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) bool {
+	nonTerminatingPCLQCount := 0
+	for _, pclq := range standalonePCLQs {
+		if k8sutils.IsResourceTerminating(pclq.ObjectMeta) {
+			continue
+		}
+		nonTerminatingPCLQCount++
+		if pclq.Spec.Replicas != 0 && pclq.Status.ScheduledReplicas < *pclq.Spec.MinAvailable {
+			return false
+		}
+	}
+	if nonTerminatingPCLQCount != expectedStandalonePCLQCount {
+		return false
+	}
+
+	nonTerminatingPCSGCount := 0
+	for _, pcsg := range pcsgs {
+		if k8sutils.IsResourceTerminating(pcsg.ObjectMeta) {
+			continue
+		}
+		nonTerminatingPCSGCount++
+		if pcsg.Spec.Replicas != 0 && pcsg.Status.ScheduledReplicas < *pcsg.Spec.MinAvailable {
+			return false
+		}
+	}
+	return nonTerminatingPCSGCount == expectedPCSGCount
+}
+
 // CountStandalonePCLQs returns the number of standalone PodCliques declared in the PCS template.
 func CountStandalonePCLQs(pcs *grovecorev1alpha1.PodCliqueSet) int {
 	return lo.CountBy(pcs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {

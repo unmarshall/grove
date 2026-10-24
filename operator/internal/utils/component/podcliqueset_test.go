@@ -653,6 +653,72 @@ func TestIsPCSReplicaAvailable(t *testing.T) {
 	}
 }
 
+func TestHasSufficientScheduledReplicasForPCSReplica(t *testing.T) {
+	scheduledPCLQ := grovecorev1alpha1.PodClique{
+		Spec:   grovecorev1alpha1.PodCliqueSpec{Replicas: 1, MinAvailable: ptr.To(int32(1))},
+		Status: grovecorev1alpha1.PodCliqueStatus{ScheduledReplicas: 1},
+	}
+	scheduledPCSG := grovecorev1alpha1.PodCliqueScalingGroup{
+		Spec:   grovecorev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, MinAvailable: ptr.To(int32(1))},
+		Status: grovecorev1alpha1.PodCliqueScalingGroupStatus{ScheduledReplicas: 1},
+	}
+	terminatingPCLQ := scheduledPCLQ
+	terminatingPCLQ.DeletionTimestamp = ptr.To(metav1.Now())
+	terminatingPCLQ.Finalizers = []string{"test"}
+	terminatingPCSG := scheduledPCSG
+	terminatingPCSG.DeletionTimestamp = ptr.To(metav1.Now())
+	terminatingPCSG.Finalizers = []string{"test"}
+	insufficientPCLQ := scheduledPCLQ
+	insufficientPCLQ.Status.ScheduledReplicas = 0
+	insufficientPCSG := scheduledPCSG
+	insufficientPCSG.Status.ScheduledReplicas = 0
+	zeroPCLQ := insufficientPCLQ
+	zeroPCLQ.Spec.Replicas = 0
+	zeroPCSG := insufficientPCSG
+	zeroPCSG.Spec.Replicas = 0
+
+	tests := []struct {
+		name                        string
+		expectedStandalonePCLQCount int
+		expectedPCSGCount           int
+		standalonePCLQs             []grovecorev1alpha1.PodClique
+		pcsgs                       []grovecorev1alpha1.PodCliqueScalingGroup
+		want                        bool
+	}{
+		{
+			name:                        "all expected resources have sufficient scheduled replicas",
+			expectedStandalonePCLQCount: 1,
+			expectedPCSGCount:           1,
+			standalonePCLQs:             []grovecorev1alpha1.PodClique{scheduledPCLQ},
+			pcsgs:                       []grovecorev1alpha1.PodCliqueScalingGroup{scheduledPCSG},
+			want:                        true,
+		},
+		{name: "no resources are expected", want: true},
+		{name: "missing standalone PodClique", expectedStandalonePCLQCount: 1},
+		{name: "missing PodCliqueScalingGroup", expectedPCSGCount: 1},
+		{name: "terminating standalone PodClique", expectedStandalonePCLQCount: 1, standalonePCLQs: []grovecorev1alpha1.PodClique{terminatingPCLQ}},
+		{name: "terminating PodCliqueScalingGroup", expectedPCSGCount: 1, pcsgs: []grovecorev1alpha1.PodCliqueScalingGroup{terminatingPCSG}},
+		{name: "standalone PodClique has insufficient scheduled replicas", expectedStandalonePCLQCount: 1, standalonePCLQs: []grovecorev1alpha1.PodClique{insufficientPCLQ}},
+		{name: "PodCliqueScalingGroup has insufficient scheduled replicas", expectedPCSGCount: 1, pcsgs: []grovecorev1alpha1.PodCliqueScalingGroup{insufficientPCSG}},
+		{name: "standalone PodClique scaled to zero is sufficient", expectedStandalonePCLQCount: 1, standalonePCLQs: []grovecorev1alpha1.PodClique{zeroPCLQ}, want: true},
+		{name: "PodCliqueScalingGroup scaled to zero is sufficient", expectedPCSGCount: 1, pcsgs: []grovecorev1alpha1.PodCliqueScalingGroup{zeroPCSG}, want: true},
+		{name: "additional standalone PodClique prevents an exact match", expectedStandalonePCLQCount: 1, standalonePCLQs: []grovecorev1alpha1.PodClique{scheduledPCLQ, scheduledPCLQ}},
+		{name: "additional PodCliqueScalingGroup prevents an exact match", expectedPCSGCount: 1, pcsgs: []grovecorev1alpha1.PodCliqueScalingGroup{scheduledPCSG, scheduledPCSG}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := HasSufficientScheduledReplicasForPCSReplica(
+				test.expectedStandalonePCLQCount,
+				test.expectedPCSGCount,
+				test.standalonePCLQs,
+				test.pcsgs,
+			)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestGetPCSGMinAvailableFromPCSTemplateSpec(t *testing.T) {
 	tests := []struct {
 		name     string

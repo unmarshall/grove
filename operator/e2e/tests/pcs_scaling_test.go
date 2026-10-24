@@ -25,6 +25,7 @@ import (
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	apiconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/e2e/k8s/kwok"
 	"github.com/ai-dynamo/grove/operator/e2e/testctx"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,18 +35,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const sparseScalingWorkloadName = "pcs-sparse-scaling"
+const (
+	sparseScalingWorkloadName    = "pcs-sparse-scaling"
+	pcsScalingCrashloopStageName = "pod-crashloop-pcs-scaling-r4"
+	pcsScalingCrashloopStagePath = "../yaml/kwok/pod-crashloop-pcs-scaling-r4.yaml"
+)
 
 // Test_PCSS1_AvailabilityAwareScalingReplicaSelection verifies availability-aware scale-in selection
 // and lowest-hole reuse:
 //  1. Deploy a five-replica PCS and wait for all Pods to become Ready.
-//  2. Cordon the worker nodes and delete the Pod for PCS replica 2 so it becomes unavailable.
-//  3. Scale the PCS from five to three replicas.
-//  4. Verify the unavailable replica 2 and the highest-index available replica 4 are removed, retaining [0, 1, 3].
-//  5. Wait for scale-in resource cleanup to complete.
-//  6. Scale the PCS from three to four replicas.
-//  7. Verify scale-out reuses the lowest completed hole, producing [0, 1, 2, 3].
-//  8. Wait for scale-out progress to complete.
+//  2. Replace replica 4's Pod with a scheduled but not Ready Pod.
+//  3. Cordon the worker nodes and delete replica 2's Pod so its replacement remains unscheduled.
+//  4. Scale the PCS from five to four replicas.
+//  5. Verify replica 2 is removed before the scheduled but unavailable replica 4, retaining [0, 1, 3, 4].
+//  6. Wait for the first scale-in resource cleanup to complete.
+//  7. Scale the PCS from four to three replicas.
+//  8. Verify replica 4 is removed before available replicas, retaining [0, 1, 3].
+//  9. Wait for the second scale-in resource cleanup to complete.
+//  10. Scale the PCS from three to four replicas.
+//  11. Verify scale-out reuses the lowest completed hole, producing [0, 1, 2, 3].
+//  12. Wait for scale-out progress to complete.
 func Test_PCSS1_AvailabilityAwareScalingReplicaSelection(t *testing.T) {
 	ctx := context.Background()
 	Logger.Info("1. Deploy a five-replica PCS and wait for all Pods to become Ready")
@@ -66,34 +75,58 @@ func Test_PCSS1_AvailabilityAwareScalingReplicaSelection(t *testing.T) {
 	require.NoError(t, tc.Client.Get(ctx, client.ObjectKey{Namespace: tc.Namespace, Name: sparseScalingWorkloadName}, pcs))
 	require.Nil(t, pcs.Status.ScalingProgress, "initial provisioning must not be recorded as scaling progress")
 
-	Logger.Info("2. Cordon the worker nodes and delete the Pod for PCS replica 2 so it becomes unavailable")
+	Logger.Info("2. Replace replica 4's Pod with a scheduled but not Ready Pod")
+	require.NoError(t, kwok.ApplyStage(ctx, tc.Client, pcsScalingCrashloopStagePath))
+	defer func() {
+		if err := kwok.DeleteStage(ctx, tc.Client, pcsScalingCrashloopStageName); err != nil {
+			Logger.Warnf("cleanup: delete PCS scaling crash-loop KWOK stage: %v", err)
+		}
+	}()
 	pods, err := tc.ListPods()
 	require.NoError(t, err)
-	target := findReadyPodFromPodClique(pods, sparseScalingWorkloadName+"-2-worker")
-	require.NotNil(t, target)
+	replica4Pod := findReadyPodFromPodClique(pods, sparseScalingWorkloadName+"-4-worker")
+	require.NotNil(t, replica4Pod)
+	require.NoError(t, tc.Client.Delete(ctx, replica4Pod))
+	require.NoError(t, waitForPCLQReplicaCounts(tc, sparseScalingWorkloadName+"-4-worker", 1, 0))
+
+	Logger.Info("3. Cordon the worker nodes and delete replica 2's Pod so its replacement remains unscheduled")
+	pods, err = tc.ListPods()
+	require.NoError(t, err)
+	replica2Pod := findReadyPodFromPodClique(pods, sparseScalingWorkloadName+"-2-worker")
+	require.NotNil(t, replica2Pod)
 	workerNodes, err := tc.GetWorkerNodes()
 	require.NoError(t, err)
 	tc.CordonNodes(workerNodes)
 	defer tc.UncordonNodes(workerNodes)
-	require.NoError(t, tc.Client.Delete(ctx, target))
+	require.NoError(t, tc.Client.Delete(ctx, replica2Pod))
+	require.NoError(t, waitForPCLQReplicaCounts(tc, sparseScalingWorkloadName+"-2-worker", 0, 0))
 	require.NoError(t, waitForPCLQMinAvailableBreach(tc, sparseScalingWorkloadName+"-2-worker"))
 
-	Logger.Info("3. Scale the PCS from five to three replicas")
-	require.NoError(t, tc.ScalePCS(sparseScalingWorkloadName, 3))
-
-	Logger.Info("4. Verify replicas 2 and 4 are removed, retaining replica identities [0, 1, 3]")
-	require.NoError(t, waitForPCSReplicaIndices(tc, sparseScalingWorkloadName, sets.New(0, 1, 3)))
-
-	Logger.Info("5. Wait for scale-in resource cleanup to complete")
-	require.NoError(t, waitForPCSScalingProgressToComplete(tc, sparseScalingWorkloadName))
-
-	Logger.Info("6. Scale the PCS from three to four replicas")
+	Logger.Info("4. Scale the PCS from five to four replicas")
 	require.NoError(t, tc.ScalePCS(sparseScalingWorkloadName, 4))
 
-	Logger.Info("7. Verify scale-out reuses index 2, producing replica identities [0, 1, 2, 3]")
+	Logger.Info("5. Verify replica 2 is removed before the scheduled but unavailable replica 4, retaining [0, 1, 3, 4]")
+	require.NoError(t, waitForPCSReplicaIndices(tc, sparseScalingWorkloadName, sets.New(0, 1, 3, 4)))
+
+	Logger.Info("6. Wait for the first scale-in resource cleanup to complete")
+	require.NoError(t, waitForPCSScalingProgressToComplete(tc, sparseScalingWorkloadName))
+
+	Logger.Info("7. Scale the PCS from four to three replicas")
+	require.NoError(t, tc.ScalePCS(sparseScalingWorkloadName, 3))
+
+	Logger.Info("8. Verify replica 4 is removed before available replicas, retaining [0, 1, 3]")
+	require.NoError(t, waitForPCSReplicaIndices(tc, sparseScalingWorkloadName, sets.New(0, 1, 3)))
+
+	Logger.Info("9. Wait for the second scale-in resource cleanup to complete")
+	require.NoError(t, waitForPCSScalingProgressToComplete(tc, sparseScalingWorkloadName))
+
+	Logger.Info("10. Scale the PCS from three to four replicas")
+	require.NoError(t, tc.ScalePCS(sparseScalingWorkloadName, 4))
+
+	Logger.Info("11. Verify scale-out reuses index 2, producing replica identities [0, 1, 2, 3]")
 	require.NoError(t, waitForPCSReplicaIndices(tc, sparseScalingWorkloadName, sets.New(0, 1, 2, 3)))
 
-	Logger.Info("8. Wait for scale-out progress to complete")
+	Logger.Info("12. Wait for scale-out progress to complete")
 	require.NoError(t, waitForPCSScalingProgressToComplete(tc, sparseScalingWorkloadName))
 }
 
@@ -132,6 +165,16 @@ func waitForPCSReplicaIndices(tc *testctx.TestContext, pcsName string, expected 
 			observed.Insert(pcsReplicaIndex)
 		}
 		return observed.Equal(expected), nil
+	})
+}
+
+func waitForPCLQReplicaCounts(tc *testctx.TestContext, pclqName string, scheduledReplicas, readyReplicas int32) error {
+	return wait.PollUntilContextTimeout(tc.Ctx, tc.Interval, tc.Timeout, true, func(ctx context.Context) (bool, error) {
+		pclq := &grovecorev1alpha1.PodClique{}
+		if err := tc.Client.Get(ctx, client.ObjectKey{Namespace: tc.Namespace, Name: pclqName}, pclq); err != nil {
+			return false, err
+		}
+		return pclq.Status.ScheduledReplicas == scheduledReplicas && pclq.Status.ReadyReplicas == readyReplicas, nil
 	})
 }
 

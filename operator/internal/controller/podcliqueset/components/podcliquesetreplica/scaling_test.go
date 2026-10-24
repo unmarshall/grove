@@ -330,15 +330,22 @@ func TestSelectReplicaIndicesForScaleIn(t *testing.T) {
 	pcs := testutils.NewPodCliqueSetBuilder("test-pcs", "default", types.UID("test-pcs-uid")).
 		WithStandaloneClique("worker").
 		Build()
+	insufficientAvailablePCLQ := func(replicaIndex int) grovecorev1alpha1.PodClique {
+		pclq := pclqWithAvailability(pcs, replicaIndex, false)
+		pclq.Status.ScheduledReplicas = *pclq.Spec.MinAvailable
+		return pclq
+	}
 	snapshot := &replicaResourceSnapshot{
 		standalonePCLQsByReplicaIndex: map[int][]grovecorev1alpha1.PodClique{
 			0: {pclqWithAvailability(pcs, 0, false)},
 			2: {pclqWithAvailability(pcs, 2, true)},
-			3: {pclqWithAvailability(pcs, 3, true)},
+			3: {insufficientAvailablePCLQ(3)},
 			5: {pclqWithAvailability(pcs, 5, false)},
+			6: {insufficientAvailablePCLQ(6)},
+			7: {pclqWithAvailability(pcs, 7, true)},
 		},
 	}
-	projectedReplicaIndices := sets.New(0, 1, 2, 3, 4, 5)
+	projectedReplicaIndices := sets.New(0, 1, 2, 3, 4, 5, 6, 7)
 	scaleOutReplicaIndices := sets.New(1, 4)
 
 	tests := []struct {
@@ -347,14 +354,14 @@ func TestSelectReplicaIndicesForScaleIn(t *testing.T) {
 		want  []int
 	}{
 		{
-			name:  "selects by availability scale-out progress and descending index",
-			count: 6,
-			want:  []int{5, 0, 4, 1, 3, 2},
+			name:  "selects by scheduled capacity availability scale-out progress and descending index",
+			count: 8,
+			want:  []int{5, 0, 6, 3, 4, 1, 7, 2},
 		},
 		{
 			name:  "selects only requested number of indices",
 			count: 3,
-			want:  []int{5, 0, 4},
+			want:  []int{5, 0, 6},
 		},
 		{
 			name: "selects no indices for zero count",
@@ -362,7 +369,7 @@ func TestSelectReplicaIndicesForScaleIn(t *testing.T) {
 		{
 			name:  "caps selection at number of desired indices",
 			count: 10,
-			want:  []int{5, 0, 4, 1, 3, 2},
+			want:  []int{5, 0, 6, 3, 4, 1, 7, 2},
 		},
 	}
 
@@ -376,20 +383,36 @@ func TestSelectReplicaIndicesForScaleIn(t *testing.T) {
 				test.count,
 			)
 			assert.Equal(t, test.want, got)
-			assert.Equal(t, sets.New(0, 1, 2, 3, 4, 5), projectedReplicaIndices)
+			assert.Equal(t, sets.New(0, 1, 2, 3, 4, 5, 6, 7), projectedReplicaIndices)
 			assert.Equal(t, sets.New(1, 4), scaleOutReplicaIndices)
 		})
 	}
+
+	t.Run("preserves assigned replica that is warming over unassigned replica", func(t *testing.T) {
+		warmingPCLQ := pclqWithAvailability(pcs, 4, false)
+		warmingPCLQ.Status.ScheduledReplicas = *warmingPCLQ.Spec.MinAvailable
+		snapshot := &replicaResourceSnapshot{
+			standalonePCLQsByReplicaIndex: map[int][]grovecorev1alpha1.PodClique{
+				1: {pclqWithAvailability(pcs, 1, false)},
+				4: {warmingPCLQ},
+			},
+		}
+
+		got := selectReplicaIndicesForScaleIn(pcs, snapshot, sets.New(1, 4), sets.New[int](), 1)
+
+		assert.Equal(t, []int{1}, got)
+	})
 }
 
 func TestSortAndCoalesceReplicaIndices(t *testing.T) {
 	got := sortAndCoalesceReplicaIndices(
-		[]int{0, 5},
-		[]int{1, 4},
-		[]int{2, 3},
+		[]int{0, 7},
+		[]int{1, 6},
+		[]int{2, 5},
+		[]int{3, 4},
 	)
 
-	assert.Equal(t, []int{5, 0, 4, 1, 3, 2}, got)
+	assert.Equal(t, []int{7, 0, 6, 1, 5, 2, 4, 3}, got)
 }
 
 func TestSortReplicaIndicesDescending(t *testing.T) {

@@ -753,7 +753,18 @@ func TestCategorizePodsByConditionType(t *testing.T) {
 		},
 	}
 
-	pods := []*corev1.Pod{readyPod, gatedPod, terminatingPod, erroneousPod, startedNotReadyPod}
+	failedPod := testutils.NewPodWithBuilderWithDefaultSpec("failed-pod", testPodNamespace).
+		WithCondition(corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}).
+		WithCondition(corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}).
+		WithPhase(corev1.PodFailed).
+		Build()
+	succeededPod := testutils.NewPodWithBuilderWithDefaultSpec("succeeded-pod", testPodNamespace).
+		WithCondition(corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}).
+		WithCondition(corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}).
+		WithPhase(corev1.PodSucceeded).
+		Build()
+
+	pods := []*corev1.Pod{readyPod, gatedPod, terminatingPod, erroneousPod, startedNotReadyPod, failedPod, succeededPod}
 	categories := CategorizePodsByConditionType(logr.Discard(), pods)
 
 	// Check ready pods
@@ -772,6 +783,10 @@ func TestCategorizePodsByConditionType(t *testing.T) {
 	assert.Equal(t, "terminating-pod", categories[TerminatingPod][0].Name)
 	assert.NotContains(t, categories[corev1.PodReady], terminatingPod)
 	assert.NotContains(t, categories[corev1.PodScheduled], terminatingPod)
+	assert.NotContains(t, categories[corev1.PodReady], failedPod)
+	assert.NotContains(t, categories[corev1.PodScheduled], failedPod)
+	assert.NotContains(t, categories[corev1.PodReady], succeededPod)
+	assert.NotContains(t, categories[corev1.PodScheduled], succeededPod)
 
 	// Check pods with erroneous containers
 	assert.Len(t, categories[PodHasAtleastOneContainerWithNonZeroExitCode], 1)

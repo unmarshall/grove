@@ -261,8 +261,9 @@ func findMaterializedScaleOutReplicaIndices(
 }
 
 // selectReplicaIndicesForScaleIn selects the requested number of desired PCS replica indices for removal.
-// It prefers established unavailable replicas, replicas with scale-out in progress, and then established available replicas.
-// Higher indices are selected first within each group.
+// It prefers established replicas with insufficient scheduled capacity, established replicas with sufficient
+// scheduled but insufficient available capacity, replicas with scale-out in progress, and then established
+// available replicas. Higher indices are selected first within each group.
 func selectReplicaIndicesForScaleIn(
 	pcs *grovecorev1alpha1.PodCliqueSet,
 	snapshot *replicaResourceSnapshot,
@@ -276,28 +277,30 @@ func selectReplicaIndicesForScaleIn(
 	numExpectedPCSGs := len(pcs.Spec.Template.PodCliqueScalingGroupConfigs)
 
 	var (
-		availableReplicaIndices   []int
-		unavailableReplicaIndices []int
+		insufficientScheduledReplicaIndices []int
+		insufficientAvailableReplicaIndices []int
+		availableReplicaIndices             []int
 	)
 	for replicaIndex := range projectedReplicaIndices {
 		if scaleOutReplicaIndices.Has(replicaIndex) {
 			continue
 		}
-		isReplicaAvailable := componentutils.IsPCSReplicaAvailable(
-			numExpectedStandalonePCLQs,
-			numExpectedPCSGs,
-			snapshot.standalonePCLQsByReplicaIndex[replicaIndex],
-			snapshot.pcsgsByReplicaIndex[replicaIndex],
-		)
-		if isReplicaAvailable {
+		standalonePCLQs := snapshot.standalonePCLQsByReplicaIndex[replicaIndex]
+		pcsgs := snapshot.pcsgsByReplicaIndex[replicaIndex]
+		if componentutils.IsPCSReplicaAvailable(numExpectedStandalonePCLQs, numExpectedPCSGs, standalonePCLQs, pcsgs) {
 			availableReplicaIndices = append(availableReplicaIndices, replicaIndex)
 			continue
 		}
-		unavailableReplicaIndices = append(unavailableReplicaIndices, replicaIndex)
+		if !componentutils.HasSufficientScheduledReplicasForPCSReplica(numExpectedStandalonePCLQs, numExpectedPCSGs, standalonePCLQs, pcsgs) {
+			insufficientScheduledReplicaIndices = append(insufficientScheduledReplicaIndices, replicaIndex)
+			continue
+		}
+		insufficientAvailableReplicaIndices = append(insufficientAvailableReplicaIndices, replicaIndex)
 	}
 
 	orderedReplicaIndices := sortAndCoalesceReplicaIndices(
-		unavailableReplicaIndices,
+		insufficientScheduledReplicaIndices,
+		insufficientAvailableReplicaIndices,
 		scaleOutReplicaIndices.UnsortedList(),
 		availableReplicaIndices,
 	)
@@ -305,13 +308,16 @@ func selectReplicaIndicesForScaleIn(
 }
 
 // sortAndCoalesceReplicaIndices sorts each group from highest to lowest and returns them in scale-in priority order.
-func sortAndCoalesceReplicaIndices(unavailableReplicaIndices, scaleOutReplicaIndices, availableReplicaIndices []int) []int {
-	sortReplicaIndicesDescending(unavailableReplicaIndices)
+func sortAndCoalesceReplicaIndices(insufficientScheduledReplicaIndices, insufficientAvailableReplicaIndices, scaleOutReplicaIndices, availableReplicaIndices []int) []int {
+	sortReplicaIndicesDescending(insufficientScheduledReplicaIndices)
+	sortReplicaIndicesDescending(insufficientAvailableReplicaIndices)
 	sortReplicaIndicesDescending(scaleOutReplicaIndices)
 	sortReplicaIndicesDescending(availableReplicaIndices)
 
-	orderedReplicaIndices := make([]int, 0, len(unavailableReplicaIndices)+len(scaleOutReplicaIndices)+len(availableReplicaIndices))
-	orderedReplicaIndices = append(orderedReplicaIndices, unavailableReplicaIndices...)
+	capacity := len(insufficientScheduledReplicaIndices) + len(insufficientAvailableReplicaIndices) + len(scaleOutReplicaIndices) + len(availableReplicaIndices)
+	orderedReplicaIndices := make([]int, 0, capacity)
+	orderedReplicaIndices = append(orderedReplicaIndices, insufficientScheduledReplicaIndices...)
+	orderedReplicaIndices = append(orderedReplicaIndices, insufficientAvailableReplicaIndices...)
 	orderedReplicaIndices = append(orderedReplicaIndices, scaleOutReplicaIndices...)
 	orderedReplicaIndices = append(orderedReplicaIndices, availableReplicaIndices...)
 
