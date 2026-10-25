@@ -261,10 +261,10 @@ func countUpdatedPCSGs(pcsGenerationHash *string, pcsgs []grovecorev1alpha1.PodC
 }
 
 // computeReplicaStatus determines if a replica is available and updated based on its components.
-func (r *Reconciler) computeReplicaStatus(pcs *grovecorev1alpha1.PodCliqueSet, replicaPCSGs []grovecorev1alpha1.PodCliqueScalingGroup, standalonePCLQs []grovecorev1alpha1.PodClique, expectedPCSGs int, expectedStandalonePCLQs int) (bool, bool) {
-	isAvailable := componentutils.IsPCSReplicaAvailable(expectedStandalonePCLQs, expectedPCSGs, standalonePCLQs, replicaPCSGs)
+func (r *Reconciler) computeReplicaStatus(pcs *grovecorev1alpha1.PodCliqueSet, replicaPCSGs []grovecorev1alpha1.PodCliqueScalingGroup, standalonePCLQs []grovecorev1alpha1.PodClique, expectedPCSGs int, expectedStandalonePCLQs int) (isAvailable, isUpdated bool) {
+	isAvailable = componentutils.IsPCSReplicaAvailable(expectedStandalonePCLQs, expectedPCSGs, standalonePCLQs, replicaPCSGs)
 	if !isAvailable {
-		return false, false
+		return
 	}
 
 	pclqsUpdated := lo.EveryBy(standalonePCLQs, func(pclq grovecorev1alpha1.PodClique) bool {
@@ -275,7 +275,8 @@ func (r *Reconciler) computeReplicaStatus(pcs *grovecorev1alpha1.PodCliqueSet, r
 			pcs.Status.CurrentGenerationHash != nil &&
 			componentutils.IsPCSGUpdateComplete(&pcsg, *pcs.Status.CurrentGenerationHash)
 	})
-	return true, pclqsUpdated && pcsgsUpdated
+	isUpdated = pclqsUpdated && pcsgsUpdated
+	return
 }
 
 func (r *Reconciler) mutateTopologyLevelUnavailableConditions(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
