@@ -243,8 +243,7 @@ func findMaterializedScaleOutReplicaIndices(
 	snapshot *replicaResourceSnapshot,
 ) []int {
 	var materializedReplicaIndices []int
-	for _, replicaIndex := range scaleOutReplicaIndices {
-		pcsReplicaIndex := replicaIndex
+	for _, pcsReplicaIndex := range scaleOutReplicaIndices {
 		expectedPCLQNames := sets.New(componentutils.GetPodCliqueFQNsForPCSReplicaNotInPCSG(pcs, pcsReplicaIndex)...)
 		if !snapshot.standalonePCLQNames(pcsReplicaIndex).IsSuperset(expectedPCLQNames) {
 			continue
@@ -252,7 +251,7 @@ func findMaterializedScaleOutReplicaIndices(
 
 		expectedPCSGNames := sets.New(componentutils.GetPCSGFQNsForPCSReplica(pcs, pcsReplicaIndex)...)
 		if snapshot.pcsgNames(pcsReplicaIndex).IsSuperset(expectedPCSGNames) {
-			materializedReplicaIndices = append(materializedReplicaIndices, replicaIndex)
+			materializedReplicaIndices = append(materializedReplicaIndices, pcsReplicaIndex)
 		}
 	}
 
