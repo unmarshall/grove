@@ -168,13 +168,16 @@ func TestMapPodCliqueSetToPCLQs(t *testing.T) {
 			CliqueNames: []string{"member"},
 		}).
 		WithUpdateProgress(&grovecorev1alpha1.PodCliqueSetUpdateProgress{
-			CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 4}},
+			CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 1}, {ReplicaIndex: 4}},
 		}).
 		Build()
 
 	requests := mapPodCliqueSetToPCLQs()(context.Background(), pcs)
 
-	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-pcs-4-worker"}}}, requests)
+	assert.Equal(t, []reconcile.Request{
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-pcs-1-worker"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-pcs-4-worker"}},
+	}, requests)
 }
 
 // TestPodCliqueSetPredicateSelectedReplicaChanges verifies that the PodCliqueSet watch predicate
@@ -211,6 +214,16 @@ func TestPodCliqueSetPredicateSelectedReplicaChanges(t *testing.T) {
 			},
 			newProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
 				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 1}},
+			},
+			want: true,
+		},
+		{
+			name: "currently updating adds a replica",
+			oldProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
+				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 0}},
+			},
+			newProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
+				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{{ReplicaIndex: 0}, {ReplicaIndex: 2}},
 			},
 			want: true,
 		},
