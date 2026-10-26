@@ -249,7 +249,7 @@ webhooks:
     annotations: {}
 
 webhookServerSecret:
-  # enabled controls whether Helm renders the empty webhook TLS Secret.
+  # enabled controls whether Helm renders the webhook TLS Secret.
   # Set to false when deploying via `helm template | kubectl apply` or GitOps tools
   # (ArgoCD, FluxCD), where the empty secret in the template overwrites auto-generated
   # certificates on every apply. The operator will create the secret itself if missing.
