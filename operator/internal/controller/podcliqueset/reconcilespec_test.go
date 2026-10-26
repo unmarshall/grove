@@ -377,9 +377,10 @@ func TestGetKindSyncGroups(t *testing.T) {
 // TestInitOrResetUpdate tests the initOrResetUpdate function for both OnDelete and RollingRecreate strategies
 func TestInitOrResetUpdate(t *testing.T) {
 	tests := []struct {
-		name                   string
-		setupPCS               func() *grovecorev1alpha1.PodCliqueSet
-		expectUpdateEndedAtSet bool
+		name                           string
+		setupPCS                       func() *grovecorev1alpha1.PodCliqueSet
+		expectUpdateEndedAtSet         bool
+		expectedCurrentlyUpdatingIndex *int32
 	}{
 		{
 			name: "rolling_recreate_strategy_does_not_set_update_ended_at",
@@ -456,7 +457,8 @@ func TestInitOrResetUpdate(t *testing.T) {
 				pcs.Status.UpdatedReplicas = 2
 				return pcs
 			},
-			expectUpdateEndedAtSet: false,
+			expectUpdateEndedAtSet:         false,
+			expectedCurrentlyUpdatingIndex: ptr.To[int32](1),
 		},
 		{
 			name: "existing_on_delete_update_is_reset_when_hash_changes",
@@ -512,6 +514,8 @@ func TestInitOrResetUpdate(t *testing.T) {
 			require.NotNil(t, updatedPCS.Status.UpdateProgress, "UpdateProgress should be set")
 			assert.NotEmpty(t, updatedPCS.Status.UpdateProgress.UpdateStartedAt, "UpdateStartedAt should be set")
 			assert.Equal(t, targetSchedulingConfigurationHash, updatedPCS.Status.UpdateProgress.TargetSchedulingConfigurationHash)
+			require.NotNil(t, updatedPCS.Status.UpdateProgress.SupersededGenerationHash)
+			assert.Equal(t, "old-hash", *updatedPCS.Status.UpdateProgress.SupersededGenerationHash)
 
 			// Verify UpdateEndedAt based on strategy
 			if tt.expectUpdateEndedAtSet {
@@ -522,13 +526,47 @@ func TestInitOrResetUpdate(t *testing.T) {
 
 			assert.Equal(t, int32(0), updatedPCS.Status.UpdateProgress.UpdatedPodCliqueScalingGroupsCount, "UpdatedPodCliqueScalingGroupsCount should be reset to 0")
 			assert.Equal(t, int32(0), updatedPCS.Status.UpdateProgress.UpdatedPodCliquesCount, "UpdatedPodCliquesCount should be reset to 0")
-			// Currently updating is not set by the initOrResetUpdate function
-			assert.Nil(t, updatedPCS.Status.UpdateProgress.CurrentlyUpdating, "CurrentlyUpdating should be nil")
+			if tt.expectedCurrentlyUpdatingIndex == nil {
+				assert.Nil(t, updatedPCS.Status.UpdateProgress.CurrentlyUpdating)
+			} else {
+				require.Len(t, updatedPCS.Status.UpdateProgress.CurrentlyUpdating, 1)
+				assert.Equal(t, *tt.expectedCurrentlyUpdatingIndex, updatedPCS.Status.UpdateProgress.CurrentlyUpdating[0].ReplicaIndex)
+				assert.Equal(t, updatedPCS.Status.UpdateProgress.UpdateStartedAt, updatedPCS.Status.UpdateProgress.CurrentlyUpdating[0].UpdateStartedAt)
+				assert.Nil(t, updatedPCS.Status.UpdateProgress.CurrentlyUpdating[0].UpdateEndedAt)
+			}
 			assert.Equal(t, int32(0), updatedPCS.Status.UpdatedReplicas, "UpdatedReplicas should be reset to 0")
 			require.NotNil(t, updatedPCS.Status.CurrentGenerationHash)
 			assert.Equal(t, newGenerationHash, *updatedPCS.Status.CurrentGenerationHash)
 		})
 	}
+}
+
+func TestCarryCurrentlyUpdatingReplicaProgress(t *testing.T) {
+	updateStartedAt := metav1.Now()
+	completedAt := metav1.Now()
+	pcs := &grovecorev1alpha1.PodCliqueSet{
+		Status: grovecorev1alpha1.PodCliqueSetStatus{
+			UpdateProgress: &grovecorev1alpha1.PodCliqueSetUpdateProgress{
+				CurrentlyUpdating: []grovecorev1alpha1.PodCliqueSetReplicaUpdateProgress{
+					{ReplicaIndex: 3},
+					{ReplicaIndex: 1},
+					{ReplicaIndex: 3},
+					{ReplicaIndex: 2, UpdateEndedAt: &completedAt},
+				},
+			},
+			ScalingProgress: &grovecorev1alpha1.PodCliqueSetScalingProgress{
+				ScaleInReplicaIndices: []int32{1},
+			},
+		},
+	}
+
+	got := carryCurrentlyUpdatingReplicaProgress(pcs, updateStartedAt)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, int32(3), got[0].ReplicaIndex)
+	assert.Equal(t, updateStartedAt, got[0].UpdateStartedAt)
+	assert.Nil(t, got[0].UpdateEndedAt)
+	assert.Nil(t, carryCurrentlyUpdatingReplicaProgress(&grovecorev1alpha1.PodCliqueSet{}, updateStartedAt))
 }
 
 // TestPCSGenerationHashKey verifies the generation-hash expectation key includes the PCS UID so two
