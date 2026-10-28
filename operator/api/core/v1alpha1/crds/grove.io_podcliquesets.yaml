@@ -11380,14 +11380,20 @@ spec:
                     items:
                       type: string
                     type: array
+                  requiresReplicaRecreation:
+                    description: |-
+                      RequiresReplicaRecreation indicates that this update must rebuild each selected PodCliqueSet replica's
+                      scheduling structure. Grove retains the standalone PodClique and PodCliqueScalingGroup resources while
+                      recreating standalone PodClique Pods, PodCliqueScalingGroup-owned PodCliques, the PodGangMap, and PodGangs.
+                      Grove sets this field when scheduling configuration changes and preserves it across superseding updates
+                      until recreation completes.
+                    type: boolean
                   supersededGenerationHash:
                     description: |-
-                      SupersededGenerationHash identifies the PodCliqueSet generation that was
-                      current immediately before this update was initialized or reset. Comparing
-                      each expected PodClique and PodCliqueScalingGroup status'
-                      CurrentPodCliqueSetGenerationHash with this hash distinguishes PCS replicas
-                      that fully realized the superseded generation from replicas that were still
-                      pending when the new generation was recorded.
+                      SupersededGenerationHash identifies the PodCliqueSet generation that was current immediately before this update was
+                      initialized or reset. Comparing each expected PodClique and PodCliqueScalingGroup status'
+                      CurrentPodCliqueSetGenerationHash with this hash distinguishes PCS replicas that fully realized the superseded
+                      generation from replicas that were still pending when the new generation was recorded.
                     type: string
                   targetSchedulingConfigurationHash:
                     description: |-
